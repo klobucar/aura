@@ -1,0 +1,21 @@
+# Aura Server Configuration
+# This file can be customized or will use defaults if missing
+
+[server]
+bind_address = "0.0.0.0:8443"
+max_connections = 1000
+log_level = "info"
+
+# Optional: Require this password to connect to the server
+# Leave commented out for an open server
+# password = "your-secret-here"
+
+[database]
+path = "aura.db"
+
+[verification]
+# Verification mode determines who can join voice channels:
+# - "none"     = No verification required (anyone can join)
+# - "optional" = Users can be verified by admins (cosmetic badge only)
+# - "required" = Only verified users can join voice channels
+mode = "optional"

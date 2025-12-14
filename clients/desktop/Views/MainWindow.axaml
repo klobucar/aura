@@ -1,0 +1,278 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Aura.Desktop.ViewModels"
+        xmlns:converters="using:Aura.Desktop.Converters"
+        x:Class="Aura.Desktop.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="Aura"
+        Width="950" Height="650"
+        MinWidth="700" MinHeight="500"
+        WindowStartupLocation="CenterScreen"
+        Background="#1E1E2E">
+    
+    <Window.Resources>
+        <converters:BoolToColorConverter x:Key="BoolToColorConverter"/>
+    </Window.Resources>
+    
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Grid ColumnDefinitions="280,*">
+        
+        <!-- LEFT SIDEBAR: Connection + Channels -->
+        <Border Grid.Column="0" 
+                Background="#181825" 
+                BorderBrush="#313244" 
+                BorderThickness="0,0,1,0">
+            <Grid RowDefinitions="Auto,Auto,*,Auto">
+                
+                <!-- Header -->
+                <Border Grid.Row="0" Height="50" Background="#11111B">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0">
+                        <TextBlock Text="🔊" FontSize="20" Margin="0,0,10,0"/>
+                        <TextBlock Text="Aura" 
+                                   FontSize="18" 
+                                   FontWeight="Bold" 
+                                   Foreground="#CDD6F4"/>
+                    </StackPanel>
+                </Border>
+                
+                <!-- Connection Panel -->
+                <Border Grid.Row="1" Background="#1E1E2E" Padding="15" Margin="0,0,0,1">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="Connection" FontSize="12" FontWeight="Bold" Foreground="#6C7086" Margin="0,0,0,5"/>
+                        
+                        <!-- Server Address -->
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding ServerAddress}"
+                                     Watermark="Server Address"
+                                     Background="#313244"
+                                     Foreground="#CDD6F4"
+                                     BorderThickness="0"
+                                     CornerRadius="8"
+                                     Padding="12,10"/>
+                            <TextBox Grid.Column="1"
+                                     Text="{Binding ServerPort}"
+                                     Watermark="Port"
+                                     Width="70"
+                                     Margin="8,0,0,0"
+                                     Background="#313244"
+                                     Foreground="#CDD6F4"
+                                     BorderThickness="0"
+                                     CornerRadius="8"
+                                     Padding="12,10"/>
+                        </Grid>
+                        
+                        <!-- Server Password -->
+                        <TextBox Text="{Binding ServerPassword}"
+                                 Watermark="Password (optional)"
+                                 PasswordChar="•"
+                                 Background="#313244"
+                                 Foreground="#CDD6F4"
+                                 BorderThickness="0"
+                                 CornerRadius="8"
+                                 Padding="12,10"/>
+                        
+                        <!-- Display Name -->
+                        <TextBox Text="{Binding DisplayName}"
+                                 Watermark="Display Name"
+                                 Background="#313244"
+                                 Foreground="#CDD6F4"
+                                 BorderThickness="0"
+                                 CornerRadius="8"
+                                 Padding="12,10"/>
+                        
+                        <!-- Connect/Disconnect Button -->
+                        <Button Command="{Binding ConnectCommand}"
+                                IsVisible="{Binding !IsConnected}"
+                                Background="#89B4FA"
+                                Foreground="#1E1E2E"
+                                FontWeight="Bold"
+                                CornerRadius="8"
+                                Padding="15,10"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center">
+                            <TextBlock Text="Connect"/>
+                        </Button>
+                        
+                        <Button Command="{Binding DisconnectCommand}"
+                                IsVisible="{Binding IsConnected}"
+                                Background="#F38BA8"
+                                Foreground="#1E1E2E"
+                                FontWeight="Bold"
+                                CornerRadius="8"
+                                Padding="15,10"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center">
+                            <TextBlock Text="Disconnect"/>
+                        </Button>
+                        
+                        <!-- Status -->
+                        <TextBlock Text="{Binding ConnectionStatus}" 
+                                   FontSize="11" 
+                                   Foreground="#6C7086"
+                                   TextWrapping="Wrap"/>
+                        
+                        <!-- Public Key (if loaded) -->
+                        <TextBlock Text="{Binding PublicKeyDisplay}" 
+                                   FontSize="10" 
+                                   Foreground="#45475A"
+                                   IsVisible="{Binding PublicKeyDisplay, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                    </StackPanel>
+                </Border>
+                
+                <!-- Channel List -->
+                <ScrollViewer Grid.Row="2" Padding="10">
+                    <StackPanel Spacing="5">
+                        <TextBlock Text="CHANNELS" FontSize="11" FontWeight="Bold" Foreground="#6C7086" Margin="5,5,0,10"/>
+                        
+                        <ItemsControl ItemsSource="{Binding Channels}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:Channel">
+                                    <StackPanel Margin="0,0,0,5">
+                                        <!-- Channel Header -->
+                                        <Button Background="Transparent" 
+                                                BorderThickness="0"
+                                                HorizontalContentAlignment="Left"
+                                                Padding="8,10"
+                                                Cursor="Hand"
+                                                CornerRadius="6"
+                                                Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).JoinChannelCommand}"
+                                                CommandParameter="{Binding}">
+                                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                                <TextBlock Text="🔊" FontSize="14"/>
+                                                <TextBlock Text="{Binding Name}" 
+                                                           FontSize="14" 
+                                                           Foreground="#CDD6F4"/>
+                                            </StackPanel>
+                                        </Button>
+                                        
+                                        <!-- Users in Channel -->
+                                        <ItemsControl ItemsSource="{Binding Users}"
+                                                      IsVisible="{Binding IsExpanded}"
+                                                      Margin="30,0,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:User">
+                                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4">
+                                                        <Ellipse Width="8" Height="8">
+                                                            <Ellipse.Fill>
+                                                                <SolidColorBrush Color="{Binding IsMuted, Converter={StaticResource BoolToColorConverter}}"/>
+                                                            </Ellipse.Fill>
+                                                        </Ellipse>
+                                                        <TextBlock Text="{Binding Name}" 
+                                                                   FontSize="13"
+                                                                   Foreground="#A6ADC8"/>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </ScrollViewer>
+                
+                <!-- Voice Controls -->
+                <Border Grid.Row="3" Background="#11111B" Padding="15">
+                    <StackPanel Spacing="10">
+                        <ToggleButton IsChecked="{Binding IsMicEnabled}"
+                                      Command="{Binding ToggleMicrophoneCommand}"
+                                      Background="#313244"
+                                      Foreground="#CDD6F4"
+                                      CornerRadius="8"
+                                      Padding="15,10"
+                                      HorizontalAlignment="Stretch"
+                                      HorizontalContentAlignment="Center"
+                                      IsEnabled="{Binding IsAuthenticated}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="🎤"/>
+                                <TextBlock Text="Microphone"/>
+                            </StackPanel>
+                        </ToggleButton>
+                        
+                        <TextBlock Text="{Binding AudioStats}" 
+                                   FontSize="10" 
+                                   Foreground="#6C7086"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+        
+        <!-- MAIN CONTENT: Chat Area -->
+        <Grid Grid.Column="1" RowDefinitions="*,Auto" Background="#1E1E2E">
+            
+            <!-- Messages Area -->
+            <ScrollViewer Grid.Row="0" 
+                          Padding="20"
+                          HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding Messages}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ChatMessage">
+                            <Border Margin="0,5"
+                                    HorizontalAlignment="Left"
+                                    Background="#45475A"
+                                    CornerRadius="16"
+                                    Padding="14,10"
+                                    MaxWidth="500">
+                                <StackPanel>
+                                    <TextBlock Text="{Binding UserName}"
+                                               FontWeight="Bold"
+                                               FontSize="11"
+                                               Foreground="#A6ADC8"
+                                               IsVisible="{Binding !IsFromCurrentUser}"
+                                               Margin="0,0,0,4"/>
+                                    <TextBlock Text="{Binding Content}"
+                                               Foreground="#CDD6F4"
+                                               TextWrapping="Wrap"
+                                               FontSize="14"/>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+            
+            <!-- Message Input Bar -->
+            <Border Grid.Row="1" 
+                    Background="#181825"
+                    BorderBrush="#313244"
+                    BorderThickness="0,1,0,0"
+                    Padding="15">
+                <Grid ColumnDefinitions="*,Auto">
+                    <Border Grid.Column="0" 
+                            Background="#313244" 
+                            CornerRadius="20"
+                            Padding="15,0">
+                        <TextBox Text="{Binding MessageInput}"
+                                 Watermark="Message..."
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Foreground="#CDD6F4"
+                                 FontSize="14"
+                                 VerticalAlignment="Center"/>
+                    </Border>
+                    
+                    <Button Grid.Column="1" 
+                            Command="{Binding SendMessageCommand}"
+                            Background="#89B4FA"
+                            Width="40" Height="40"
+                            CornerRadius="20"
+                            Margin="10,0,0,0"
+                            Padding="0"
+                            HorizontalContentAlignment="Center"
+                            VerticalContentAlignment="Center">
+                        <TextBlock Text="↑" 
+                                   Foreground="#1E1E2E" 
+                                   FontSize="18"
+                                   FontWeight="Bold"/>
+                    </Button>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

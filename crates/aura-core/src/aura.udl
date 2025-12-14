@@ -1,0 +1,117 @@
+// UniFFI Interface Definition for Aura Core
+// This defines the cross-language API exposed to Swift and C# clients.
+
+namespace aura_core {
+    
+};
+
+// =============================================================================
+// AuraClient - Main Entry Point
+// =============================================================================
+// The primary interface for connecting to an Aura server.
+// Handles MLS group management, audio streaming, and text chat.
+
+interface AuraClient {
+    // Constructor: Initialize with server URL and identity file path
+    constructor(string url, string identity_file);
+    
+    // --- Connection Management ---
+    
+    // Connect to the Aura server with authentication token
+    // This initiates the QUIC connection and MLS handshake
+    [Throws=AuraError]
+    void connect(string url, string token);
+    
+    // Disconnect from the server gracefully
+    void disconnect();
+    
+    // --- Channel Operations ---
+    
+    // Join a voice/text channel (creates dual MLS groups)
+    void join_channel(string channel_id);
+    
+    // Leave the current channel
+    void leave_channel();
+    
+    // --- Audio ---
+    
+    // Set 3D spatial position for positional audio
+    void set_position(float x, float y, float z);
+    
+    // Send an audio frame (PCM f32 samples)
+    // Internally: Opus encode -> XChaCha20 encrypt -> QUIC datagram
+    void send_audio_frame(sequence<float> pcm_data);
+    
+    // --- Text Chat ---
+    
+    // Send a text message to the current channel
+    void send_text_message(string message);
+    
+    // --- Profile ---
+    
+    // Set the delegate for receiving async events
+    void set_delegate(AuraDelegate delegate);
+    
+    // Update own profile comment/bio
+    void set_comment(string text);
+};
+
+// =============================================================================
+// AuraDelegate - Callback Interface
+// =============================================================================
+// Implemented by the UI layer (Swift/C#) to receive async events from Rust.
+// All callbacks are invoked on a background thread - UI must dispatch.
+
+callback interface AuraDelegate {
+    // --- Connection Events ---
+    
+    // Called when successfully connected to server
+    void on_connected();
+    
+    // Called when disconnected (with reason)
+    void on_disconnected(string reason);
+    
+    // Called on connection/protocol errors
+    void on_error(string error);
+    
+    // --- User Events ---
+    
+    // User joined the current channel
+    void on_user_joined(u32 user_id, string name);
+    
+    // User left the current channel
+    void on_user_left(u32 user_id);
+    
+    // User's position updated (for spatial audio)
+    void on_user_moved(u32 user_id, float x, float y, float z);
+    
+    // User's profile comment updated
+    void on_user_comment(u32 user_id, string text);
+    
+    // --- Audio Events ---
+    
+    // Received decoded audio from a user (Opus decoded to PCM)
+    void on_audio_packet(u32 user_id, sequence<u8> opus_data);
+    
+    // --- Text Events ---
+    
+    // Received text message in current channel
+    void on_text_message(string msg);
+    
+    // Received text message with sender info
+    void on_channel_message(u32 user_id, string message);
+};
+
+// =============================================================================
+// Error Types
+// =============================================================================
+
+[Error]
+enum AuraError {
+    "ConnectionFailed",
+    "AuthenticationFailed", 
+    "MlsError",
+    "ChannelNotFound",
+    "NotConnected",
+    "EncryptionError",
+};

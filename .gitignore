@@ -1,0 +1,57 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# macOS / Xcode
+.DS_Store
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+
+# .NET / C#
+bin/
+obj/
+*.user
+*.suo
+*.cache
+.vs/
+
+# Generated Bindings
+clients/macos/Aura/Generated/
+clients/desktop/Generated/
+
+# Database & Runtime
+*.db
+*.db-shm
+*.db-wal
+aura.db*
+
+# TLS Certificates (generated)
+*.pem
+*.crt
+*.key
+!docs/examples/*.pem
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS Files
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+
+# Test artifacts
+coverage/
+*.profdata

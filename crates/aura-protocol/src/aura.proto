@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package aura;
+
+// The user's position in 3D space.
+message Position {
+    float x = 1;
+    float y = 2;
+    float z = 3;
+}
+
+// The cleartext header visible to the server.
+message Header {
+    uint32 user_id = 1;
+    uint64 sequence = 2;
+    Position position = 3;
+}
+
+// The opaque payload containing encrypted audio.
+message AudioPacket {
+    Header header = 1;
+    bytes ciphertext = 2;
+}
+
+enum UserMode {
+    SPEAKER = 0;
+    LISTENER = 1;
+}
+
+enum SignalType {
+    OFFER = 0;
+    ANSWER = 1;
+    ICE_CANDIDATE = 2;
+    MLS_WELCOME = 3;
+    MLS_COMMIT = 4;
+}
+
+message Identify {
+    uint32 user_id = 1;
+}
+
+message JoinChannel {
+    uint64 channel_id = 1;
+    UserMode mode = 2;
+}
+
+message StateUpdate {
+    bool is_muted = 1;
+    bool is_deafened = 2;
+    bool is_speaking = 3;
+}
+
+message Signal {
+    // If 0 or missing, implies broadcast/multicast (protobuf defaults)
+    // but better to be explicit or use oneof. 
+    // We'll use 0 as "no target" (broadcast) since user_ids are likely 1-indexed or strict u32.
+    // Or we can use `oneof target { uint32 user_id = 1; }` to make it optional.
+    uint32 target_user_id = 1; 
+    SignalType kind = 2;
+    bytes payload = 3;
+}
+
+message ControlMessage {
+    oneof content {
+        Identify identify = 1;
+        JoinChannel join_channel = 2;
+        bool leave_channel = 3; // Empty message, using bool as placeholder or just empty struct
+        StateUpdate state_update = 4;
+        Signal signal = 5;
+    }
+}
+
+// ============================================================================
+// Dual MLS Group Architecture
+// Voice and Text are separate to prevent epoch churn interference.
+// ============================================================================
+
+// MLS Group Types
+// VOICE: Low churn - epoch advances only on join/leave/hourly PFS ratchet
+// TEXT:  High churn - epoch can advance per message batch
+enum MlsGroupType {
+    VOICE = 0;
+    TEXT = 1;
+}
+
+// Information about an MLS group (Voice or Text channel)
+message MlsGroupInfo {
+    uint64 group_id = 1;
+    MlsGroupType group_type = 2;
+    uint64 current_epoch = 3;
+}
+
+// Request to join both Voice and Text groups for a channel
+message JoinChannelGroups {
+    uint64 channel_id = 1;
+    UserMode mode = 2;
+}
+
+// Response with both group welcomes
+message ChannelGroupsWelcome {
+    uint64 channel_id = 1;
+    bytes voice_welcome = 2;  // MLS Welcome for voice group
+    bytes text_welcome = 3;   // MLS Welcome for text group
+}
+
+// ============================================================================
+// Profile Metadata - Signed but Plaintext
+// Server can index/search profiles, but cannot forge them.
+// ============================================================================
+
+// User profile - signed but intentionally plaintext for server searchability
+message UserProfile {
+    uint32 user_id = 1;
+    string display_name = 2;
+    string bio = 3;
+    string avatar_url = 4;
+    bytes signature = 5;      // Ed25519 signature over serialized fields 1-4
+    bytes signing_key = 6;    // User's Ed25519 public key for verification
+}
+
+// Request to update own profile
+message UpdateProfile {
+    UserProfile profile = 1;
+}
+
+// Request to fetch a user's profile
+message GetProfile {
+    uint32 user_id = 1;
+}
+
+// ============================================================================
+// Authentication - TOFU (Trust On First Use) with Ed25519
+// ============================================================================
+
+// Authentication request from client
+message AuthRequest {
+    bytes ed25519_public_key = 1;   // 32 bytes - user's public key
+    string display_name = 2;        // Desired username (TOFU - first come first served)
+    bytes signature = 3;            // Ed25519 signature over the challenge
+    optional string server_password = 4;  // If server requires password
+    bytes challenge = 5;            // The challenge bytes that were signed
+}
+
+// Authentication response from server
+message AuthResponse {
+    bool success = 1;
+    uint32 user_id = 2;
+    string session_token = 3;
+    bool verified = 4;              // Whether user is admin-verified
+    string error_message = 5;       // Error reason: "username_taken", "invalid_password", etc.
+}
+
+// Challenge request - client asks server for a random challenge to sign
+message ChallengeRequest {
+    bytes ed25519_public_key = 1;   // Client's public key
+}
+
+// Challenge response - server provides challenge bytes
+message ChallengeResponse {
+    bytes challenge = 1;            // Random 32 bytes to sign
+}
+
+// ============================================================================
+// Admin Operations
+// ============================================================================
+
+// Request to verify a user (admin only)
+message VerifyUserRequest {
+    string session_token = 1;       // Admin's session token
+    uint32 target_user_id = 2;      // User to verify
+}
+
+// Request to ban/unban a user (admin only)
+message BanUserRequest {
+    string session_token = 1;       // Admin's session token
+    uint32 target_user_id = 2;      // User to ban/unban
+    bool banned = 3;                // true = ban, false = unban
+    string reason = 4;              // Reason for ban
+}
+
+// Request to grant admin privileges (admin only)
+message GrantAdminRequest {
+    string session_token = 1;       // Granting admin's session token
+    uint32 target_user_id = 2;      // User to promote
+    bool verify_users = 3;          // Permission to verify users
+    bool ban_users = 4;             // Permission to ban users
+    bool grant_admin = 5;           // Permission to grant admin to others
+}
+
+// Generic admin operation response
+message AdminResponse {
+    bool success = 1;
+    string error_message = 2;
+}
+
+// List users request (admin only)
+message ListUsersRequest {
+    string session_token = 1;
+    uint32 offset = 2;
+    uint32 limit = 3;
+}
+
+// User info in list response
+message UserInfo {
+    uint32 user_id = 1;
+    string display_name = 2;
+    bool verified = 3;
+    bool banned = 4;
+    bool is_admin = 5;
+    int64 created_at = 6;
+}
+
+// List users response
+message ListUsersResponse {
+    repeated UserInfo users = 1;
+    uint32 total_count = 2;
+}

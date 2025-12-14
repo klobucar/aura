@@ -1,0 +1,6 @@
+{
+  "configProperties": {
+    "System.Net.SocketsHttpHandler.Http3Support": true,
+    "System.Runtime.InteropServices.EnableConsumingManagedCodeFromNativeHosting": true
+  }
+}
