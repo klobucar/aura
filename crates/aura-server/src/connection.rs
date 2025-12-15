@@ -2,12 +2,10 @@
 //!
 //! Handles incoming QUIC connections, authentication, and stream routing.
 
-use crate::auth::{AuthError, AuthService};
-use crate::config::Config;
-use crate::db::Database;
-use crate::state::ServerState;
+use crate::auth::AuthService;
+use crate::state::{ServerState, ServiceMessage};
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
@@ -115,138 +113,112 @@ impl QuicServer {
 }
 
 /// Handle a single QUIC connection.
-async fn handle_connection(connection: Connection, state: Arc<ServerState>) -> Result<()> {
-    let remote = connection.remote_address();
-    
-    // For Apple Network.framework compatibility, the server opens the bidirectional stream
-    // Apple's NWConnection creates an implicit stream that Quinn doesn't recognize via accept_bi()
-    info!("[{}] Opening bidirectional stream for auth...", remote);
-    let (send, recv) = connection.open_bi().await.map_err(|e| anyhow!("Failed to open stream: {}", e))?;
-    info!("[{}] Bidirectional stream opened, starting authentication", remote);
-    
-    // Authenticate the client - get back the streams for reuse
-    let (session, mut control_send, mut control_recv) = match authenticate_client(send, recv, &state).await {
-        Ok(result) => result,
-        Err(e) => {
-            warn!("Authentication failed from {}: {}", remote, e);
-            return Err(e.into());
-        }
-    };
-    
-    let session_id = session.session_id;
-    let user_id = session.user_id;
-    info!("Client {} authenticated as user {} (session {})", remote, user_id, session_id);
-    
-    // Handle additional streams and datagrams
-    loop {
-        tokio::select! {
-            // Monitor control stream for messages or disconnection
-            control_msg = control_recv.read_u8() => {
-                match control_msg {
-                    Ok(msg_type) => {
-                        // Handle control messages (join channel, audio, etc.)
-                        match msg_type {
-                            0x10 => { // MSG_JOIN_CHANNEL
-                                let mut buf = [0u8; 4];
-                                if control_recv.read_exact(&mut buf).await.is_ok() {
-                                    let channel_id = u32::from_le_bytes(buf);
-                                    info!("[{}] User {} joining channel {}", remote, user_id, channel_id);
-                                }
-                            }
-                            0x20 => { // MSG_AUDIO
-                                // Format: session_id(4) + seq(2) + payload_len(2) + payload
-                                let mut header = [0u8; 8];
-                                if control_recv.read_exact(&mut header).await.is_ok() {
-                                    let session_id = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-                                    let seq = u16::from_le_bytes([header[4], header[5]]);
-                                    let payload_len = u16::from_le_bytes([header[6], header[7]]) as usize;
-                                    
-                                    // Read payload
-                                    let mut payload = vec![0u8; payload_len];
-                                    if control_recv.read_exact(&mut payload).await.is_ok() {
-                                        if seq % 50 == 0 {
-                                            info!("[{}] Received audio: session={}, seq={}, {} bytes", 
-                                                  remote, session_id, seq, payload_len);
+
+async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<()> {
+        let remote = conn.remote_address();
+        info!("[{}] Connection established", remote);
+
+        // Open control stream (reliable, bidirectional) - Server initiates for Apple compat
+        let (control_send_initial, control_recv_initial) = conn.open_bi().await
+            .map_err(|e| anyhow!("Failed to open control stream: {}", e))?;
+
+        info!("[{}] Control stream opened", remote);
+
+        // Authenticate the client - get back the streams for reuse
+        let (auth_session, mut control_send, mut control_recv) = match authenticate_client(control_send_initial, control_recv_initial, &state).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("[{}] Authentication failed: {}", remote, e);
+                return Err(e.into());
+            }
+        };
+
+        // Create internal channel for this session
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let user_id = auth_session.user_id;
+
+        // Register session with state
+        let final_session_id = state.register_session(user_id, remote, tx);
+        // Note: Authentication might have allocated a temp session ID or none.
+        // Simplified flow: We authenticate first, then register.
+        
+        info!("[{}] Session {} registered", remote, final_session_id);
+
+        let mut buf = [0u8; 1024];
+
+        // Main loop - handle streams, datagrams, and internal messages
+        loop {
+            tokio::select! {
+                // Monitor control stream
+                control_msg = control_recv.read_u8() => {
+                    match control_msg {
+                        Ok(msg_type) => {
+                             match msg_type {
+                                0x10 => { // MSG_JOIN_CHANNEL
+                                    let mut buf = [0u8; 4];
+                                    if control_recv.read_exact(&mut buf).await.is_ok() {
+                                        let channel_id = u32::from_le_bytes(buf);
+                                        state.create_channel(channel_id); // Ensure exists
+                                        
+                                        // Update session
+                                        if let Some(mut sess) = state.sessions.get_mut(&final_session_id) {
+                                            sess.voice_group_id = Some(channel_id);
+                                            sess.text_group_id = Some(channel_id);
+                                            
+                                            // Add to voice group
+                                            if let Some(vg) = state.voice_groups.get(&channel_id) {
+                                                vg.value().write().await.members.insert(final_session_id);
+                                            }
                                         }
-                                        // TODO: Route to other clients
+                                        info!("[{}] User {} joined channel {}", remote, user_id, channel_id);
                                     }
                                 }
-                            }
-                            _ => {
-                                info!("[{}] Unknown control message: 0x{:02x}", remote, msg_type);
+                                0x20 => { // MSG_AUDIO
+                                    // Format: [20] [Length u32] [Payload...]
+                                    let mut len_buf = [0u8; 4];
+                                    if control_recv.read_exact(&mut len_buf).await.is_ok() {
+                                        let packet_len = u32::from_le_bytes(len_buf) as usize;
+                                        
+                                        // Read payload
+                                        let mut packet_buf = vec![0u8; packet_len];
+                                        if control_recv.read_exact(&mut packet_buf).await.is_ok() {
+                                            state.route_audio_packet(bytes::Bytes::from(packet_buf));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                     // Unknown
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        info!("Client {} control stream disconnected: {}", remote, e);
-                        break;
+                        Err(_) => break, // Disconnected
                     }
                 }
-            }
-
-            // Receive QUIC datagrams (unreliable audio packets)
-            datagram = connection.read_datagram() => {
-                match datagram {
-                    Ok(data) => {
-                        // Route audio datagram to other clients
-                        info!("[{}] Received audio datagram: {} bytes", remote, data.len());
-                        state.route_audio_packet(data);
-                    }
-                    Err(e) => {
-                        // Datagram receive error - connection may be closing
-                        info!("Client {} datagram error: {}", remote, e);
-                        break;
-                    }
-                }
-            }
-            
-            // Accept bidirectional streams (control messages)
-            result = connection.accept_bi() => {
-                match result {
-                    Ok((send, recv)) => {
-                        let state = Arc::clone(&state);
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_control_stream(send, recv, session_id, &state).await {
-                                warn!("Control stream error: {}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        info!("Client {} disconnected: {}", remote, e);
-                        break;
-                    }
-                }
-            }
-            
-            // Accept unidirectional streams (fallback audio data)
-            result = connection.accept_uni() => {
-                match result {
-                    Ok(recv) => {
-                        let state = Arc::clone(&state);
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_audio_stream(recv, session_id, &state).await {
-                                warn!("Audio stream error: {}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        info!("Client {} disconnected: {}", remote, e);
-                        break;
+                
+                // Monitor internal messages (relay)
+                Some(msg) = rx.recv() => {
+                    match msg {
+                        ServiceMessage::RelayAudio(packet) => {
+                             // Send via control stream (0x20 + Packet)
+                             let _ = control_send.write_u8(MSG_AUDIO_STREAM).await;
+                             let _ = control_send.write_all(&packet).await;
+                             let _ = control_send.flush().await;
+                        }
                     }
                 }
             }
         }
+
+        // Cleanup
+        state.remove_session(final_session_id);
+        info!("[{}] Session {} disconnected", remote, final_session_id);
+        Ok(())
     }
-    
-    // Cleanup session
-    state.remove_session(session_id);
-    info!("Session {} cleaned up", session_id);
-    
-    Ok(())
-}
+
 
 /// Client session after authentication.
-struct ClientSession {
+/// Client session after authentication.
+struct AuthSession {
     session_id: u32,
     user_id: u32,
     session_token: String,
@@ -262,7 +234,7 @@ async fn authenticate_client(
     mut send: SendStream,
     mut recv: RecvStream,
     state: &ServerState,
-) -> Result<(ClientSession, SendStream, RecvStream)> {
+) -> Result<(AuthSession, SendStream, RecvStream)> {
     // Step 1: Server sends challenge first (ServerHello)
     let challenge = AuthService::generate_challenge();
     info!("[Auth] Sending ServerHello with challenge: {}...", hex::encode(&challenge[..8]));
@@ -352,10 +324,9 @@ async fn authenticate_client(
             
             send.write_all(&response).await?;
             
-            // Register session
-            let session_id = state.register_session(result.user_id, "127.0.0.1:0".parse()?);
+            let session_id = result.user_id;
             
-            Ok((ClientSession {
+            Ok((AuthSession {
                 session_id,
                 user_id: result.user_id,
                 session_token: result.session_token,
@@ -378,75 +349,4 @@ async fn authenticate_client(
     }
 }
 
-/// Handle control stream messages (join channel, etc.)
-async fn handle_control_stream(
-    mut send: SendStream,
-    mut recv: RecvStream,
-    session_id: u32,
-    state: &ServerState,
-) -> Result<()> {
-    loop {
-        let msg_type = match recv.read_u8().await {
-            Ok(t) => t,
-            Err(_) => break, // Stream closed
-        };
-        
-        match msg_type {
-            MSG_JOIN_CHANNEL => {
-                let channel_id = recv.read_u32_le().await?;
-                info!("Session {} joining channel {}", session_id, channel_id);
-                
-                // Update session's channel
-                if let Some(mut session) = state.sessions.get_mut(&session_id) {
-                    session.voice_group_id = Some(channel_id);
-                    session.text_group_id = Some(channel_id);
-                }
-                
-                // Send success response
-                send.write_all(&[0x11, 0x01]).await?; // JoinChannelResponse, success
-            }
-            _ => {
-                warn!("Unknown control message type: {}", msg_type);
-            }
-        }
-    }
-    
-    Ok(())
-}
 
-/// Handle incoming audio stream.
-async fn handle_audio_stream(
-    mut recv: RecvStream,
-    session_id: u32,
-    state: &ServerState,
-) -> Result<()> {
-    let mut packet_count = 0u64;
-    
-    loop {
-        // Read length-prefixed packet
-        let length = match recv.read_u32_le().await {
-            Ok(l) => l as usize,
-            Err(_) => break,
-        };
-        
-        if length < 32 || length > 4096 {
-            warn!("Invalid packet length: {}", length);
-            continue;
-        }
-        
-        let mut packet = vec![0u8; length];
-        recv.read_exact(&mut packet).await?;
-        
-        packet_count += 1;
-        
-        if packet_count % 100 == 0 {
-            info!("Session {} received {} audio packets", session_id, packet_count);
-        }
-        
-        // TODO: Route to other clients in the same channel
-        // For now, just count packets
-    }
-    
-    info!("Audio stream from session {} ended ({} packets)", session_id, packet_count);
-    Ok(())
-}

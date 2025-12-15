@@ -1,5 +1,7 @@
 // UniFFI Interface Definition for Aura Core
 // This defines the cross-language API exposed to Swift and C# clients.
+//
+// NOTE: AudioSender and AudioReceiver are exported via proc-macros in uniffi_bindings.rs
 
 namespace aura_core {
     
@@ -115,3 +117,4 @@ enum AuraError {
     "NotConnected",
     "EncryptionError",
 };
+

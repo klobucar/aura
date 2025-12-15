@@ -92,4 +92,133 @@ impl FastAudioPacket {
             payload,
         }
     }
+    
+    /// Convert packet to bytes for transmission
+    pub fn to_bytes(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(Self::HEADER_SIZE + self.payload.len());
+        self.write(&mut buf);
+        buf.freeze()
+    }
+    
+    /// Create a packet with a deterministic nonce from sequence number
+    /// Use this for testing or when nonce must be reconstructible
+    pub fn with_sequence_nonce(
+        session_id: u32,
+        epoch_hint: u16,
+        sequence: u16,
+        payload: Bytes,
+    ) -> Self {
+        let mut nonce = [0u8; NONCE_SIZE];
+        // Use session_id and sequence to create a unique nonce
+        nonce[0..4].copy_from_slice(&session_id.to_le_bytes());
+        nonce[4..6].copy_from_slice(&epoch_hint.to_le_bytes());
+        nonce[6..8].copy_from_slice(&sequence.to_le_bytes());
+        // Remaining 16 bytes are zero (or could add timestamp)
+        
+        Self {
+            session_id,
+            epoch_hint,
+            sequence,
+            nonce,
+            payload,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_header_size() {
+        assert_eq!(FastAudioPacket::HEADER_SIZE, 32);
+    }
+    
+    #[test]
+    fn test_parse_write_roundtrip() {
+        let original = FastAudioPacket {
+            session_id: 12345,
+            epoch_hint: 42,
+            sequence: 99,
+            nonce: [1u8; 24],
+            payload: Bytes::from_static(b"hello opus data"),
+        };
+        
+        let bytes = original.to_bytes();
+        let parsed = FastAudioPacket::parse(bytes).expect("Parse failed");
+        
+        assert_eq!(parsed.session_id, 12345);
+        assert_eq!(parsed.epoch_hint, 42);
+        assert_eq!(parsed.sequence, 99);
+        assert_eq!(parsed.nonce, [1u8; 24]);
+        assert_eq!(parsed.payload.as_ref(), b"hello opus data");
+    }
+    
+    #[test]
+    fn test_parse_too_short() {
+        let short = Bytes::from_static(&[0u8; 10]);
+        let result = FastAudioPacket::parse(short);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_empty_payload() {
+        let packet = FastAudioPacket {
+            session_id: 1,
+            epoch_hint: 0,
+            sequence: 0,
+            nonce: [0u8; 24],
+            payload: Bytes::new(),
+        };
+        
+        let bytes = packet.to_bytes();
+        assert_eq!(bytes.len(), FastAudioPacket::HEADER_SIZE);
+        
+        let parsed = FastAudioPacket::parse(bytes).expect("Parse failed");
+        assert!(parsed.payload.is_empty());
+    }
+    
+    #[test]
+    fn test_sequence_nonce() {
+        let packet = FastAudioPacket::with_sequence_nonce(
+            0x12345678,
+            0xABCD,
+            0x1234,
+            Bytes::from_static(b"test"),
+        );
+        
+        // Verify nonce contains session_id, epoch_hint, sequence
+        assert_eq!(&packet.nonce[0..4], &0x12345678u32.to_le_bytes());
+        assert_eq!(&packet.nonce[4..6], &0xABCDu16.to_le_bytes());
+        assert_eq!(&packet.nonce[6..8], &0x1234u16.to_le_bytes());
+    }
+    
+    #[cfg(feature = "rand")]
+    #[test]
+    fn test_random_nonce_unique() {
+        let p1 = FastAudioPacket::new_with_random_nonce(1, 0, 0, Bytes::new());
+        let p2 = FastAudioPacket::new_with_random_nonce(1, 0, 0, Bytes::new());
+        
+        // Random nonces should be different
+        assert_ne!(p1.nonce, p2.nonce);
+    }
+    
+    #[test]
+    fn test_max_values() {
+        let packet = FastAudioPacket {
+            session_id: u32::MAX,
+            epoch_hint: u16::MAX,
+            sequence: u16::MAX,
+            nonce: [0xFF; 24],
+            payload: Bytes::from_static(b"max test"),
+        };
+        
+        let bytes = packet.to_bytes();
+        let parsed = FastAudioPacket::parse(bytes).expect("Parse failed");
+        
+        assert_eq!(parsed.session_id, u32::MAX);
+        assert_eq!(parsed.epoch_hint, u16::MAX);
+        assert_eq!(parsed.sequence, u16::MAX);
+        assert_eq!(parsed.nonce, [0xFF; 24]);
+    }
 }

@@ -34,6 +34,13 @@ pub struct ClientSession {
     pub voice_group_id: Option<u32>,
     pub text_group_id: Option<u32>,
     pub socket_addr: SocketAddr,
+    pub sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
+}
+
+/// Internal messages sent to client connection loops
+#[derive(Debug)]
+pub enum ServiceMessage {
+    RelayAudio(Bytes),
 }
 
 /// Voice MLS Group - LOW CHURN
@@ -97,14 +104,16 @@ impl ServerState {
     }
 
     /// Register a new client session.
-    pub fn register_session(&self, user_id: u32, socket_addr: SocketAddr) -> u32 {
-        let session_id = self.allocate_session_id();
+    pub fn register_session(&self, user_id: u32, socket_addr: SocketAddr, sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>) -> u32 {
+        // Use user_id as session_id for simplicity (client alignment)
+        let session_id = user_id;
         let session = ClientSession {
             session_id,
             user_id,
             voice_group_id: None,
             text_group_id: None,
             socket_addr,
+            sender,
         };
         self.sessions.insert(session_id, session);
         info!("Registered session {} for user {}", session_id, user_id);
@@ -276,7 +285,7 @@ impl ServerState {
 
     /// Route audio packet to voice group members.
     pub fn route_audio_packet(&self, raw_bytes: Bytes) {
-        let packet = match FastAudioPacket::parse(raw_bytes) {
+        let packet = match FastAudioPacket::parse(raw_bytes.clone()) {
             Ok(p) => p,
             Err(e) => {
                 warn!("Bad Packet: {}", e);
@@ -286,20 +295,35 @@ impl ServerState {
 
         let sender_session = match self.sessions.get(&packet.session_id) {
             Some(s) => s.clone(),
-            None => return,
+            None => {
+                // Sender not found
+                return;
+            }
         };
 
         let voice_group_id = match sender_session.voice_group_id {
             Some(id) => id,
+            None => return, // Not in a voice channel
+        };
+
+        let members: Vec<u32> = match self.voice_groups.get(&voice_group_id) {
+            Some(g) => {
+                let group = g.value().blocking_read();
+                group.members.iter().map(|id| *id).collect()
+            },
             None => return,
         };
 
-        let _group_entry = match self.voice_groups.get(&voice_group_id) {
-            Some(g) => g,
-            None => return,
-        };
+        // Fan-out to all other members
+        for member_id in members {
+            if member_id == sender_session.session_id {
+                continue; // Don't echo back
+            }
 
-        // Forward to all members (production: iterate members, lookup socket_addr, sendto())
+            if let Some(session) = self.sessions.get(&member_id) {
+                let _ = session.sender.send(ServiceMessage::RelayAudio(raw_bytes.clone()));
+            }
+        }
     }
 }
 

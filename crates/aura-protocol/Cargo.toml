@@ -3,10 +3,15 @@ name = "aura-protocol"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["rand"]
+rand = ["dep:rand"]
+
 [dependencies]
 prost = "0.12"
 bytes = "1.0"
 thiserror = "1.0"
+rand = { version = "0.8", optional = true }
 
 [build-dependencies]
 prost-build = "0.12"

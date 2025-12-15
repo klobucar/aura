@@ -26,6 +26,9 @@ public class QuicNetworkClient: ObservableObject {
     /// Continuation for waiting on server stream
     private var streamContinuation: CheckedContinuation<NWConnection, Error>?
     
+    /// Audio pipeline for E2EE
+    public let audioPipeline = AudioPipeline()
+    
     private var sequenceNumber: UInt16 = 0
     
     // Protocol message types (matching server)
@@ -286,42 +289,67 @@ public class QuicNetworkClient: ObservableObject {
         self.connectionStatus = "Authenticated as user \(userId)" + (verified ? " (verified)" : "")
         
         print("[QuicClient] ✓ Authentication SUCCESS!")
+        
+        // Initialize audio pipeline with session token as key (temporary POC)
+        // In production, this would use MLS derived key
+        if let tokenData = token.data(using: .utf8) {
+            // Pad/truncate to 32 bytes for ChaCha20 key
+            var keyData = Data(count: 32)
+            let copyCount = min(tokenData.count, 32)
+            keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
+            
+            try? audioPipeline.initialize(sessionId: responseUserId, key: keyData)
+            print("[QuicClient] Audio pipeline initialized")
+            
+            // Auto-join default channel for testing
+            try await joinChannel(1)
+        }
     }
     
     // MARK: - Audio (via Control Stream for now)
     
     /// Send audio frame via control stream.
     /// TODO: Switch to proper QUIC datagrams once API is figured out.
-    public func sendAudioDatagram(_ encryptedBytes: Data) async throws {
+    /// Send audio frame via control stream (encapsulated) or datagram (future).
+    public func sendAudioDatagram(_ rawPcmBytes: Data) async throws {
         guard isAuthenticated else { return }
         guard let stream = controlStream else { return }
         
-        // Build audio packet header
-        var packet = Data()
-        
-        // Message type for audio (0x20)
-        packet.append(0x20)
-        
-        // session_id: u32 (4 bytes)
-        packet.append(contentsOf: withUnsafeBytes(of: userId.littleEndian) { Data($0) })
-        
-        // sequence: u16 (2 bytes)  
-        packet.append(contentsOf: withUnsafeBytes(of: sequenceNumber.littleEndian) { Data($0) })
-        sequenceNumber &+= 1
-        
-        // payload length: u16 (2 bytes)
-        let payloadLen = UInt16(encryptedBytes.count)
-        packet.append(contentsOf: withUnsafeBytes(of: payloadLen.littleEndian) { Data($0) })
-        
-        // audio payload
-        packet.append(encryptedBytes)
-        
-        // Send via control stream
-        try await send(data: packet, on: stream)
-        
-        if sequenceNumber % 50 == 1 {
-            print("[QuicClient] Sent audio packet #\(sequenceNumber - 1) (\(packet.count) bytes)")
+        // Convert Data -> [Int16]
+        let pcmBuffer = rawPcmBytes.withUnsafeBytes {
+            Array($0.bindMemory(to: Int16.self))
         }
+        
+        // Process through pipeline (Opus + Encrypt + Packet Header)
+        // This returns the FULL FastAudioPacket bytes
+        let packetData: Data
+        do {
+            packetData = try audioPipeline.process(pcm: pcmBuffer)
+        } catch {
+            print("[QuicClient] Audio processing error: \(error)")
+            return
+        }
+        
+        // Send directly if using Datagrams (TODO: enable real datagrams)
+        // For now, wrap in control stream message 0x20
+        
+        var message = Data()
+        message.append(0x20) // Audio Message Type
+        
+        // Append Length (u32 LE)
+        let length = UInt32(packetData.count)
+        message.append(contentsOf: withUnsafeBytes(of: length.littleEndian) { Data($0) })
+        
+        // Append the ENTIRE fast packet (header + ciphertext)
+        message.append(packetData)
+        
+        // Send
+        try await send(data: message, on: stream)
+        
+        if sequenceNumber % 100 == 0 {
+            print("[QuicClient] Sent encapsulated audio packet #\(audioPipeline.sequence - 1) (\(packetData.count) bytes)")
+        }
+        sequenceNumber &+= 1
     }
     
     // MARK: - Channel
