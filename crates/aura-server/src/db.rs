@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 /// Current database schema version.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Thread-safe database handle.
 pub type DbHandle = Arc<Mutex<Connection>>;
@@ -18,7 +19,7 @@ pub type DbHandle = Arc<Mutex<Connection>>;
 /// User record from the database.
 #[derive(Debug, Clone)]
 pub struct User {
-    pub user_id: u32,
+    pub user_uuid: String,
     pub ed25519_public_key: [u8; 32],
     pub display_name: String,
     pub created_at: i64,
@@ -48,10 +49,10 @@ impl AdminPermissions {
 /// Admin record from the database.
 #[derive(Debug, Clone)]
 pub struct Admin {
-    pub user_id: u32,
+    pub user_uuid: String,
     pub permissions: AdminPermissions,
     pub granted_at: i64,
-    pub granted_by: Option<u32>,
+    pub granted_by: Option<String>,
 }
 
 /// Database operations wrapper.
@@ -120,11 +121,11 @@ impl Database {
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
-            INSERT OR REPLACE INTO schema_version (version) VALUES (1);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
 
-            -- Users table with TOFU key pinning
+            -- Users table with UUID primary key and TOFU key pinning
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_uuid TEXT PRIMARY KEY,
                 ed25519_public_key BLOB NOT NULL UNIQUE,
                 display_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 created_at INTEGER NOT NULL,
@@ -134,25 +135,62 @@ impl Database {
 
             -- Admins table
             CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
+                user_uuid TEXT PRIMARY KEY,
                 permissions TEXT NOT NULL,
                 granted_at INTEGER NOT NULL,
-                granted_by INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                granted_by TEXT,
+                FOREIGN KEY (user_uuid) REFERENCES users(user_uuid),
+                FOREIGN KEY (granted_by) REFERENCES users(user_uuid)
             );
 
             -- TOFU identity tracking
             CREATE TABLE IF NOT EXISTS tofu_identities (
-                user_id INTEGER PRIMARY KEY,
+                user_uuid TEXT PRIMARY KEY,
                 first_seen_key BLOB NOT NULL,
                 first_seen_at INTEGER NOT NULL,
                 last_seen_at INTEGER NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                FOREIGN KEY (user_uuid) REFERENCES users(user_uuid)
+            );
+
+            -- DM groups (ephemeral MLS groups for 1:1 conversations)
+            CREATE TABLE IF NOT EXISTS dm_groups (
+                dm_group_uuid TEXT PRIMARY KEY,
+                user1_uuid TEXT NOT NULL,
+                user2_uuid TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_message_at INTEGER,
+                FOREIGN KEY (user1_uuid) REFERENCES users(user_uuid),
+                FOREIGN KEY (user2_uuid) REFERENCES users(user_uuid),
+                CHECK (user1_uuid < user2_uuid)  -- Enforce canonical ordering
+            );
+
+            -- DM messages (store-and-forward for offline users)
+            CREATE TABLE IF NOT EXISTS dm_messages (
+                message_uuid TEXT PRIMARY KEY,
+                dm_group_uuid TEXT NOT NULL,
+                sender_uuid TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                encrypted_content BLOB NOT NULL,
+                delivered BOOLEAN NOT NULL DEFAULT 0,
+                FOREIGN KEY (dm_group_uuid) REFERENCES dm_groups(dm_group_uuid),
+                FOREIGN KEY (sender_uuid) REFERENCES users(user_uuid)
+            );
+
+            -- Display name change history
+            CREATE TABLE IF NOT EXISTS display_name_history (
+                user_uuid TEXT NOT NULL,
+                old_name TEXT NOT NULL,
+                new_name TEXT NOT NULL,
+                changed_at INTEGER NOT NULL,
+                FOREIGN KEY (user_uuid) REFERENCES users(user_uuid)
             );
 
             -- Indices for fast lookups
             CREATE INDEX IF NOT EXISTS idx_users_public_key ON users(ed25519_public_key);
             CREATE INDEX IF NOT EXISTS idx_users_display_name ON users(display_name);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_dm_groups_users ON dm_groups(user1_uuid, user2_uuid);
+            CREATE INDEX IF NOT EXISTS idx_dm_messages_group ON dm_messages(dm_group_uuid, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_dm_messages_undelivered ON dm_messages(delivered) WHERE delivered = 0;
             "#,
         )?;
 
@@ -198,7 +236,7 @@ impl Database {
     pub fn find_user_by_key(&self, public_key: &[u8; 32]) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_id, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
              FROM users WHERE ed25519_public_key = ?",
             params![public_key.as_slice()],
             |row| {
@@ -206,7 +244,7 @@ impl Database {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&key_blob);
                 Ok(User {
-                    user_id: row.get(0)?,
+                    user_uuid: row.get(0)?,
                     ed25519_public_key: key,
                     display_name: row.get(2)?,
                     created_at: row.get(3)?,
@@ -223,7 +261,7 @@ impl Database {
     pub fn find_user_by_name(&self, display_name: &str) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_id, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
              FROM users WHERE display_name = ? COLLATE NOCASE",
             params![display_name],
             |row| {
@@ -231,7 +269,7 @@ impl Database {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&key_blob);
                 Ok(User {
-                    user_id: row.get(0)?,
+                    user_uuid: row.get(0)?,
                     ed25519_public_key: key,
                     display_name: row.get(2)?,
                     created_at: row.get(3)?,
@@ -244,19 +282,19 @@ impl Database {
         .map_err(Into::into)
     }
 
-    /// Find a user by their ID.
-    pub fn find_user_by_id(&self, user_id: u32) -> Result<Option<User>> {
+    /// Find a user by their UUID.
+    pub fn find_user_by_uuid(&self, user_uuid: &str) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_id, ed25519_public_key, display_name, created_at, verified, banned
-             FROM users WHERE user_id = ?",
-            params![user_id],
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+             FROM users WHERE user_uuid = ?",
+            params![user_uuid],
             |row| {
                 let key_blob: Vec<u8> = row.get(1)?;
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&key_blob);
                 Ok(User {
-                    user_id: row.get(0)?,
+                    user_uuid: row.get(0)?,
                     ed25519_public_key: key,
                     display_name: row.get(2)?,
                     created_at: row.get(3)?,
@@ -270,64 +308,63 @@ impl Database {
     }
 
     /// Create a new user with TOFU identity.
-    /// Returns the new user_id on success.
-    pub fn create_user(&self, public_key: &[u8; 32], display_name: &str) -> Result<u32> {
+    /// Returns the new user_uuid on success.
+    pub fn create_user(&self, public_key: &[u8; 32], display_name: &str) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let now = Self::now();
+        let user_uuid = Uuid::new_v4().to_string();
 
         // Insert user
         conn.execute(
-            "INSERT INTO users (ed25519_public_key, display_name, created_at, verified, banned)
-             VALUES (?, ?, ?, 0, 0)",
-            params![public_key.as_slice(), display_name, now],
+            "INSERT INTO users (user_uuid, ed25519_public_key, display_name, created_at, verified, banned)
+             VALUES (?, ?, ?, ?, 0, 0)",
+            params![&user_uuid, public_key.as_slice(), display_name, now],
         )?;
-
-        let user_id = conn.last_insert_rowid() as u32;
 
         // Record TOFU identity
         conn.execute(
-            "INSERT INTO tofu_identities (user_id, first_seen_key, first_seen_at, last_seen_at)
+            "INSERT INTO tofu_identities (user_uuid, first_seen_key, first_seen_at, last_seen_at)
              VALUES (?, ?, ?, ?)",
-            params![user_id, public_key.as_slice(), now, now],
+            params![&user_uuid, public_key.as_slice(), now, now],
         )?;
 
         tracing::info!(
-            "Created new user: id={}, name={}",
-            user_id,
+            "Created new user: uuid={}, name={}",
+            user_uuid,
             display_name
         );
-        Ok(user_id)
+        Ok(user_uuid)
     }
 
     /// Update the last_seen timestamp for a user's TOFU identity.
-    pub fn update_last_seen(&self, user_id: u32) -> Result<()> {
+    pub fn update_last_seen(&self, user_uuid: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE tofu_identities SET last_seen_at = ? WHERE user_id = ?",
-            params![Self::now(), user_id],
+            "UPDATE tofu_identities SET last_seen_at = ? WHERE user_uuid = ?",
+            params![Self::now(), user_uuid],
         )?;
         Ok(())
     }
 
     /// Set a user's verified status.
-    pub fn set_user_verified(&self, user_id: u32, verified: bool) -> Result<()> {
+    pub fn set_user_verified(&self, user_uuid: &str, verified: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE users SET verified = ? WHERE user_id = ?",
-            params![verified, user_id],
+            "UPDATE users SET verified = ? WHERE user_uuid = ?",
+            params![verified, user_uuid],
         )?;
-        tracing::info!("User {} verified status set to {}", user_id, verified);
+        tracing::info!("User {} verified status set to {}", user_uuid, verified);
         Ok(())
     }
 
     /// Set a user's banned status.
-    pub fn set_user_banned(&self, user_id: u32, banned: bool) -> Result<()> {
+    pub fn set_user_banned(&self, user_uuid: &str, banned: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE users SET banned = ? WHERE user_id = ?",
-            params![banned, user_id],
+            "UPDATE users SET banned = ? WHERE user_uuid = ?",
+            params![banned, user_uuid],
         )?;
-        tracing::info!("User {} banned status set to {}", user_id, banned);
+        tracing::info!("User {} banned status set to {}", user_uuid, banned);
         Ok(())
     }
 
@@ -335,8 +372,8 @@ impl Database {
     pub fn list_users(&self, offset: u32, limit: u32) -> Result<Vec<User>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT user_id, ed25519_public_key, display_name, created_at, verified, banned
-             FROM users ORDER BY user_id LIMIT ? OFFSET ?",
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+             FROM users ORDER BY created_at LIMIT ? OFFSET ?",
         )?;
 
         let users = stmt
@@ -345,7 +382,7 @@ impl Database {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&key_blob);
                 Ok(User {
-                    user_id: row.get(0)?,
+                    user_uuid: row.get(0)?,
                     ed25519_public_key: key,
                     display_name: row.get(2)?,
                     created_at: row.get(3)?,
@@ -370,22 +407,22 @@ impl Database {
     // =========================================================================
 
     /// Check if a user is an admin.
-    pub fn is_admin(&self, user_id: u32) -> Result<bool> {
+    pub fn is_admin(&self, user_uuid: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM admins WHERE user_id = ?",
-            params![user_id],
+            "SELECT COUNT(*) FROM admins WHERE user_uuid = ?",
+            params![user_uuid],
             |row| row.get(0),
         )?;
         Ok(count > 0)
     }
 
     /// Get admin permissions for a user.
-    pub fn get_admin_permissions(&self, user_id: u32) -> Result<Option<AdminPermissions>> {
+    pub fn get_admin_permissions(&self, user_uuid: &str) -> Result<Option<AdminPermissions>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT permissions FROM admins WHERE user_id = ?",
-            params![user_id],
+            "SELECT permissions FROM admins WHERE user_uuid = ?",
+            params![user_uuid],
             |row| {
                 let json: String = row.get(0)?;
                 Ok(serde_json::from_str(&json).unwrap_or_default())
@@ -398,28 +435,28 @@ impl Database {
     /// Grant admin status to a user.
     pub fn grant_admin(
         &self,
-        user_id: u32,
+        user_uuid: &str,
         permissions: &AdminPermissions,
-        granted_by: Option<u32>,
+        granted_by: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let permissions_json = serde_json::to_string(permissions)?;
 
         conn.execute(
-            "INSERT OR REPLACE INTO admins (user_id, permissions, granted_at, granted_by)
+            "INSERT OR REPLACE INTO admins (user_uuid, permissions, granted_at, granted_by)
              VALUES (?, ?, ?, ?)",
-            params![user_id, permissions_json, Self::now(), granted_by],
+            params![user_uuid, permissions_json, Self::now(), granted_by],
         )?;
 
-        tracing::info!("Granted admin to user {}", user_id);
+        tracing::info!("Granted admin to user {}", user_uuid);
         Ok(())
     }
 
     /// Revoke admin status from a user.
-    pub fn revoke_admin(&self, user_id: u32) -> Result<()> {
+    pub fn revoke_admin(&self, user_uuid: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM admins WHERE user_id = ?", params![user_id])?;
-        tracing::info!("Revoked admin from user {}", user_id);
+        conn.execute("DELETE FROM admins WHERE user_uuid = ?", params![user_uuid])?;
+        tracing::info!("Revoked admin from user {}", user_uuid);
         Ok(())
     }
 
@@ -430,12 +467,12 @@ impl Database {
 
     /// Create bootstrap admin from public key.
     /// This is used for first-time server setup via environment variable.
-    pub fn create_bootstrap_admin(&self, public_key: &[u8; 32], display_name: &str) -> Result<u32> {
-        let user_id = self.create_user(public_key, display_name)?;
-        self.grant_admin(user_id, &AdminPermissions::full(), None)?;
-        self.set_user_verified(user_id, true)?;
-        tracing::info!("Created bootstrap admin: id={}, name={}", user_id, display_name);
-        Ok(user_id)
+    pub fn create_bootstrap_admin(&self, public_key: &[u8; 32], display_name: &str) -> Result<String> {
+        let user_uuid = self.create_user(public_key, display_name)?;
+        self.grant_admin(&user_uuid, &AdminPermissions::full(), None)?;
+        self.set_user_verified(&user_uuid, true)?;
+        tracing::info!("Created bootstrap admin: uuid={}, name={}", user_uuid, display_name);
+        Ok(user_uuid)
     }
 }
 
@@ -449,19 +486,23 @@ mod tests {
         let key = [0x42u8; 32];
 
         // Create user
-        let user_id = db.create_user(&key, "Alice").unwrap();
-        assert_eq!(user_id, 1);
+        let user_uuid = db.create_user(&key, "Alice").unwrap();
+        assert!(!user_uuid.is_empty());
 
         // Find by key
         let user = db.find_user_by_key(&key).unwrap().unwrap();
-        assert_eq!(user.user_id, 1);
+        assert_eq!(user.user_uuid, user_uuid);
         assert_eq!(user.display_name, "Alice");
         assert!(!user.verified);
         assert!(!user.banned);
 
         // Find by name (case insensitive)
         let user = db.find_user_by_name("alice").unwrap().unwrap();
-        assert_eq!(user.user_id, 1);
+        assert_eq!(user.user_uuid, user_uuid);
+        
+        // Find by UUID
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
+        assert_eq!(user.display_name, "Alice");
     }
 
     #[test]
@@ -485,10 +526,10 @@ mod tests {
     fn test_admin_operations() {
         let db = Database::open_in_memory().unwrap();
         let key = [0x42u8; 32];
-        let user_id = db.create_user(&key, "Admin").unwrap();
+        let user_uuid = db.create_user(&key, "Admin").unwrap();
 
         // Not admin initially
-        assert!(!db.is_admin(user_id).unwrap());
+        assert!(!db.is_admin(&user_uuid).unwrap());
 
         // Grant admin
         let perms = AdminPermissions {
@@ -496,40 +537,40 @@ mod tests {
             ban_users: true,
             grant_admin: false,
         };
-        db.grant_admin(user_id, &perms, None).unwrap();
+        db.grant_admin(&user_uuid, &perms, None).unwrap();
 
         // Now is admin
-        assert!(db.is_admin(user_id).unwrap());
+        assert!(db.is_admin(&user_uuid).unwrap());
 
         // Check permissions
-        let stored_perms = db.get_admin_permissions(user_id).unwrap().unwrap();
+        let stored_perms = db.get_admin_permissions(&user_uuid).unwrap().unwrap();
         assert!(stored_perms.verify_users);
         assert!(stored_perms.ban_users);
         assert!(!stored_perms.grant_admin);
 
         // Revoke admin
-        db.revoke_admin(user_id).unwrap();
-        assert!(!db.is_admin(user_id).unwrap());
+        db.revoke_admin(&user_uuid).unwrap();
+        assert!(!db.is_admin(&user_uuid).unwrap());
     }
 
     #[test]
     fn test_user_verification_and_ban() {
         let db = Database::open_in_memory().unwrap();
         let key = [0x42u8; 32];
-        let user_id = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, "TestUser").unwrap();
 
         // Not verified initially
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert!(!user.verified);
 
         // Verify
-        db.set_user_verified(user_id, true).unwrap();
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        db.set_user_verified(&user_uuid, true).unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert!(user.verified);
 
         // Ban
-        db.set_user_banned(user_id, true).unwrap();
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        db.set_user_banned(&user_uuid, true).unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert!(user.banned);
     }
 
@@ -539,15 +580,15 @@ mod tests {
         assert!(db.is_empty().unwrap());
 
         let key = [0x42u8; 32];
-        let user_id = db.create_bootstrap_admin(&key, "RootAdmin").unwrap();
+        let user_uuid = db.create_bootstrap_admin(&key, "RootAdmin").unwrap();
 
         assert!(!db.is_empty().unwrap());
-        assert!(db.is_admin(user_id).unwrap());
+        assert!(db.is_admin(&user_uuid).unwrap());
 
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert!(user.verified);
 
-        let perms = db.get_admin_permissions(user_id).unwrap().unwrap();
+        let perms = db.get_admin_permissions(&user_uuid).unwrap().unwrap();
         assert!(perms.verify_users);
         assert!(perms.ban_users);
         assert!(perms.grant_admin);

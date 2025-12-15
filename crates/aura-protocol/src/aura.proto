@@ -36,6 +36,9 @@ message Envelope {
         ListUsersRequest list_users = 53;
         AdminResponse admin_response = 54;
         ListUsersResponse list_users_response = 55;
+        
+        // Text Messaging (IRC-style broadcast)
+        EncryptedTextPacket text_packet = 60;
     }
 }
 
@@ -266,4 +269,29 @@ message UserInfo {
 message ListUsersResponse {
     repeated UserInfo users = 1;
     uint32 total_count = 2;
+}
+
+// ============================================================================
+// Text Messaging - IRC-Style (No Server Storage)
+// Messages are broadcast only to online channel members.
+// ============================================================================
+
+// Plaintext text message (inside the encrypted payload)
+message TextMessage {
+    string sender_uuid = 1;      // Sender's UUID
+    uint64 timestamp = 2;        // Unix timestamp (milliseconds)
+    string content = 3;          // Message content (plaintext after decryption)
+    string reply_to_id = 4;      // Optional: message ID being replied to
+    string message_id = 5;       // UUID for this message (for replies)
+}
+
+// Encrypted text packet sent over wire
+// Server routes this without decrypting - zero knowledge
+message EncryptedTextPacket {
+    uint32 sender_session_id = 1;  // Session ID for routing
+    uint32 channel_id = 2;         // Target channel
+    uint64 epoch = 3;              // MLS epoch for key selection
+    bytes ciphertext = 4;          // Encrypted TextMessage (XChaCha20-Poly1305)
+    bytes nonce = 5;               // XChaCha20 nonce (24 bytes)
+    bytes tag = 6;                 // Poly1305 tag (16 bytes)
 }

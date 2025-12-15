@@ -48,7 +48,7 @@ pub enum AuthError {
 /// Session information stored in memory.
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub user_id: u32,
+    pub user_uuid: String,
     pub display_name: String,
     pub verified: bool,
     pub is_admin: bool,
@@ -58,7 +58,7 @@ pub struct Session {
 /// Authentication result returned to clients.
 #[derive(Debug, Clone)]
 pub struct AuthResult {
-    pub user_id: u32,
+    pub user_uuid: String,
     pub session_token: String,
     pub verified: bool,
     pub display_name: String,
@@ -85,15 +85,15 @@ impl AuthService {
 
     /// Generate a cryptographically secure session token.
     fn generate_session_token() -> String {
-        let mut rng = rand::rng();
-        let bytes: [u8; 32] = rng.random();
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
         hex::encode(bytes)
     }
 
     /// Generate a challenge for signature verification.
     pub fn generate_challenge() -> Vec<u8> {
-        let mut rng = rand::rng();
-        let bytes: [u8; 32] = rng.random();
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
         bytes.to_vec()
     }
 
@@ -145,7 +145,7 @@ impl AuthService {
         let user = match self.db.find_user_by_key(public_key)? {
             Some(existing_user) => {
                 // Returning user - update last seen
-                self.db.update_last_seen(existing_user.user_id)?;
+                self.db.update_last_seen(&existing_user.user_uuid)?;
                 existing_user
             }
             None => {
@@ -155,8 +155,8 @@ impl AuthService {
                 }
 
                 // Create new user with TOFU identity
-                let user_id = self.db.create_user(public_key, display_name)?;
-                self.db.find_user_by_id(user_id)?.unwrap()
+                let user_uuid = self.db.create_user(public_key, display_name)?;
+                self.db.find_user_by_uuid(&user_uuid)?.unwrap()
             }
         };
 
@@ -172,10 +172,10 @@ impl AuthService {
 
         // 6. Create session
         let session_token = Self::generate_session_token();
-        let is_admin = self.db.is_admin(user.user_id)?;
+        let is_admin = self.db.is_admin(&user.user_uuid)?;
 
         let session = Session {
-            user_id: user.user_id,
+            user_uuid: user.user_uuid.clone(),
             display_name: user.display_name.clone(),
             verified: user.verified,
             is_admin,
@@ -185,7 +185,7 @@ impl AuthService {
         self.sessions.insert(session_token.clone(), session);
 
         Ok(AuthResult {
-            user_id: user.user_id,
+            user_uuid: user.user_uuid,
             session_token,
             verified: user.verified,
             display_name: user.display_name,
@@ -229,13 +229,13 @@ impl AuthService {
     // =========================================================================
 
     /// Verify a user (admin only).
-    pub fn verify_user(&self, admin_token: &str, target_user_id: u32) -> Result<(), AuthError> {
+    pub fn verify_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
         let session = self.validate_session(admin_token)?;
 
         // Check admin permissions
         let perms = self
             .db
-            .get_admin_permissions(session.user_id)?
+            .get_admin_permissions(&session.user_uuid)?
             .ok_or(AuthError::PermissionDenied)?;
 
         if !perms.verify_users {
@@ -243,22 +243,22 @@ impl AuthService {
         }
 
         // Verify the target user exists
-        if self.db.find_user_by_id(target_user_id)?.is_none() {
+        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
             return Err(AuthError::UserNotFound);
         }
 
-        self.db.set_user_verified(target_user_id, true)?;
+        self.db.set_user_verified(target_user_uuid, true)?;
         Ok(())
     }
 
     /// Ban a user (admin only).
-    pub fn ban_user(&self, admin_token: &str, target_user_id: u32) -> Result<(), AuthError> {
+    pub fn ban_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
         let session = self.validate_session(admin_token)?;
 
         // Check admin permissions
         let perms = self
             .db
-            .get_admin_permissions(session.user_id)?
+            .get_admin_permissions(&session.user_uuid)?
             .ok_or(AuthError::PermissionDenied)?;
 
         if !perms.ban_users {
@@ -266,42 +266,42 @@ impl AuthService {
         }
 
         // Prevent self-ban
-        if session.user_id == target_user_id {
+        if session.user_uuid == target_user_uuid {
             return Err(AuthError::PermissionDenied);
         }
 
         // Verify the target user exists
-        if self.db.find_user_by_id(target_user_id)?.is_none() {
+        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
             return Err(AuthError::UserNotFound);
         }
 
-        self.db.set_user_banned(target_user_id, true)?;
+        self.db.set_user_banned(target_user_uuid, true)?;
 
         // Invalidate any active sessions for banned user
         self.sessions
-            .retain(|_, s| s.user_id != target_user_id);
+            .retain(|_, s| s.user_uuid != target_user_uuid);
 
         Ok(())
     }
 
     /// Unban a user (admin only).
-    pub fn unban_user(&self, admin_token: &str, target_user_id: u32) -> Result<(), AuthError> {
+    pub fn unban_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
         let session = self.validate_session(admin_token)?;
 
         let perms = self
             .db
-            .get_admin_permissions(session.user_id)?
+            .get_admin_permissions(&session.user_uuid)?
             .ok_or(AuthError::PermissionDenied)?;
 
         if !perms.ban_users {
             return Err(AuthError::PermissionDenied);
         }
 
-        if self.db.find_user_by_id(target_user_id)?.is_none() {
+        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
             return Err(AuthError::UserNotFound);
         }
 
-        self.db.set_user_banned(target_user_id, false)?;
+        self.db.set_user_banned(target_user_uuid, false)?;
         Ok(())
     }
 
@@ -309,14 +309,14 @@ impl AuthService {
     pub fn grant_admin(
         &self,
         admin_token: &str,
-        target_user_id: u32,
+        target_user_uuid: &str,
         permissions: &AdminPermissions,
     ) -> Result<(), AuthError> {
         let session = self.validate_session(admin_token)?;
 
         let perms = self
             .db
-            .get_admin_permissions(session.user_id)?
+            .get_admin_permissions(&session.user_uuid)?
             .ok_or(AuthError::PermissionDenied)?;
 
         if !perms.grant_admin {
@@ -324,26 +324,26 @@ impl AuthService {
         }
 
         // Prevent self-promotion (already admin if here, but prevent changing own perms)
-        if session.user_id == target_user_id {
+        if session.user_uuid == target_user_uuid {
             return Err(AuthError::PermissionDenied);
         }
 
-        if self.db.find_user_by_id(target_user_id)?.is_none() {
+        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
             return Err(AuthError::UserNotFound);
         }
 
         self.db
-            .grant_admin(target_user_id, permissions, Some(session.user_id))?;
+            .grant_admin(target_user_uuid, permissions, Some(&session.user_uuid))?;
         Ok(())
     }
 
     /// Revoke admin privileges (admin only).
-    pub fn revoke_admin(&self, admin_token: &str, target_user_id: u32) -> Result<(), AuthError> {
+    pub fn revoke_admin(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
         let session = self.validate_session(admin_token)?;
 
         let perms = self
             .db
-            .get_admin_permissions(session.user_id)?
+            .get_admin_permissions(&session.user_uuid)?
             .ok_or(AuthError::PermissionDenied)?;
 
         if !perms.grant_admin {
@@ -351,11 +351,11 @@ impl AuthService {
         }
 
         // Prevent self-revocation
-        if session.user_id == target_user_id {
+        if session.user_uuid == target_user_uuid {
             return Err(AuthError::PermissionDenied);
         }
 
-        self.db.revoke_admin(target_user_id)?;
+        self.db.revoke_admin(target_user_uuid)?;
         Ok(())
     }
 
@@ -410,7 +410,7 @@ mod tests {
             .authenticate(&public_key, "Alice", &signature, &challenge, None)
             .unwrap();
 
-        assert_eq!(result.user_id, 1);
+        assert!(!result.user_uuid.is_empty());
         assert_eq!(result.display_name, "Alice");
         assert!(!result.verified);
     }
@@ -434,8 +434,8 @@ mod tests {
             .authenticate(&public_key, "Alice", &sig2, &challenge2, None)
             .unwrap();
 
-        // Same user_id
-        assert_eq!(result1.user_id, result2.user_id);
+        // Same user_uuid
+        assert_eq!(result1.user_uuid, result2.user_uuid);
     }
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
 
         // Valid session
         let session = auth.validate_session(&result.session_token).unwrap();
-        assert_eq!(session.user_id, result.user_id);
+        assert_eq!(session.user_uuid, result.user_uuid);
 
         // Invalid session
         assert!(auth.validate_session("invalid-token").is_err());

@@ -183,16 +183,16 @@ mod tests {
 
         // Create a user
         let key = [0x42u8; 32];
-        let user_id = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, "TestUser").unwrap();
 
         // User should exist
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert_eq!(user.display_name, "TestUser");
         assert!(!user.verified);
 
         // Verify user
-        db.set_user_verified(user_id, true).unwrap();
-        let user = db.find_user_by_id(user_id).unwrap().unwrap();
+        db.set_user_verified(&user_uuid, true).unwrap();
+        let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert!(user.verified);
     }
 

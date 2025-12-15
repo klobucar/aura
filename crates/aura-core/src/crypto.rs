@@ -113,6 +113,9 @@ pub enum CryptoError {
     #[error("Invalid key size")]
     InvalidKeySize,
     
+    #[error("Invalid nonce length: expected 24 bytes, got {0}")]
+    InvalidNonceLength(usize),
+    
     #[error("Invalid nonce size")]
     InvalidNonceSize,
 }

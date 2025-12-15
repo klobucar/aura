@@ -129,7 +129,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         info!("[{}] Control stream opened", remote);
 
         // Authenticate the client - get back the streams for reuse
-        let (auth_session, mut control_send, mut control_recv) = match authenticate_client(control_send_initial, control_recv_initial, &state).await {
+        let (auth_session, mut control_send, mut control_recv) = match authenticate_client(control_send_initial, control_recv_initial, &state, remote).await {
             Ok(result) => result,
             Err(e) => {
                 warn!("[{}] Authentication failed: {}", remote, e);
@@ -137,16 +137,16 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
             }
         };
 
-        // Create internal channel for this session
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let user_id = auth_session.user_id;
-
-        // Register session with state
-        let final_session_id = state.register_session(user_id, remote, tx);
-        // Note: Authentication might have allocated a temp session ID or none.
-        // Simplified flow: We authenticate first, then register.
+        // Session already registered in authenticate_client
+        let user_uuid = auth_session.user_uuid.clone();
         
-        info!("[{}] Session {} registered", remote, final_session_id);
+        // Create internal channel for receiving messages from state
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        
+        // Register session with state
+        let session_id = state.register_session(user_uuid.clone(), remote, tx);
+        
+        info!("[{}] Session {} registered for user {}", remote, session_id, user_uuid);
 
         let mut buf = [0u8; 1024];
 
@@ -165,16 +165,16 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                         state.create_channel(channel_id); // Ensure exists
                                         
                                         // Update session
-                                        if let Some(mut sess) = state.sessions.get_mut(&final_session_id) {
+                                        if let Some(mut sess) = state.sessions.get_mut(&session_id) {
                                             sess.voice_group_id = Some(channel_id);
                                             sess.text_group_id = Some(channel_id);
                                             
                                             // Add to voice group
                                             if let Some(vg) = state.voice_groups.get(&channel_id) {
-                                                vg.value().write().await.members.insert(final_session_id);
+                                                vg.value().write().await.members.insert(session_id);
                                             }
                                         }
-                                        info!("[{}] User {} joined channel {}", remote, user_id, channel_id);
+                                        info!("[{}] User {} joined channel {}", remote, user_uuid, channel_id);
                                     }
                                 }
                                 0x20 => { // MSG_AUDIO
@@ -214,17 +214,16 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         }
 
         // Cleanup
-        state.remove_session(final_session_id);
-        info!("[{}] Session {} disconnected", remote, final_session_id);
+        state.remove_session(session_id);
+        info!("[{}] Session {} disconnected", remote, session_id);
         Ok(())
     }
 
 
 /// Client session after authentication.
-/// Client session after authentication.
 struct AuthSession {
     session_id: u32,
-    user_id: u32,
+    user_uuid: String,
     session_token: String,
 }
 
@@ -238,6 +237,7 @@ async fn authenticate_client(
     mut send: SendStream,
     mut recv: RecvStream,
     state: &ServerState,
+    remote: SocketAddr,
 ) -> Result<(AuthSession, SendStream, RecvStream)> {
     // Step 1: Server sends challenge first (ServerHello)
     let challenge = AuthService::generate_challenge();
@@ -317,7 +317,7 @@ async fn authenticate_client(
     match auth_result {
         Ok(result) => {
             response.put_u8(1); // success
-            response.put_u32_le(result.user_id);
+            response.put_u32_le(0); // Temporary - will be replaced with actual session_id after registration
             
             let token_bytes = result.session_token.as_bytes();
             response.put_u8(token_bytes.len() as u8);
@@ -328,11 +328,9 @@ async fn authenticate_client(
             
             send.write_all(&response).await?;
             
-            let session_id = result.user_id;
-            
             Ok((AuthSession {
-                session_id,
-                user_id: result.user_id,
+                session_id: 0, // Will be set after registration in main handler
+                user_uuid: result.user_uuid,
                 session_token: result.session_token,
             }, send, recv))
         }

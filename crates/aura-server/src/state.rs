@@ -37,7 +37,7 @@ pub struct MlsSignalResponse {
 #[derive(Debug, Clone)]
 pub struct ClientSession {
     pub session_id: u32,
-    pub user_id: u32,
+    pub user_uuid: String,
     pub voice_group_id: Option<u32>,
     pub text_group_id: Option<u32>,
     pub socket_addr: SocketAddr,
@@ -111,19 +111,19 @@ impl ServerState {
     }
 
     /// Register a new client session.
-    pub fn register_session(&self, user_id: u32, socket_addr: SocketAddr, sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>) -> u32 {
-        // Use user_id as session_id for simplicity (client alignment)
-        let session_id = user_id;
+    pub fn register_session(&self, user_uuid: String, socket_addr: SocketAddr, sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>) -> u32 {
+        // Allocate a new session ID
+        let session_id = self.allocate_session_id();
         let session = ClientSession {
             session_id,
-            user_id,
+            user_uuid: user_uuid.clone(),
             voice_group_id: None,
             text_group_id: None,
             socket_addr,
             sender,
         };
         self.sessions.insert(session_id, session);
-        info!("Registered session {} for user {}", session_id, user_id);
+        info!("Registered session {} for user {}", session_id, user_uuid);
         session_id
     }
 
@@ -146,11 +146,11 @@ impl ServerState {
     }
 
     /// Check if a user can join a voice channel based on verification policy.
-    pub fn can_join_channel(&self, user_id: u32) -> Result<bool> {
+    pub fn can_join_channel(&self, user_uuid: &str) -> Result<bool> {
         match self.config.verification.mode {
             VerificationMode::None | VerificationMode::Optional => Ok(true),
             VerificationMode::Required => {
-                let user = self.db.find_user_by_id(user_id)?;
+                let user = self.db.find_user_by_uuid(user_uuid)?;
                 match user {
                     Some(u) => Ok(u.verified),
                     None => Ok(false),
@@ -350,7 +350,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let session_id = state.register_session(1, addr, tx);
+        let session_id = state.register_session("test-uuid-123".to_string(), addr, tx);
         assert!(state.sessions.contains_key(&session_id));
 
         state.remove_session(session_id);
@@ -372,20 +372,20 @@ mod tests {
         
         // Create a user
         let key = [0x42u8; 32];
-        let user_id = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, "TestUser").unwrap();
 
         // Test with Optional mode (default)
         let mut config = Config::default();
         let state = ServerState::new(Arc::clone(&db), config.clone());
-        assert!(state.can_join_channel(user_id).unwrap());
+        assert!(state.can_join_channel(&user_uuid).unwrap());
 
         // Test with Required mode - unverified user
         config.verification.mode = VerificationMode::Required;
         let state = ServerState::new(Arc::clone(&db), config.clone());
-        assert!(!state.can_join_channel(user_id).unwrap());
+        assert!(!state.can_join_channel(&user_uuid).unwrap());
 
         // Verify user
-        db.set_user_verified(user_id, true).unwrap();
-        assert!(state.can_join_channel(user_id).unwrap());
+        db.set_user_verified(&user_uuid, true).unwrap();
+        assert!(state.can_join_channel(&user_uuid).unwrap());
     }
 }
