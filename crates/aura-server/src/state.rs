@@ -6,8 +6,7 @@ use crate::auth::AuthService;
 use crate::config::{Config, VerificationMode};
 use crate::db::{Database, User};
 use aura_protocol::{
-    FastAudioPacket, UserProfile,
-    signaling::{MlsMessage, SignalResponse, mls_message},
+    FastAudioPacket, UserProfile, MlsEnvelope, MlsGroupType, mls_envelope,
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -20,9 +19,17 @@ use tracing::{info, warn};
 // --- Constants ---
 
 /// Voice group type identifier (matches proto enum)
-pub const MLS_GROUP_TYPE_VOICE: u32 = 0;
+pub const MLS_GROUP_TYPE_VOICE: i32 = MlsGroupType::Voice as i32;
 /// Text group type identifier (matches proto enum)
-pub const MLS_GROUP_TYPE_TEXT: u32 = 1;
+pub const MLS_GROUP_TYPE_TEXT: i32 = MlsGroupType::Text as i32;
+
+/// Response to MLS signaling operations
+#[derive(Debug, Clone)]
+pub struct MlsSignalResponse {
+    pub success: bool,
+    pub error_message: String,
+    pub current_epoch: u64,
+}
 
 // --- Data Structures ---
 
@@ -179,19 +186,19 @@ impl ServerState {
     // --- MLS Delivery Service (Reliable Signaling) ---
 
     /// Process an incoming MLS Message.
-    pub async fn handle_mls_message(&self, _sender_id: u32, msg: MlsMessage) -> Result<SignalResponse> {
+    pub async fn handle_mls_message(&self, msg: MlsEnvelope) -> Result<MlsSignalResponse> {
         let group_id = msg.group_id;
         let group_type = msg.group_type;
 
         match group_type {
-            MLS_GROUP_TYPE_VOICE => self.handle_voice_mls(group_id, msg).await,
-            MLS_GROUP_TYPE_TEXT => self.handle_text_mls(group_id, msg).await,
+            x if x == MLS_GROUP_TYPE_VOICE => self.handle_voice_mls(group_id, msg).await,
+            x if x == MLS_GROUP_TYPE_TEXT => self.handle_text_mls(group_id, msg).await,
             _ => Err(anyhow!("Unknown group type: {}", group_type)),
         }
     }
 
     /// Handle Voice MLS message - LOW CHURN rules
-    async fn handle_voice_mls(&self, group_id: u32, msg: MlsMessage) -> Result<SignalResponse> {
+    async fn handle_voice_mls(&self, group_id: u32, msg: MlsEnvelope) -> Result<MlsSignalResponse> {
         let group_lock = match self.voice_groups.get(&group_id) {
             Some(g) => g.clone(),
             None => return Err(anyhow!("Voice group not found")),
@@ -200,36 +207,36 @@ impl ServerState {
         let mut group = group_lock.write().await;
 
         if msg.epoch != group.current_epoch {
-            return Ok(SignalResponse {
+            return Ok(MlsSignalResponse {
                 success: false,
                 error_message: "Error::StaleEpoch".into(),
-                current_epoch: group.current_epoch as u32,
+                current_epoch: group.current_epoch,
             });
         }
 
         match msg.content {
-            Some(mls_message::Content::Commit(_)) => {
+            Some(mls_envelope::Content::Commit(_)) => {
                 group.current_epoch += 1;
                 info!(
                     "Voice Group {} advanced to Epoch {}",
                     group_id, group.current_epoch
                 );
-                Ok(SignalResponse {
+                Ok(MlsSignalResponse {
                     success: true,
                     error_message: String::new(),
-                    current_epoch: group.current_epoch as u32,
+                    current_epoch: group.current_epoch,
                 })
             }
-            _ => Ok(SignalResponse {
+            _ => Ok(MlsSignalResponse {
                 success: true,
                 error_message: String::new(),
-                current_epoch: group.current_epoch as u32,
+                current_epoch: group.current_epoch,
             }),
         }
     }
 
     /// Handle Text MLS message - HIGH CHURN allowed
-    async fn handle_text_mls(&self, group_id: u32, msg: MlsMessage) -> Result<SignalResponse> {
+    async fn handle_text_mls(&self, group_id: u32, msg: MlsEnvelope) -> Result<MlsSignalResponse> {
         let group_lock = match self.text_groups.get(&group_id) {
             Some(g) => g.clone(),
             None => return Err(anyhow!("Text group not found")),
@@ -238,30 +245,30 @@ impl ServerState {
         let mut group = group_lock.write().await;
 
         if msg.epoch != group.current_epoch {
-            return Ok(SignalResponse {
+            return Ok(MlsSignalResponse {
                 success: false,
                 error_message: "Error::StaleEpoch".into(),
-                current_epoch: group.current_epoch as u32,
+                current_epoch: group.current_epoch,
             });
         }
 
         match msg.content {
-            Some(mls_message::Content::Commit(_)) => {
+            Some(mls_envelope::Content::Commit(_)) => {
                 group.current_epoch += 1;
                 info!(
                     "Text Group {} advanced to Epoch {}",
                     group_id, group.current_epoch
                 );
-                Ok(SignalResponse {
+                Ok(MlsSignalResponse {
                     success: true,
                     error_message: String::new(),
-                    current_epoch: group.current_epoch as u32,
+                    current_epoch: group.current_epoch,
                 })
             }
-            _ => Ok(SignalResponse {
+            _ => Ok(MlsSignalResponse {
                 success: true,
                 error_message: String::new(),
-                current_epoch: group.current_epoch as u32,
+                current_epoch: group.current_epoch,
             }),
         }
     }
@@ -342,7 +349,8 @@ mod tests {
         let state = create_test_state();
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
-        let session_id = state.register_session(1, addr);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let session_id = state.register_session(1, addr, tx);
         assert!(state.sessions.contains_key(&session_id));
 
         state.remove_session(session_id);

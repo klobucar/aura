@@ -38,7 +38,7 @@ impl DaveCrypto {
     /// Generate a random key for testing
     pub fn random_key() -> [u8; KEY_SIZE] {
         use rand::Rng;
-        rand::thread_rng().gen()
+        rand::rng().random()
     }
     
     /// Generate a random nonce

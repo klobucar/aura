@@ -85,15 +85,15 @@ impl AuthService {
 
     /// Generate a cryptographically secure session token.
     fn generate_session_token() -> String {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let bytes: [u8; 32] = rng.random();
         hex::encode(bytes)
     }
 
     /// Generate a challenge for signature verification.
     pub fn generate_challenge() -> Vec<u8> {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let bytes: [u8; 32] = rng.random();
         bytes.to_vec()
     }
 

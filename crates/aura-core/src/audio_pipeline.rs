@@ -17,8 +17,8 @@ use aura_protocol::FastAudioPacket;
 pub struct AudioSender {
     /// Opus encoder
     codec: OpusCodec,
-    /// Encryption context
-    crypto: DaveCrypto,
+    /// Encryption context (mutable for epoch key rotation)
+    crypto: RwLock<DaveCrypto>,
     /// Our session ID
     session_id: u32,
     /// Current MLS epoch hint
@@ -35,7 +35,7 @@ impl AudioSender {
         
         Ok(Self {
             codec,
-            crypto,
+            crypto: RwLock::new(crypto),
             session_id,
             epoch_hint: AtomicU16::new(0),
             sequence: AtomicU16::new(0),
@@ -45,6 +45,13 @@ impl AudioSender {
     /// Set the current MLS epoch hint
     pub fn set_epoch(&self, epoch: u64) {
         self.epoch_hint.store((epoch & 0xFFFF) as u16, Ordering::SeqCst);
+    }
+    
+    /// Update the encryption key (called when MLS epoch advances)
+    pub fn update_key(&self, new_key: &[u8; 32], new_epoch: u64) {
+        let mut crypto = self.crypto.write().unwrap();
+        *crypto = DaveCrypto::new(new_key);
+        self.set_epoch(new_epoch);
     }
     
     /// Encode and encrypt PCM audio for transmission
@@ -59,8 +66,11 @@ impl AudioSender {
         
         // 2. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
-        let ciphertext = self.crypto.encrypt(&opus_data, &nonce)
-            .map_err(AudioPipelineError::Crypto)?;
+        let ciphertext = {
+            let crypto = self.crypto.read().unwrap();
+            crypto.encrypt(&opus_data, &nonce)
+                .map_err(AudioPipelineError::Crypto)?
+        };
         
         // 3. Build packet
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
@@ -142,6 +152,16 @@ impl AudioReceiver {
     /// Remove a sender (e.g., when they leave the channel)
     pub fn remove_sender(&self, session_id: u32) {
         self.senders.write().unwrap().remove(&session_id);
+    }
+    
+    /// Update a sender's decryption key (called when MLS epoch advances)
+    pub fn update_sender_key(&self, session_id: u32, new_key: &[u8; 32]) -> bool {
+        if let Some(state) = self.senders.write().unwrap().get_mut(&session_id) {
+            state.crypto = DaveCrypto::new(new_key);
+            true
+        } else {
+            false
+        }
     }
     
     /// Process a received packet

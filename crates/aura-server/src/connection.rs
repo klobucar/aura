@@ -7,7 +7,7 @@ use crate::state::{ServerState, ServiceMessage};
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -49,22 +49,26 @@ impl QuicServer {
     
     /// Generate self-signed TLS certificate for QUIC.
     fn generate_server_config() -> Result<ServerConfig> {
-        // Generate self-signed certificate using rcgen
+        // Generate self-signed certificate using rcgen 0.13
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "aura.local".into()])?;
-        let cert_der = cert.serialize_der()?;
-        let key_der = cert.serialize_private_key_der();
         
-        let cert_chain = vec![Certificate(cert_der)];
-        let key = PrivateKey(key_der);
+        let cert_der = cert.cert.der().to_vec();
+        let key_der = cert.signing_key.serialize_der();
         
+        let cert_chain = vec![CertificateDer::from(cert_der)];
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into();
+
         let mut server_crypto = rustls::ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?;
         
+        
         server_crypto.alpn_protocols = vec![b"aura-dave".to_vec()];
         
-        let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
+        let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+            .map_err(|e| anyhow!("Failed to convert rustls config: {}", e))?;
+            
+        let mut server_config = ServerConfig::with_crypto(Arc::new(quinn_crypto));
         
         // Configure transport for low-latency voice
         let mut transport = quinn::TransportConfig::default();

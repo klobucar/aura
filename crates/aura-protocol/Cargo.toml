@@ -8,10 +8,10 @@ default = ["rand"]
 rand = ["dep:rand"]
 
 [dependencies]
-prost = "0.12"
+prost = "0.14"
 bytes = "1.0"
-thiserror = "1.0"
-rand = { version = "0.8", optional = true }
+thiserror = "2.0"
+rand = { version = "0.9", optional = true }
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.14"

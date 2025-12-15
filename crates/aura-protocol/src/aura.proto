@@ -2,6 +2,58 @@ syntax = "proto3";
 
 package aura;
 
+// ============================================================================
+// API Versioning - All messages wrapped in Envelope for forward compatibility
+// ============================================================================
+
+// Top-level envelope for all client-server messages.
+// Version 1 is the initial release. Increment on breaking changes.
+message Envelope {
+    uint32 version = 1; // API version, starting at 1
+    
+    oneof payload {
+        // Authentication
+        ChallengeRequest challenge_request = 10;
+        ChallengeResponse challenge_response = 11;
+        AuthRequest auth_request = 12;
+        AuthResponse auth_response = 13;
+        
+        // Control
+        ControlMessage control = 20;
+        
+        // Profiles
+        UpdateProfile update_profile = 30;
+        GetProfile get_profile = 31;
+        UserProfile user_profile = 32;
+        
+        // MLS Signaling
+        MlsEnvelope mls = 40;
+        
+        // Admin
+        VerifyUserRequest verify_user = 50;
+        BanUserRequest ban_user = 51;
+        GrantAdminRequest grant_admin = 52;
+        ListUsersRequest list_users = 53;
+        AdminResponse admin_response = 54;
+        ListUsersResponse list_users_response = 55;
+    }
+}
+
+// MLS envelope for all MLS-related signaling
+message MlsEnvelope {
+    uint32 sender_id = 1;  // Session ID of the sender
+    uint32 group_id = 2;
+    MlsGroupType group_type = 3;
+    uint64 epoch = 4;
+    
+    oneof content {
+        bytes key_package = 10;   // Initial KeyPackage for joining
+        bytes welcome = 11;       // MLS Welcome for new members
+        bytes proposal = 12;      // MLS Proposal (Add, Remove, Update)
+        bytes commit = 13;        // MLS Commit (epoch advancement)
+    }
+}
+
 // The user's position in 3D space.
 message Position {
     float x = 1;

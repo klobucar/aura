@@ -12,6 +12,7 @@ pub mod opus;
 pub mod jitter_buffer;
 pub mod crypto;
 pub mod audio_pipeline;
+pub mod mls;
 pub mod uniffi_bindings;
 
 uniffi::include_scaffolding!("aura");

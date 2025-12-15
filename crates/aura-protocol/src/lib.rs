@@ -1,10 +1,6 @@
 // Include the generated protobuf code
 include!(concat!(env!("OUT_DIR"), "/aura.rs"));
 
-pub mod signaling {
-    include!(concat!(env!("OUT_DIR"), "/aura.signaling.rs"));
-}
-
 pub mod fast_header;
 pub use fast_header::*;
 
