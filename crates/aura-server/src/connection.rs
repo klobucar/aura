@@ -23,6 +23,9 @@ const MSG_JOIN_CHANNEL: u8 = 0x10;
 const MSG_AUDIO_STREAM: u8 = 0x20;
 const MSG_TEXT_PACKET: u8 = 0x30;
 
+// Security limits
+const MAX_PACKET_SIZE: usize = 64 * 1024; // 64KB
+
 /// QUIC server for handling client connections.
 pub struct QuicServer {
     endpoint: Endpoint,
@@ -80,11 +83,11 @@ impl QuicServer {
         // Enable QUIC datagrams for unreliable audio packets
         transport.datagram_receive_buffer_size(Some(65536));
         transport.datagram_send_buffer_size(65536);
-        
         server_config.transport_config(Arc::new(transport));
         
         Ok(server_config)
     }
+
     
     /// Run the server, accepting connections.
     pub async fn run(&self) -> Result<()> {
@@ -261,81 +264,41 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                 }
                                 0x30 => { // MSG_TEXT_PACKET
                                     // Format: [0x30] [Length u32] [BinaryPacket]
-                                    // BinaryPacket: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16)
+                                    // BinaryPacket: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16)
                                     let mut len_buf = [0u8; 4];
                                     if control_recv.read_exact(&mut len_buf).await.is_ok() {
                                         let packet_len = u32::from_le_bytes(len_buf) as usize;
                                         
+                                        if packet_len > MAX_PACKET_SIZE {
+                                            warn!("[{}] Packet too large: {} bytes > {}", remote, packet_len, MAX_PACKET_SIZE);
+                                            // TODO: Disconnect client?
+                                            // Consume bytes to keep stream in sync? or just break?
+                                            // safest is to break connection
+                                            break;
+                                        }
+                                        
                                         // Read binary payload
                                         let mut packet_buf = vec![0u8; packet_len];
                                         if control_recv.read_exact(&mut packet_buf).await.is_ok() {
-                                            // Parse binary format
-                            // sender(4) + channel(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16)
-                            if packet_buf.len() > 21 {
-                                let sender_session_id = u32::from_le_bytes(packet_buf[0..4].try_into().unwrap());
-                                let channel_id = u32::from_le_bytes(packet_buf[4..8].try_into().unwrap());
-                                let epoch = u64::from_le_bytes(packet_buf[8..16].try_into().unwrap());
-                                
-                                // Parse message_id
-                                let message_id_len = packet_buf[16] as usize;
-                                let message_id_start = 17;
-                                let message_id_end = message_id_start + message_id_len;
-                                
-                                if packet_buf.len() >= message_id_end + 4 {
-                                    let message_id_bytes = packet_buf[message_id_start..message_id_end].to_vec();
-                                    let message_id = String::from_utf8(message_id_bytes).unwrap_or_else(|_| "invalid".to_string());
-                                    
-                                    let content_len = u32::from_le_bytes(packet_buf[message_id_end..message_id_end+4].try_into().unwrap()) as usize;
-                                    let content_end = message_id_end + 4 + content_len;
-                                    let nonce_end = content_end + 24;
-                                    
-                                    if packet_buf.len() >= nonce_end + 16 {
-                                        let ciphertext = packet_buf[message_id_end+4..content_end].to_vec();
-                                        let nonce = packet_buf[content_end..nonce_end].to_vec();
-                                        let tag = packet_buf[nonce_end..nonce_end+16].to_vec();
-                                        
-                                        // Check for reply_to_id
-                                        let mut reply_to_id = String::new();
-                                        let reply_offset = nonce_end + 16;
-                                        if packet_buf.len() > reply_offset {
-                                            let reply_len = packet_buf[reply_offset] as usize;
-                                            if reply_len > 0 && packet_buf.len() >= reply_offset + 1 + reply_len {
-                                                if let Ok(s) = String::from_utf8(packet_buf[reply_offset+1..reply_offset+1+reply_len].to_vec()) {
-                                                    reply_to_id = s;
+                                            // Parse binary format using extracted function
+                                            match parse_text_packet(&packet_buf) {
+                                                Ok(text_packet) => {
+                                                    let message_id = text_packet.message_id.clone();
+                                                    info!("[{}] Text packet from session {} in channel {} (msgId: {})", 
+                                                        remote, text_packet.sender_session_id, text_packet.channel_id, message_id);
+                                                    
+                                                    // Broadcast to text group members (zero-knowledge routing)
+                                                    let needs_ratchet = state.broadcast_text_message(session_id, text_packet).await;
+                                                    if needs_ratchet {
+                                                        info!("[{}] Text group {} needs ratcheting", remote, session_id);
+                                                        // TODO: Signal client to initiate MLS commit
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                     warn!("[{}] Invalid text packet: {}", remote, e);
                                                 }
                                             }
-                                        }
-                                        
-                                        // Create EncryptedTextPacket from binary data
-                                        let text_packet = aura_protocol::EncryptedTextPacket {
-                                            sender_session_id,
-                                            channel_id,
-                                            epoch,
-                                            message_id: message_id.clone(),
-                                            ciphertext,
-                                            nonce,
-                                            tag,
-                                            reply_to_id,
-                                        };
-                                        
-                                        info!("[{}] Text packet from session {} in channel {} (msgId: {})", remote, sender_session_id, channel_id, message_id);
-                                        
-                                        // Broadcast to text group members (zero-knowledge routing)
-                                        let needs_ratchet = state.broadcast_text_message(session_id, text_packet).await;
-                                        if needs_ratchet {
-                                            info!("[{}] Text group {} needs ratcheting", remote, session_id);
-                                            // TODO: Signal client to initiate MLS commit
-                                        }
-                                    } else {
-                                        warn!("[{}] Text packet too short for nonce+tag", remote);
-                                    }
-                                } else {
-                                    warn!("[{}] Text packet too short for content len", remote);
                                 }
-                            } else {
-                                warn!("[{}] Text packet too short", remote);
-                            }
-                                        }
                                     }
                                 }
                                 _ => {
@@ -396,40 +359,15 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                         }
                         ServiceMessage::RelayText(text_packet) => {
                             // Send text packet: [0x30] [Length u32] [BinaryPacket]
-                            // BinaryPacket: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16)
-                            let mut packet_bytes = Vec::new();
-                            packet_bytes.extend_from_slice(&text_packet.sender_session_id.to_le_bytes());
-                            packet_bytes.extend_from_slice(&text_packet.channel_id.to_le_bytes());
-                            packet_bytes.extend_from_slice(&text_packet.epoch.to_le_bytes());
-                            
-                            // message_id
-                            let message_id_bytes = text_packet.message_id.as_bytes();
-                            packet_bytes.push(message_id_bytes.len() as u8);
-                            packet_bytes.extend_from_slice(message_id_bytes);
-                            
-                            packet_bytes.extend_from_slice(&(text_packet.ciphertext.len() as u32).to_le_bytes());
-                            packet_bytes.extend_from_slice(&text_packet.ciphertext);
-                            packet_bytes.extend_from_slice(&text_packet.nonce);
-                            packet_bytes.extend_from_slice(&text_packet.tag);
-                            
-                            // Append reply_to_id
-                            if !text_packet.reply_to_id.is_empty() {
-                                let reply_bytes = text_packet.reply_to_id.as_bytes();
-                                if reply_bytes.len() <= 255 {
-                                    packet_bytes.push(reply_bytes.len() as u8);
-                                    packet_bytes.extend_from_slice(reply_bytes);
-                                } else {
-                                    packet_bytes.push(0);
-                                }
-                            } else {
-                                packet_bytes.push(0);
-                            }
+                            let packet_bytes = serialize_text_packet(&text_packet);
                             
                             let mut msg = vec![MSG_TEXT_PACKET];
                             msg.extend_from_slice(&(packet_bytes.len() as u32).to_le_bytes());
                             msg.extend_from_slice(&packet_bytes);
                             let _ = control_send.write_all(&msg).await;
                             let _ = control_send.flush().await;
+                            
+
                         }
                     }
                 }
@@ -596,3 +534,193 @@ async fn authenticate_client(
 }
 
 
+
+// Helper functions for packet handling
+
+fn parse_text_packet(packet_buf: &[u8]) -> Result<aura_protocol::EncryptedTextPacket> {
+    // binary format:
+    // sender(4) + channel(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16)
+    // min size: 4+4+8+1+0+4+0+24+16 = 61
+    
+    if packet_buf.len() < 61 {
+        return Err(anyhow!("Packet too short: {} bytes", packet_buf.len()));
+    }
+    
+    let mut offset = 0;
+    
+    fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32> {
+        if *offset + 4 > buf.len() { return Err(anyhow!("Unexpected EOF parsing u32")); }
+        let val = u32::from_le_bytes(buf[*offset..*offset+4].try_into()?);
+        *offset += 4;
+        Ok(val)
+    }
+    
+    fn read_u64(buf: &[u8], offset: &mut usize) -> Result<u64> {
+        if *offset + 8 > buf.len() { return Err(anyhow!("Unexpected EOF parsing u64")); }
+        let val = u64::from_le_bytes(buf[*offset..*offset+8].try_into()?);
+        *offset += 8;
+        Ok(val)
+    }
+    
+    let sender_session_id = read_u32(packet_buf, &mut offset)?;
+    let channel_id = read_u32(packet_buf, &mut offset)?;
+    let epoch = read_u64(packet_buf, &mut offset)?;
+    
+    // Message ID
+    if offset + 1 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing msg_id_len")); }
+    let msg_id_len = packet_buf[offset] as usize;
+    offset += 1;
+    
+    if offset + msg_id_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing msg_id")); }
+    let message_id = String::from_utf8(packet_buf[offset..offset+msg_id_len].to_vec())
+        .map_err(|_| anyhow!("Invalid UTF-8 in message_id"))?;
+    offset += msg_id_len;
+    
+    // Content
+    let content_len = read_u32(packet_buf, &mut offset)? as usize;
+    if offset + content_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing content")); }
+    
+    let ciphertext = packet_buf[offset..offset+content_len].to_vec();
+    offset += content_len;
+    
+    // Nonce & Tag
+    if offset + 24 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing nonce")); }
+    let nonce = packet_buf[offset..offset+24].to_vec();
+    offset += 24;
+    
+    if offset + 16 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing tag")); }
+    let tag = packet_buf[offset..offset+16].to_vec();
+    offset += 16;
+    
+    // Reply To ID (Optional)
+    let mut reply_to_id = String::new();
+    if offset < packet_buf.len() {
+        let reply_len = packet_buf[offset] as usize;
+        offset += 1;
+        if reply_len > 0 {
+            if offset + reply_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing reply_id")); }
+            reply_to_id = String::from_utf8(packet_buf[offset..offset+reply_len].to_vec())
+                .unwrap_or_default();
+        }
+    }
+    
+    Ok(aura_protocol::EncryptedTextPacket {
+        sender_session_id,
+        channel_id,
+        epoch,
+        message_id,
+        ciphertext,
+        nonce,
+        tag,
+        reply_to_id
+    })
+}
+
+fn serialize_text_packet(packet: &aura_protocol::EncryptedTextPacket) -> Vec<u8> {
+    let mut size = 62 + packet.message_id.len() + packet.ciphertext.len();
+    if !packet.reply_to_id.is_empty() {
+        size += packet.reply_to_id.len();
+    }
+    
+    let mut buf = Vec::with_capacity(size);
+    buf.extend_from_slice(&packet.sender_session_id.to_le_bytes());
+    buf.extend_from_slice(&packet.channel_id.to_le_bytes());
+    buf.extend_from_slice(&packet.epoch.to_le_bytes());
+    
+    let msg_id_bytes = packet.message_id.as_bytes();
+    buf.push(msg_id_bytes.len().min(255) as u8);
+    buf.extend_from_slice(&msg_id_bytes[..msg_id_bytes.len().min(255)]);
+    
+    buf.extend_from_slice(&(packet.ciphertext.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&packet.ciphertext);
+    
+    buf.extend_from_slice(&packet.nonce);
+    buf.extend_from_slice(&packet.tag);
+    
+    if !packet.reply_to_id.is_empty() {
+        let reply_bytes = packet.reply_to_id.as_bytes();
+        buf.push(reply_bytes.len().min(255) as u8);
+        buf.extend_from_slice(&reply_bytes[..reply_bytes.len().min(255)]);
+    } else {
+        buf.push(0);
+    }
+    
+    buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_text_packet_roundtrip() {
+        let packet = aura_protocol::EncryptedTextPacket {
+            sender_session_id: 123,
+            channel_id: 456,
+            epoch: 789,
+            message_id: "msg_uuid_1234".to_string(),
+            ciphertext: vec![1, 2, 3, 4],
+            nonce: vec![5; 24],
+            tag: vec![6; 16],
+            reply_to_id: "msg_reply_5678".to_string(),
+        };
+        
+        let bytes = serialize_text_packet(&packet);
+        let parsed = parse_text_packet(&bytes).expect("Failed to parse packet");
+        
+        assert_eq!(parsed.sender_session_id, packet.sender_session_id);
+        assert_eq!(parsed.channel_id, packet.channel_id);
+        assert_eq!(parsed.epoch, packet.epoch);
+        assert_eq!(parsed.message_id, packet.message_id);
+        assert_eq!(parsed.ciphertext, packet.ciphertext);
+        assert_eq!(parsed.nonce, packet.nonce);
+        assert_eq!(parsed.tag, packet.tag);
+        assert_eq!(parsed.reply_to_id, packet.reply_to_id);
+    }
+    
+    #[test]
+    fn test_packet_too_short() {
+        let bytes = vec![0u8; 60];
+        let result = parse_text_packet(&bytes);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_max_packet_size_logic() {
+        assert_eq!(MAX_PACKET_SIZE, 65536);
+        let packet = aura_protocol::EncryptedTextPacket {
+            sender_session_id: 1,
+            channel_id: 1,
+            epoch: 1,
+            message_id: "msg_1".to_string(),
+            ciphertext: vec![0u8; 70000],
+            nonce: vec![0u8; 24],
+            tag: vec![0u8; 16],
+            reply_to_id: "".to_string(),
+        };
+        
+        let bytes = serialize_text_packet(&packet);
+        assert!(bytes.len() > MAX_PACKET_SIZE);
+        let result = parse_text_packet(&bytes);
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_invalid_utf8_message_id() {
+         let packet = aura_protocol::EncryptedTextPacket {
+            sender_session_id: 1,
+            channel_id: 1,
+            epoch: 1,
+            message_id: "valid".to_string(),
+            ciphertext: vec![],
+            nonce: vec![0u8; 24],
+            tag: vec![0u8; 16],
+            reply_to_id: "".to_string(),
+        };
+        
+        let mut bytes = serialize_text_packet(&packet);
+        bytes[17] = 0xFF;
+        let result = parse_text_packet(&bytes);
+        assert!(result.is_err());
+    }
+}
