@@ -1,19 +1,26 @@
 import Foundation
 import Combine
 import Network
+import Observation
 
 /// Native QUIC client for Aura server using Apple's Network framework.
 /// Uses NWConnectionGroup to handle server-initiated streams for Apple/Quinn interop.
+@Observable
 @MainActor
-public class QuicNetworkClient: ObservableObject {
+public class QuicNetworkClient {
     
     // MARK: - Published State
     
-    @Published public var isConnected = false
-    @Published public var isAuthenticated = false
-    @Published public var connectionStatus = "Disconnected"
-    @Published public var userId: UInt32 = 0
-    @Published public var sessionToken: String?
+    public var isConnected = false
+    public var isAuthenticated = false
+    public var connectionStatus = "Disconnected"
+    public var userId: UInt32 = 0
+    public var sessionToken: String?
+    public var currentChannelId: UInt32?
+    public var sessionId: UInt32?  // Our own session ID
+    
+    /// Users by channel ID (tracks all channels, not just current)
+    public var usersByChannel: [UInt32: [ChannelUser]] = [:]
     
     // MARK: - Private Properties
     
@@ -37,9 +44,21 @@ public class QuicNetworkClient: ObservableObject {
     private static let MSG_AUTH_REQUEST: UInt8 = 0x03
     private static let MSG_AUTH_RESPONSE: UInt8 = 0x04
     private static let MSG_JOIN_CHANNEL: UInt8 = 0x10
+    private static let MSG_USER_JOINED: UInt8 = 0x11
+    private static let MSG_USER_LEFT: UInt8 = 0x12
+    private static let MSG_CHANNEL_STATE: UInt8 = 0x13
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
+    
+    // Keepalive interval (must be < server timeout of 30s)
+    private static let keepaliveInterval: TimeInterval = 10.0
+    
+    /// Timer for sending keepalive pings
+    private var keepaliveTask: Task<Void, Never>?
+    
+    /// Task for listening to server messages
+    private var listenerTask: Task<Void, Never>?
     
     public init() {}
     
@@ -303,6 +322,248 @@ public class QuicNetworkClient: ObservableObject {
             
             // Auto-join default channel for testing
             try await joinChannel(1)
+            
+            // Start keepalive to prevent session timeout
+            startKeepalive()
+            
+            // Start listening for server messages (presence updates)
+            startListening()
+        }
+    }
+    
+    // MARK: - Keepalive
+    
+    /// Start periodic keepalive pings to prevent session timeout
+    private func startKeepalive() {
+        stopKeepalive()
+        
+        keepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.keepaliveInterval * 1_000_000_000))
+                
+                guard let self = self, self.isAuthenticated else { break }
+                
+                await self.sendKeepalivePing()
+            }
+        }
+        
+        print("[QuicClient] Keepalive timer started (every \(Self.keepaliveInterval)s)")
+    }
+    
+    /// Stop the keepalive timer
+    private func stopKeepalive() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
+    }
+    
+    /// Send a keepalive ping via control stream
+    private func sendKeepalivePing() async {
+        guard let stream = controlStream else { return }
+        
+        // Send keepalive ping (0x00 byte)
+        let ping = Data([0x00])
+        do {
+            try await send(data: ping, on: stream)
+        } catch {
+            print("[QuicClient] Keepalive ping failed: \(error)")
+        }
+    }
+    
+    // MARK: - Server Message Listening
+    
+    /// Start listening for messages from the server
+    private func startListening() {
+        stopListening()
+        
+        listenerTask = Task { [weak self] in
+            print("[QuicClient] Listener task started")
+            while !Task.isCancelled {
+                guard let self = self,
+                      let stream = await MainActor.run(body: { self.controlStream }),
+                      self.isAuthenticated else {
+                    print("[QuicClient] Listener stopping - no stream or not authenticated")
+                    break
+                }
+                
+                do {
+                    // Read message type byte
+                    let typeData = try await self.receiveNonBlocking(on: stream, length: 1)
+                    guard !typeData.isEmpty else {
+                        print("[QuicClient] Received empty data, continuing...")
+                        continue
+                    }
+                    
+                    let msgType = typeData[0]
+                    print(String(format: "[QuicClient] Received message type: 0x%02X", msgType))
+                    
+                    // Handle message synchronously to avoid race conditions
+                    await self.handleServerMessage(type: msgType, stream: stream)
+                } catch {
+                    // Connection closed or error
+                    print("[QuicClient] Listener error: \(error)")
+                    break
+                }
+            }
+            print("[QuicClient] Listener task ended")
+        }
+        
+        print("[QuicClient] Started listening for server messages")
+    }
+    
+    /// Stop listening for server messages
+    private func stopListening() {
+        listenerTask?.cancel()
+        listenerTask = nil
+    }
+    
+    /// Handle incoming server message based on type
+    private func handleServerMessage(type: UInt8, stream: NWConnection) async {
+        print(String(format: "[QuicClient] Handling message type: 0x%02X", type))
+        switch type {
+        case Self.MSG_USER_JOINED: // 0x11
+            await handleUserJoined(stream: stream)
+            
+        case Self.MSG_USER_LEFT: // 0x12
+            await handleUserLeft(stream: stream)
+            
+        case Self.MSG_CHANNEL_STATE: // 0x13
+            await handleChannelState(stream: stream)
+            
+        case 0x21: // MSG_AUDIO_STREAM - ignore, handled elsewhere
+            break
+            
+        default:
+            print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
+            break
+        }
+    }
+    
+    /// Handle UserJoined message
+    private func handleUserJoined(stream: NWConnection) async {
+        do {
+            // Read channel_id (4 bytes) + session_id (4 bytes) + name_len (1 byte)
+            let header = try await receive(on: stream, minimumLength: 9, maximumLength: 9)
+            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let sessionId = header.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let nameLen = Int(header[8])
+            
+            // Read display name
+            let nameData = try await receive(on: stream, minimumLength: nameLen, maximumLength: nameLen)
+            let displayName = String(data: nameData, encoding: .utf8) ?? "Unknown"
+            
+            let user = ChannelUser(sessionId: sessionId, displayName: displayName)
+            
+            // Add to channel's user list (@Observable tracks this automatically)
+            await MainActor.run {
+                // Track our own session ID when we see ourselves join
+                if sessionId != self.sessionId && displayName == UserDefaults.standard.string(forKey: "AuraDisplayName") {
+                    self.sessionId = sessionId
+                    print("[QuicClient] Detected own session ID: \(sessionId)")
+                }
+                
+                // Don't add ourselves to the user list
+                if sessionId != self.sessionId {
+                    if usersByChannel[channelId] == nil {
+                        usersByChannel[channelId] = []
+                    }
+                    usersByChannel[channelId]?.append(user)
+                    print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
+                    print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
+                } else {
+                    print("[QuicClient] Ignoring own UserJoined for channel \(channelId)")
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse UserJoined: \(error)")
+        }
+    }
+    
+    /// Handle UserLeft message
+    private func handleUserLeft(stream: NWConnection) async {
+        do {
+            // Read channel_id (4 bytes) + session_id (4 bytes)
+            let data = try await receive(on: stream, minimumLength: 8, maximumLength: 8)
+            let channelId = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let sessionId = data.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            // Remove from channel's user list (@Observable tracks this automatically)
+            await MainActor.run {
+                usersByChannel[channelId]?.removeAll { $0.id == sessionId }
+                print("[QuicClient] User left channel \(channelId): session \(sessionId)")
+                print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
+            }
+        } catch {
+            print("[QuicClient] Failed to parse UserLeft: \(error)")
+        }
+    }
+    
+    /// Handle ChannelState message
+    private func handleChannelState(stream: NWConnection) async {
+        do {
+            // Read channel_id (4 bytes) + user_count (1 byte)
+            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let headerHex = header.map { String(format: "%02X", $0) }.joined(separator: " ")
+            print("[QuicClient] ChannelState header bytes: \(headerHex)")
+            
+            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let userCount = Int(header[4])
+            
+            print("[QuicClient] ChannelState for channel \(channelId): \(userCount) users")
+            
+            var users: [ChannelUser] = []
+            
+            for i in 0..<userCount {
+                // Read session_id (4 bytes) + name_len (1 byte)
+                let userHeader = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+                let userHeaderHex = userHeader.map { String(format: "%02X", $0) }.joined(separator: " ")
+                print("[QuicClient]   User \(i+1) header: \(userHeaderHex)")
+                
+                let sessionId = userHeader.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+                let nameLen = Int(userHeader[4])
+                
+                print("[QuicClient]   Session ID: \(sessionId), Name length: \(nameLen)")
+                
+                // Read display name
+                let nameData = try await receive(on: stream, minimumLength: nameLen, maximumLength: nameLen)
+                let nameHex = nameData.map { String(format: "%02X", $0) }.joined(separator: " ")
+                print("[QuicClient]   Name bytes: \(nameHex)")
+                
+                let displayName = String(data: nameData, encoding: .utf8) ?? "Unknown"
+                
+                // Don't add ourselves to the list
+                if sessionId != self.sessionId {
+                    users.append(ChannelUser(sessionId: sessionId, displayName: displayName))
+                    print("[QuicClient]   User \(i+1): \(displayName) (session \(sessionId))")
+                } else {
+                    print("[QuicClient]   Skipping self in ChannelState: \(displayName) (session \(sessionId))")
+                }
+            }
+            
+            // Replace channel's user list (@Observable tracks this automatically)
+            await MainActor.run {
+                usersByChannel[channelId] = users
+                print("[QuicClient] Updated usersByChannel[\(channelId)] with \(users.count) users")
+                print("[QuicClient] Total channels tracked: \(usersByChannel.keys.sorted())")
+            }
+        } catch {
+            print("[QuicClient] Failed to parse ChannelState: \(error)")
+        }
+    }
+    
+    /// Non-blocking receive with timeout
+    private func receiveNonBlocking(on connection: NWConnection, length: Int) async throws -> Data {
+        return try await withCheckedThrowingContinuation { continuation in
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { data, _, isComplete, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else if let data = data {
+                    continuation.resume(returning: data)
+                } else if isComplete {
+                    continuation.resume(throwing: QuicClientError.connectionClosed)
+                } else {
+                    continuation.resume(returning: Data())
+                }
+            }
         }
     }
     
@@ -365,18 +626,23 @@ public class QuicNetworkClient: ObservableObject {
         data.append(contentsOf: withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
         
         try await send(data: data, on: stream)
-        connectionStatus = "Joined channel \(channelId)"
+        currentChannelId = channelId
+        connectionStatus = "In channel \(channelId)"
     }
     
     // MARK: - Disconnect
     
     public func disconnect() {
+        stopKeepalive()
+        stopListening()
         controlStream?.cancel()
         connectionGroup?.cancel()
         controlStream = nil
         connectionGroup = nil
         isConnected = false
         isAuthenticated = false
+        currentChannelId = nil
+        usersByChannel = [:]
         connectionStatus = "Disconnected"
         print("[QuicClient] Disconnected")
     }
@@ -432,5 +698,18 @@ public enum QuicClientError: Error, LocalizedError {
         case .authenticationFailed(let msg): return "Authentication failed: \(msg)"
         case .connectionClosed: return "Connection closed"
         }
+    }
+}
+
+// MARK: - Channel User Model
+
+/// Represents a user in a voice channel
+public struct ChannelUser: Identifiable, Hashable {
+    public let id: UInt32  // session_id
+    public let displayName: String
+    
+    public init(sessionId: UInt32, displayName: String) {
+        self.id = sessionId
+        self.displayName = displayName
     }
 }

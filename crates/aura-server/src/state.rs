@@ -45,9 +45,32 @@ pub struct ClientSession {
 }
 
 /// Internal messages sent to client connection loops
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ServiceMessage {
     RelayAudio(Bytes),
+    /// User joined a channel - broadcast to ALL connected users
+    UserJoined {
+        channel_id: u32,
+        session_id: u32,
+        display_name: String,
+    },
+    /// User left a channel - broadcast to ALL connected users
+    UserLeft {
+        channel_id: u32,
+        session_id: u32,
+    },
+    /// Full channel state - sent to new joiners
+    ChannelState {
+        channel_id: u32,
+        users: Vec<ChannelUser>,
+    },
+}
+
+/// Information about a user in a channel
+#[derive(Debug, Clone)]
+pub struct ChannelUser {
+    pub session_id: u32,
+    pub display_name: String,
 }
 
 /// Voice MLS Group - LOW CHURN
@@ -128,17 +151,19 @@ impl ServerState {
     }
 
     /// Remove a client session.
-    pub fn remove_session(&self, session_id: u32) {
+    pub async fn remove_session(&self, session_id: u32) {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
-            // Remove from groups
+            // Broadcast user left before removing from groups
             if let Some(voice_id) = session.voice_group_id {
+                self.broadcast_user_left(voice_id, session_id).await;
+                
                 if let Some(group) = self.voice_groups.get(&voice_id) {
-                    group.value().blocking_write().members.remove(&session_id);
+                    group.value().write().await.members.remove(&session_id);
                 }
             }
             if let Some(text_id) = session.text_group_id {
                 if let Some(group) = self.text_groups.get(&text_id) {
-                    group.value().blocking_write().members.remove(&session_id);
+                    group.value().write().await.members.remove(&session_id);
                 }
             }
             info!("Removed session {}", session_id);
@@ -182,6 +207,104 @@ impl ServerState {
             channel_id
         );
     }
+
+    /// Broadcast that a user joined a channel to ALL connected users.
+    /// Also sends the full channel state to the new joiner.
+    pub async fn broadcast_user_joined(&self, channel_id: u32, session_id: u32, display_name: String) {
+        // Get all members of the voice group
+        if let Some(group_lock) = self.voice_groups.get(&channel_id) {
+            let group = group_lock.read().await;
+            
+            // Collect current users for the new joiner (excluding themselves)
+            let mut users = Vec::new();
+            for member_id in group.members.iter() {
+                if *member_id != session_id {  // Exclude the joiner
+                    if let Some(sess) = self.sessions.get(&*member_id) {
+                        // Look up display name from DB
+                        let name = self.db.find_user_by_uuid(&sess.user_uuid)
+                            .ok()
+                            .flatten()
+                            .map(|u| u.display_name)
+                            .unwrap_or_else(|| format!("User {}", *member_id));
+                        
+                        users.push(ChannelUser {
+                            session_id: *member_id,
+                            display_name: name,
+                        });
+                    }
+                }
+            }
+            
+            // Broadcast UserJoined to ALL connected users (not just in this channel)
+            for sess in self.sessions.iter() {
+                if *sess.key() != session_id {
+                    let _ = sess.sender.send(ServiceMessage::UserJoined {
+                        channel_id,
+                        session_id,
+                        display_name: display_name.clone(),
+                    });
+                }
+            }
+            
+            // Send full channel state to the new joiner
+            if let Some(new_sess) = self.sessions.get(&session_id) {
+                let _ = new_sess.sender.send(ServiceMessage::ChannelState {
+                    channel_id,
+                    users,
+                });
+            }
+        }
+    }
+
+    /// Broadcast that a user left a channel to ALL connected users.
+    pub async fn broadcast_user_left(&self, channel_id: u32, session_id: u32) {
+        // Broadcast to ALL connected users (not just in this channel)
+        for sess in self.sessions.iter() {
+            if *sess.key() != session_id {
+                let _ = sess.sender.send(ServiceMessage::UserLeft {
+                    channel_id,
+                    session_id,
+                });
+            }
+        }
+    }
+
+    /// Send the state of all channels to a newly connected user
+    pub async fn send_all_channel_states(&self, session_id: u32) {
+        if let Some(sess) = self.sessions.get(&session_id) {
+            // Iterate through all voice groups
+            for group_entry in self.voice_groups.iter() {
+                let channel_id = *group_entry.key();
+                let group = group_entry.value().read().await;
+                
+                // Collect users in this channel
+                let mut users = Vec::new();
+                for member_id in group.members.iter() {
+                    if let Some(member_sess) = self.sessions.get(&*member_id) {
+                        let name = self.db.find_user_by_uuid(&member_sess.user_uuid)
+                            .ok()
+                            .flatten()
+                            .map(|u| u.display_name)
+                            .unwrap_or_else(|| format!("User {}", *member_id));
+                        
+                        users.push(ChannelUser {
+                            session_id: *member_id,
+                            display_name: name,
+                        });
+                    }
+                }
+                
+                // Send channel state if there are users
+                if !users.is_empty() {
+                    let _ = sess.sender.send(ServiceMessage::ChannelState {
+                        channel_id,
+                        users,
+                    });
+                }
+            }
+        }
+    }
+
 
     // --- MLS Delivery Service (Reliable Signaling) ---
 
@@ -291,7 +414,7 @@ impl ServerState {
     // --- Hot Path Media Relay ---
 
     /// Route audio packet to voice group members.
-    pub fn route_audio_packet(&self, raw_bytes: Bytes) {
+    pub async fn route_audio_packet(&self, raw_bytes: Bytes) {
         let packet = match FastAudioPacket::parse(raw_bytes.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -315,7 +438,7 @@ impl ServerState {
 
         let members: Vec<u32> = match self.voice_groups.get(&voice_group_id) {
             Some(g) => {
-                let group = g.value().blocking_read();
+                let group = g.value().read().await;
                 group.members.iter().map(|id| *id).collect()
             },
             None => return,

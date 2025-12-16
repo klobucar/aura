@@ -14,9 +14,12 @@ pub mod crypto;
 pub mod audio_pipeline;
 pub mod mls;
 pub mod text_crypto;
+pub mod voice_session;
+pub mod audio_io;
+pub mod vad;
 pub mod uniffi_bindings;
 
-uniffi::include_scaffolding!("aura");
+uniffi::setup_scaffolding!("aura_core");
 
 // =============================================================================
 // SECURITY: XChaCha20-Poly1305 Encryption (DAVE Protocol)
@@ -63,7 +66,7 @@ uniffi::include_scaffolding!("aura");
 // =============================================================================
 
 /// Errors that can occur in the Aura client
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AuraError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
@@ -88,6 +91,7 @@ pub enum AuraError {
 /// 
 /// This is the primary interface for connecting to an Aura server.
 /// It handles QUIC connections, MLS group management, and audio/text streaming.
+#[derive(uniffi::Object)]
 pub struct AuraClient {
     url: String,
     identity_file: String,
@@ -105,8 +109,10 @@ pub struct AuraClient {
     sequence: AtomicU16,
 }
 
+#[uniffi::export]
 impl AuraClient {
     /// Create a new AuraClient
+    #[uniffi::constructor]
     pub fn new(url: String, identity_file: String) -> Self {
         Self {
             url,
@@ -274,6 +280,7 @@ impl AuraClient {
 /// 
 /// Swift: DispatchQueue.main.async { ... }
 /// C#:   Dispatcher.UIThread.Post(() => { ... });
+#[uniffi::export(callback_interface)]
 pub trait AuraDelegate: Send + Sync {
     // Connection events
     fn on_connected(&self);

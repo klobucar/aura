@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 struct LoginView: View {
     @StateObject private var identity = UserIdentity()
-    @StateObject private var client = QuicNetworkClient()
+    @State private var client = QuicNetworkClient()
     
     // Parse old format that might include port
     @State private var serverAddress: String = {
@@ -135,7 +135,7 @@ struct LoginView: View {
             
             Spacer()
         }
-        .frame(width: 400, height: 550)
+        .padding(.bottom, 24)
         .background(VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow))
         .onAppear {
             identity.loadOrGenerate()

@@ -11,7 +11,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 
 // Protocol message types
 const MSG_CHALLENGE_REQUEST: u8 = 0x01;
@@ -147,22 +147,85 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         let session_id = state.register_session(user_uuid.clone(), remote, tx);
         
         info!("[{}] Session {} registered for user {}", remote, session_id, user_uuid);
+        
+        // Send initial state of all channels to the new user
+        state.send_all_channel_states(session_id).await;
 
-        let mut buf = [0u8; 1024];
+        // Keepalive interval
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(10));
+        let mut last_activity = std::time::Instant::now();
+        let keepalive_timeout = std::time::Duration::from_secs(30);
 
         // Main loop - handle streams, datagrams, and internal messages
         loop {
             tokio::select! {
+                // Handle QUIC datagrams (unreliable fast path for audio)
+                datagram = conn.read_datagram() => {
+                    match datagram {
+                        Ok(data) => {
+                            last_activity = std::time::Instant::now();
+                            // Route audio packet (first byte indicates type)
+                            if !data.is_empty() {
+                                match data[0] {
+                                    0x01 => {
+                                        // Audio packet (skip type byte)
+                                        if data.len() > 1 {
+                                            state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
+                                        }
+                                    }
+                                    0x00 => {
+                                        // Keepalive ping - respond with pong
+                                        let _ = conn.send_datagram(bytes::Bytes::from_static(&[0x00]));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("[{}] Datagram read error: {}", remote, e);
+                        }
+                    }
+                }
+
                 // Monitor control stream
                 control_msg = control_recv.read_u8() => {
                     match control_msg {
                         Ok(msg_type) => {
+                            last_activity = std::time::Instant::now();
                              match msg_type {
+                                0x00 => { // Keepalive ping via control stream
+                                    debug!("[{}] Keepalive ping received", remote);
+                                    // Activity already updated above, nothing else needed
+                                }
                                 0x10 => { // MSG_JOIN_CHANNEL
                                     let mut buf = [0u8; 4];
                                     if control_recv.read_exact(&mut buf).await.is_ok() {
                                         let channel_id = u32::from_le_bytes(buf);
                                         state.create_channel(channel_id); // Ensure exists
+                                        
+                                        // Get display name for broadcast
+                                        let display_name = state.db.find_user_by_uuid(&user_uuid)
+                                            .ok()
+                                            .flatten()
+                                            .map(|u| u.display_name)
+                                            .unwrap_or_else(|| format!("User {}", session_id));
+                                        
+                                        // Check if switching from another channel
+                                        let old_channel_id = state.sessions.get(&session_id)
+                                            .and_then(|s| s.voice_group_id);
+                                        
+                                        // Leave old channel if different
+                                        if let Some(old_id) = old_channel_id {
+                                            if old_id != channel_id {
+                                                // Broadcast user left to old channel
+                                                state.broadcast_user_left(old_id, session_id).await;
+                                                
+                                                // Remove from old voice group
+                                                if let Some(vg) = state.voice_groups.get(&old_id) {
+                                                    vg.value().write().await.members.remove(&session_id);
+                                                }
+                                            }
+                                        }
                                         
                                         // Update session
                                         if let Some(mut sess) = state.sessions.get_mut(&session_id) {
@@ -174,10 +237,14 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                                 vg.value().write().await.members.insert(session_id);
                                             }
                                         }
+                                        
+                                        // Broadcast user joined to channel
+                                        state.broadcast_user_joined(channel_id, session_id, display_name).await;
+                                        
                                         info!("[{}] User {} joined channel {}", remote, user_uuid, channel_id);
                                     }
                                 }
-                                0x20 => { // MSG_AUDIO
+                                0x20 => { // MSG_AUDIO (legacy reliable path)
                                     // Format: [20] [Length u32] [Payload...]
                                     let mut len_buf = [0u8; 4];
                                     if control_recv.read_exact(&mut len_buf).await.is_ok() {
@@ -186,7 +253,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                         // Read payload
                                         let mut packet_buf = vec![0u8; packet_len];
                                         if control_recv.read_exact(&mut packet_buf).await.is_ok() {
-                                            state.route_audio_packet(bytes::Bytes::from(packet_buf));
+                                            state.route_audio_packet(bytes::Bytes::from(packet_buf)).await;
                                         }
                                     }
                                 }
@@ -203,18 +270,67 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                 Some(msg) = rx.recv() => {
                     match msg {
                         ServiceMessage::RelayAudio(packet) => {
-                             // Send via control stream (0x20 + Packet)
-                             let _ = control_send.write_u8(MSG_AUDIO_STREAM).await;
-                             let _ = control_send.write_all(&packet).await;
-                             let _ = control_send.flush().await;
+                            // Try datagram first (fast path), fall back to stream
+                            let mut dgram_data = vec![0x01u8]; // Audio type
+                            dgram_data.extend_from_slice(&packet);
+                            if conn.send_datagram(bytes::Bytes::from(dgram_data)).is_err() {
+                                // Fallback to reliable stream
+                                let _ = control_send.write_u8(MSG_AUDIO_STREAM).await;
+                                let _ = control_send.write_all(&packet).await;
+                                let _ = control_send.flush().await;
+                            }
+                        }
+                        ServiceMessage::UserJoined { channel_id, session_id: joined_id, display_name } => {
+                            // Send user joined message: [0x11] [channel_id u32] [session_id u32] [name_len u8] [name...]
+                            let name_bytes = display_name.as_bytes();
+                            let mut msg = vec![0x11u8];
+                            msg.extend_from_slice(&channel_id.to_le_bytes());
+                            msg.extend_from_slice(&joined_id.to_le_bytes());
+                            msg.push(name_bytes.len() as u8);
+                            msg.extend_from_slice(name_bytes);
+                            let _ = control_send.write_all(&msg).await;
+                            let _ = control_send.flush().await;
+                        }
+                        ServiceMessage::UserLeft { channel_id, session_id: left_id } => {
+                            // Send user left message: [0x12] [channel_id u32] [session_id u32]
+                            let mut msg = vec![0x12u8];
+                            msg.extend_from_slice(&channel_id.to_le_bytes());
+                            msg.extend_from_slice(&left_id.to_le_bytes());
+                            let _ = control_send.write_all(&msg).await;
+                            let _ = control_send.flush().await;
+                        }
+                        ServiceMessage::ChannelState { channel_id, users } => {
+                            // Send channel state: [0x13] [channel_id u32] [user_count u8] [users...]
+                            let mut msg = vec![0x13u8];
+                            msg.extend_from_slice(&channel_id.to_le_bytes());
+                            msg.push(users.len().min(255) as u8);
+                            for user in users.iter().take(255) {
+                                msg.extend_from_slice(&user.session_id.to_le_bytes());
+                                let name_bytes = user.display_name.as_bytes();
+                                msg.push(name_bytes.len().min(255) as u8);
+                                msg.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
+                            }
+                            let _ = control_send.write_all(&msg).await;
+                            let _ = control_send.flush().await;
                         }
                     }
+                }
+
+                // Keepalive timer
+                _ = keepalive.tick() => {
+                    // Check for timeout
+                    if last_activity.elapsed() > keepalive_timeout {
+                        warn!("[{}] Session {} timed out", remote, session_id);
+                        break;
+                    }
+                    // Send keepalive ping via datagram
+                    let _ = conn.send_datagram(bytes::Bytes::from_static(&[0x00]));
                 }
             }
         }
 
         // Cleanup
-        state.remove_session(session_id);
+        state.remove_session(session_id).await;
         info!("[{}] Session {} disconnected", remote, session_id);
         Ok(())
     }

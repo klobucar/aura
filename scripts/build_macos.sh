@@ -60,6 +60,7 @@ else
 fi
 
 TARGET_DIR="$REPO_ROOT/target/$RUST_TARGET/$RUST_PROFILE"
+DYLIB="$TARGET_DIR/libaura_core.dylib"
 
 echo "==========================================="
 echo "Aura macOS Build"
@@ -97,8 +98,9 @@ echo "🔧 Generating UniFFI bindings..."
 mkdir -p "$OUTPUT_DIR"
 
 # Generate Swift bindings
+# Generate Swift bindings from the built dynamic library (Proc-Macro mode)
 cargo run -p aura-core --bin uniffi-bindgen generate \
-    "$UDL_FILE" \
+    --library "$DYLIB" \
     --language swift \
     --out-dir "$OUTPUT_DIR"
 
@@ -112,6 +114,7 @@ echo ""
 echo "📋 Copying library..."
 
 # Copy static library (for Xcode linking)
+# Copy static library (for Xcode linking)
 STATIC_LIB="$TARGET_DIR/libaura_core.a"
 if [ -f "$STATIC_LIB" ]; then
     cp "$STATIC_LIB" "$OUTPUT_DIR/"
@@ -119,6 +122,9 @@ if [ -f "$STATIC_LIB" ]; then
 else
     echo "⚠️  Static library not found at $STATIC_LIB"
 fi
+
+# Define DYLIB path for binding generation
+DYLIB="$TARGET_DIR/libaura_core.dylib"
 
 # Copy dynamic library (for runtime if needed)
 DYLIB="$TARGET_DIR/libaura_core.dylib"
@@ -143,6 +149,16 @@ module aura_coreFFI {
 EOF
 
 echo "✅ Module map created"
+
+# =============================================================================
+# Step 5: Sync to Xcode Location (Fix for Path Issues)
+# =============================================================================
+
+echo ""
+echo "🔄 Syncing library to target/release/ (where Xcode looks)..."
+mkdir -p "$REPO_ROOT/target/release"
+cp "$TARGET_DIR/libaura_core.a" "$REPO_ROOT/target/release/libaura_core.a"
+echo "✅ Library synced to target/release/"
 
 # =============================================================================
 # Done!

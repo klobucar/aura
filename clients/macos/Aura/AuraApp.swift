@@ -13,5 +13,9 @@ struct AuraApp: App {
                 .background(VisualEffectBlur(material: .headerView, blendingMode: .behindWindow))
         }
         .windowStyle(HiddenTitleBarWindowStyle())
+        .defaultSize(width: 900, height: 600)
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+        }
     }
 }
