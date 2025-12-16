@@ -32,18 +32,22 @@ public class UserIdentity: ObservableObject {
         print("[Identity] Public key: \(publicKeyHex)")
     }
     
-    /// Load keypair from Keychain, or generate new one if not found.
+    /// Generate a fresh keypair and random display name for testing.
+    /// Each app launch gets a new identity.
     public func loadOrGenerate() {
-        if loadFromKeychain() {
-            print("[Identity] Loaded existing keypair from Keychain")
-        } else {
-            generateKeypair()
-            saveToKeychain()
-            print("[Identity] Saved new keypair to Keychain")
-        }
+        // Generate random display name for testing (User1234)
+        displayName = "User\(Int.random(in: 1000...9999))"
         
-        // Load display name from UserDefaults
-        displayName = UserDefaults.standard.string(forKey: "AuraDisplayName") ?? ""
+        // Save to UserDefaults so session ID detection can use it
+        UserDefaults.standard.set(displayName, forKey: "AuraDisplayName")
+        
+        // Always generate new keypair for testing
+        generateKeypair()
+        
+        print("[Identity] Generated fresh test identity: '\(displayName)'")
+        
+        // Optionally save to Keychain (not loading from it for testing)
+        // saveToKeychain()
     }
     
     /// Save display name to UserDefaults.
@@ -78,11 +82,14 @@ public class UserIdentity: ObservableObject {
         
         let privateKeyData = key.rawRepresentation
         
+        // Use display name in account key for separate identities
+        let account = "ed25519-private-key-\(displayName)"
+        
         // Delete existing key first
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount
+            kSecAttrAccount as String: account
         ]
         SecItemDelete(deleteQuery as CFDictionary)
         
@@ -90,7 +97,7 @@ public class UserIdentity: ObservableObject {
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
+            kSecAttrAccount as String: account,
             kSecValueData as String: privateKeyData,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
@@ -102,10 +109,13 @@ public class UserIdentity: ObservableObject {
     }
     
     private func loadFromKeychain() -> Bool {
+        // Use display name in account key
+        let account = "ed25519-private-key-\(displayName)"
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true
         ]
         

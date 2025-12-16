@@ -6,6 +6,7 @@ use crate::auth::AuthService;
 use crate::state::{ServerState, ServiceMessage};
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
+use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
@@ -20,6 +21,7 @@ const MSG_AUTH_REQUEST: u8 = 0x03;
 const MSG_AUTH_RESPONSE: u8 = 0x04;
 const MSG_JOIN_CHANNEL: u8 = 0x10;
 const MSG_AUDIO_STREAM: u8 = 0x20;
+const MSG_TEXT_PACKET: u8 = 0x30;
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -128,8 +130,8 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 
         info!("[{}] Control stream opened", remote);
 
-        // Authenticate the client - get back the streams for reuse
-        let (auth_session, mut control_send, mut control_recv) = match authenticate_client(control_send_initial, control_recv_initial, &state, remote).await {
+        // Authenticate the client - returns session_id directly now
+        let (session_id, user_uuid, mut control_send, mut control_recv, mut rx) = match authenticate_client(control_send_initial, control_recv_initial, &state, remote).await {
             Ok(result) => result,
             Err(e) => {
                 warn!("[{}] Authentication failed: {}", remote, e);
@@ -138,15 +140,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         };
 
         // Session already registered in authenticate_client
-        let user_uuid = auth_session.user_uuid.clone();
-        
-        // Create internal channel for receiving messages from state
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        
-        // Register session with state
-        let session_id = state.register_session(user_uuid.clone(), remote, tx);
-        
-        info!("[{}] Session {} registered for user {}", remote, session_id, user_uuid);
+        info!("[{}] Session {} authenticated for user {}", remote, session_id, user_uuid);
         
         // Send initial state of all channels to the new user
         state.send_all_channel_states(session_id).await;
@@ -204,7 +198,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                         state.create_channel(channel_id); // Ensure exists
                                         
                                         // Get display name for broadcast
-                                        let display_name = state.db.find_user_by_uuid(&user_uuid)
+                                        let display_name = state.db.find_user_by_uuid(&user_uuid.to_string())
                                             .ok()
                                             .flatten()
                                             .map(|u| u.display_name)
@@ -224,6 +218,10 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                                 if let Some(vg) = state.voice_groups.get(&old_id) {
                                                     vg.value().write().await.members.remove(&session_id);
                                                 }
+                                                // Remove from old text group
+                                                if let Some(tg) = state.text_groups.get(&old_id) {
+                                                    tg.value().write().await.members.remove(&session_id);
+                                                }
                                             }
                                         }
                                         
@@ -235,6 +233,10 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                             // Add to voice group
                                             if let Some(vg) = state.voice_groups.get(&channel_id) {
                                                 vg.value().write().await.members.insert(session_id);
+                                            }
+                                            // Add to text group
+                                            if let Some(tg) = state.text_groups.get(&channel_id) {
+                                                tg.value().write().await.members.insert(session_id);
                                             }
                                         }
                                         
@@ -254,6 +256,71 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                         let mut packet_buf = vec![0u8; packet_len];
                                         if control_recv.read_exact(&mut packet_buf).await.is_ok() {
                                             state.route_audio_packet(bytes::Bytes::from(packet_buf)).await;
+                                        }
+                                    }
+                                }
+                                0x30 => { // MSG_TEXT_PACKET
+                                    // Format: [0x30] [Length u32] [BinaryPacket]
+                                    // BinaryPacket: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16)
+                                    let mut len_buf = [0u8; 4];
+                                    if control_recv.read_exact(&mut len_buf).await.is_ok() {
+                                        let packet_len = u32::from_le_bytes(len_buf) as usize;
+                                        
+                                        // Read binary payload
+                                        let mut packet_buf = vec![0u8; packet_len];
+                                        if control_recv.read_exact(&mut packet_buf).await.is_ok() {
+                                            // Parse binary format
+                                            if packet_buf.len() >= 60 { // min: 4+4+8+4+0+24+16 = 60
+                                                let sender_session_id = u32::from_le_bytes([packet_buf[0], packet_buf[1], packet_buf[2], packet_buf[3]]);
+                                                let channel_id = u32::from_le_bytes([packet_buf[4], packet_buf[5], packet_buf[6], packet_buf[7]]);
+                                                let epoch = u64::from_le_bytes([packet_buf[8], packet_buf[9], packet_buf[10], packet_buf[11], packet_buf[12], packet_buf[13], packet_buf[14], packet_buf[15]]);
+                                                let content_len = u32::from_le_bytes([packet_buf[16], packet_buf[17], packet_buf[18], packet_buf[19]]) as usize;
+                                                
+                                                let content_end = 20 + content_len;
+                                                let nonce_end = content_end + 24;
+                                                
+                                                if packet_buf.len() >= nonce_end + 16 {
+                                                    let ciphertext = packet_buf[20..content_end].to_vec();
+                                                    let nonce = packet_buf[content_end..nonce_end].to_vec();
+                                                    let tag = packet_buf[nonce_end..nonce_end+16].to_vec();
+                                                    
+                                                    // Check for reply_to_id
+                                                    let mut reply_to_id = String::new();
+                                                    let reply_offset = nonce_end + 16;
+                                                    if packet_buf.len() > reply_offset {
+                                                        let reply_len = packet_buf[reply_offset] as usize;
+                                                        if reply_len > 0 && packet_buf.len() >= reply_offset + 1 + reply_len {
+                                                            if let Ok(s) = String::from_utf8(packet_buf[reply_offset+1..reply_offset+1+reply_len].to_vec()) {
+                                                                reply_to_id = s;
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    // Create EncryptedTextPacket from binary data
+                                                    let text_packet = aura_protocol::EncryptedTextPacket {
+                                                        sender_session_id,
+                                                        channel_id,
+                                                        epoch,
+                                                        ciphertext,
+                                                        nonce,
+                                                        tag,
+                                                        reply_to_id,
+                                                    };
+                                                    
+                                                    info!("[{}] Text packet from session {} in channel {}", remote, sender_session_id, channel_id);
+                                                    
+                                                    // Broadcast to text group members (zero-knowledge routing)
+                                                    let needs_ratchet = state.broadcast_text_message(session_id, text_packet).await;
+                                                    if needs_ratchet {
+                                                        info!("[{}] Text group {} needs ratcheting", remote, session_id);
+                                                        // TODO: Signal client to initiate MLS commit
+                                                    }
+                                                } else {
+                                                    warn!("[{}] Text packet too short for nonce+tag", remote);
+                                                }
+                                            } else {
+                                                warn!("[{}] Text packet too short: {} bytes", remote, packet_buf.len());
+                                            }
                                         }
                                     }
                                 }
@@ -313,6 +380,37 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             let _ = control_send.write_all(&msg).await;
                             let _ = control_send.flush().await;
                         }
+                        ServiceMessage::RelayText(text_packet) => {
+                            // Send text packet: [0x30] [Length u32] [BinaryPacket]
+                            // BinaryPacket: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16)
+                            let mut packet_bytes = Vec::new();
+                            packet_bytes.extend_from_slice(&text_packet.sender_session_id.to_le_bytes());
+                            packet_bytes.extend_from_slice(&text_packet.channel_id.to_le_bytes());
+                            packet_bytes.extend_from_slice(&text_packet.epoch.to_le_bytes());
+                            packet_bytes.extend_from_slice(&(text_packet.ciphertext.len() as u32).to_le_bytes());
+                            packet_bytes.extend_from_slice(&text_packet.ciphertext);
+                            packet_bytes.extend_from_slice(&text_packet.nonce);
+                            packet_bytes.extend_from_slice(&text_packet.tag);
+                            
+                            // Append reply_to_id
+                            if !text_packet.reply_to_id.is_empty() {
+                                let reply_bytes = text_packet.reply_to_id.as_bytes();
+                                if reply_bytes.len() <= 255 {
+                                    packet_bytes.push(reply_bytes.len() as u8);
+                                    packet_bytes.extend_from_slice(reply_bytes);
+                                } else {
+                                    packet_bytes.push(0);
+                                }
+                            } else {
+                                packet_bytes.push(0);
+                            }
+                            
+                            let mut msg = vec![MSG_TEXT_PACKET];
+                            msg.extend_from_slice(&(packet_bytes.len() as u32).to_le_bytes());
+                            msg.extend_from_slice(&packet_bytes);
+                            let _ = control_send.write_all(&msg).await;
+                            let _ = control_send.flush().await;
+                        }
                     }
                 }
 
@@ -348,13 +446,13 @@ struct AuthSession {
 /// 1. Server sends ServerHello with challenge
 /// 2. Client sends AuthRequest with public key, name, signature of challenge
 /// 3. Server validates and sends AuthResponse
-/// Returns (ClientSession, SendStream, RecvStream) for reuse after auth.
+/// Returns (session_id, user_uuid, SendStream, RecvStream, rx) for reuse after auth.
 async fn authenticate_client(
     mut send: SendStream,
     mut recv: RecvStream,
-    state: &ServerState,
+    state: &Arc<ServerState>,
     remote: SocketAddr,
-) -> Result<(AuthSession, SendStream, RecvStream)> {
+) -> Result<(u32, String, SendStream, RecvStream, tokio::sync::mpsc::UnboundedReceiver<ServiceMessage>)> {
     // Step 1: Server sends challenge first (ServerHello)
     let challenge = AuthService::generate_challenge();
     info!("[Auth] Sending ServerHello with challenge: {}...", hex::encode(&challenge[..8]));
@@ -429,26 +527,36 @@ async fn authenticate_client(
     // Send auth response
     let mut response = BytesMut::new();
     response.put_u8(MSG_AUTH_RESPONSE);
-    
+
     match auth_result {
         Ok(result) => {
-            response.put_u8(1); // success
-            response.put_u32_le(0); // Temporary - will be replaced with actual session_id after registration
-            
-            let token_bytes = result.session_token.as_bytes();
+            let user_uuid = result.user_uuid.clone();
+            let session_token = result.session_token.clone();
+            let verified = result.verified;
+
+            // Register session BEFORE sending auth response so we have a real session_id
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let session_id = state.register_session(user_uuid.to_string(), remote, tx);
+
+            info!("[Auth] Registered session {} for user {}", session_id, user_uuid);
+
+            let success = true;
+
+            response.put_u8(if success { 1 } else { 0 }); // success
+            response.put_u32_le(session_id); // REAL session ID
+
+            debug!("[Auth] Sending AuthResponse: session_id={}, success={}, verified={}", session_id, success, verified);
+
+            let token_bytes = session_token.as_bytes();
             response.put_u8(token_bytes.len() as u8);
             response.put_slice(token_bytes);
-            
-            response.put_u8(if result.verified { 1 } else { 0 });
+
+            response.put_u8(if verified { 1 } else { 0 });
             response.put_u8(0); // no error message
-            
+
             send.write_all(&response).await?;
-            
-            Ok((AuthSession {
-                session_id: 0, // Will be set after registration in main handler
-                user_uuid: result.user_uuid,
-                session_token: result.session_token,
-            }, send, recv))
+
+            Ok((session_id, user_uuid.to_string(), send, recv, _rx))
         }
         Err(e) => {
             response.put_u8(0); // failure

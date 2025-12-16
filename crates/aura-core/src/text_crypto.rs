@@ -41,6 +41,7 @@ pub fn encrypt_text(
         ciphertext: ciphertext_without_tag,
         nonce: nonce.to_vec(),
         tag,
+        reply_to_id: message.reply_to_id.clone(),
     })
 }
 

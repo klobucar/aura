@@ -32,7 +32,7 @@
 /* Begin PBXFileReference section */
 		260C27732EEE054F00FD1227 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		260C27752EEE055A00FD1227 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
-		260C27772EEE05D900FD1227 /* libaura_core.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libaura_core.a; path = ../../target/release/libaura_core.a; sourceTree = "<group>"; };
+		260C27772EEE05D900FD1227 /* libaura_core.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libaura_core.a; path = /Users/crabclaw/src/aura/target/release/libaura_core.a; sourceTree = "<group>"; };
 		26CEE0C42EEE01F5007D1C27 /* Aura.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aura.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		26CEE0D12EEE01F6007D1C27 /* AuraTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AuraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		26CEE0DB2EEE01F6007D1C27 /* AuraUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AuraUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };

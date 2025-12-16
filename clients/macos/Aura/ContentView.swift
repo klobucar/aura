@@ -12,6 +12,12 @@ struct ContentView: View {
     @StateObject private var audioCapture = AudioCapture()
     @State private var isMicEnabled = false
     
+    // Chat state
+    @State private var chatMessages: [ChatMessage] = []
+    @State private var messageText = ""
+    @State private var showingChat = true
+    @State private var replyingTo: ChatMessage?
+    
     // Channel definitions
     private let channels: [Channel] = [
         Channel(id: 1, name: "General", icon: "speaker.wave.2"),
@@ -240,6 +246,14 @@ struct ContentView: View {
                 
                 Spacer()
                 
+                // Toggle chat button
+                Button(action: { showingChat.toggle() }) {
+                    Image(systemName: showingChat ? "bubble.left.fill" : "bubble.left")
+                        .foregroundColor(showingChat ? .blue : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help(showingChat ? "Hide Chat" : "Show Chat")
+                
                 // User count badge
                 Text("\(userCount)")
                     .font(.caption)
@@ -255,49 +269,159 @@ struct ContentView: View {
             
             Divider()
             
-            Spacer()
-            
-            // Mic status indicator
-            VStack(spacing: 24) {
-                ZStack {
-                    Circle()
-                        .fill(isMicEnabled ? Color.green.opacity(0.1) : Color.secondary.opacity(0.05))
-                        .frame(width: 120, height: 120)
+            // Main content - Voice and Chat
+            HSplitView {
+                // Voice status (left)
+                VStack(spacing: 24) {
+                    Spacer()
                     
-                    Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
-                        .font(.system(size: 48))
-                        .foregroundColor(isMicEnabled ? .green : .secondary)
-                }
-                
-                VStack(spacing: 8) {
-                    Text(isMicEnabled ? "Transmitting" : "Microphone Muted")
-                        .font(.title2)
-                        .fontWeight(.medium)
-                    
-                    if isMicEnabled {
-                        Text("\(audioCapture.packetsSent) packets sent")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    ZStack {
+                        Circle()
+                            .fill(isMicEnabled ? Color.green.opacity(0.1) : Color.secondary.opacity(0.05))
+                            .frame(width: 100, height: 100)
+                        
+                        Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
+                            .font(.system(size: 40))
+                            .foregroundColor(isMicEnabled ? .green : .secondary)
                     }
+                    
+                    VStack(spacing: 8) {
+                        Text(isMicEnabled ? "Transmitting" : "Muted")
+                            .font(.headline)
+                            .fontWeight(.medium)
+                        
+                        if isMicEnabled {
+                            Text("\(audioCapture.packetsSent) packets")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Button(action: { toggleMic(client: client) }) {
+                        Label(isMicEnabled ? "Mute" : "Unmute", 
+                              systemImage: isMicEnabled ? "mic.fill" : "mic.slash")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(isMicEnabled ? .green : .secondary)
+                    .controlSize(.regular)
+                    
+                    Spacer()
+                }
+                .frame(minWidth: 200)
+                
+                // Chat panel (right)
+                if showingChat {
+                    VStack(spacing: 0) {
+                        // Messages list
+                        ScrollViewReader { scrollProxy in
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 8) {
+                                    ForEach(chatMessages) { message in
+                                        MessageBubble(message: message) { msg in
+                                            replyingTo = msg
+                                        }
+                                        .id(message.id)
+                                    }
+                                }
+                                .padding()
+                            }
+                            .onChange(of: chatMessages.count) { _, _ in
+                                if let lastMessage = chatMessages.last {
+                                    withAnimation {
+                                        scrollProxy.scrollTo(lastMessage.id, anchor: .bottom)
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        // Reply preview bar
+                        if let replying = replyingTo {
+                            HStack {
+                                Rectangle()
+                                    .fill(Color.blue)
+                                    .frame(width: 4)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Replying to \(replying.senderName)")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.blue)
+                                    Text(replying.content)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                                
+                                Spacer()
+                                
+                                Button(action: { replyingTo = nil }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 8)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                        }
+                        
+                        // Message input
+                        HStack(spacing: 8) {
+                            TextField("Message...", text: $messageText)
+                                .textFieldStyle(.plain)
+                                .padding(8)
+                                .background(Color(nsColor: .textBackgroundColor))
+                                .cornerRadius(8)
+                                .onSubmit {
+                                    sendMessage(client: client)
+                                }
+                            
+                            Button(action: { sendMessage(client: client) }) {
+                                Image(systemName: "paperplane.fill")
+                                    .foregroundColor(messageText.isEmpty ? .secondary : .blue)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(messageText.isEmpty)
+                        }
+                        .padding()
+                        .background(Color(nsColor: .controlBackgroundColor))
+                    }
+                    .frame(minWidth: 250)
                 }
             }
-            
-            Spacer()
-            
-            // Controls
-            HStack(spacing: 16) {
-                Button(action: { toggleMic(client: client) }) {
-                    Label(isMicEnabled ? "Mute" : "Unmute", 
-                          systemImage: isMicEnabled ? "mic.fill" : "mic.slash")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(isMicEnabled ? .green : .secondary)
-                .controlSize(.large)
-            }
-            .padding(.bottom, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+        .onChange(of: client.receivedMessages) { oldValue, newValue in
+            // Add new incoming messages to chat
+            for msg in newValue where !oldValue.contains(msg) {
+                guard msg.channelId == client.currentChannelId else { continue }
+                guard msg.senderSessionId != client.sessionId else { continue }  // Skip own messages
+                
+                // Use deterministic ID for cross-client reply matching
+                let messageId = "\(msg.senderSessionId)-\(msg.channelId)-\(msg.timestamp.timeIntervalSince1970)"
+                
+                var chatMsg = ChatMessage(
+                    id: messageId,
+                    senderName: msg.senderName,
+                    content: msg.content,
+                    timestamp: msg.timestamp,
+                    isOutgoing: false
+                )
+                
+                // Lookup reply context if this is a reply
+                if let replyId = msg.replyToId,
+                   let originalMsg = chatMessages.first(where: { $0.id == replyId }) {
+                    chatMsg.replyToId = replyId
+                    chatMsg.replyToSender = originalMsg.senderName
+                    chatMsg.replyToPreview = String(originalMsg.content.prefix(50))
+                }
+                
+                chatMessages.append(chatMsg)
+            }
+        }
     }
     
     // MARK: - Helpers
@@ -341,6 +465,50 @@ struct ContentView: View {
         identity = nil
         isConnected = false
         isMicEnabled = false
+        chatMessages = []
+        messageText = ""
+    }
+    
+    private func sendMessage(client: QuicNetworkClient) {
+        guard !messageText.isEmpty else { return }
+        
+        let content = messageText
+        let replying = replyingTo
+        messageText = "" // Clear immediately for UX
+        replyingTo = nil // Clear reply state
+        let timestamp = Date()
+        let sessionId = client.sessionId ?? 0
+        let channelId = client.currentChannelId ?? 0
+        
+        // Use deterministic ID for cross-client reply matching
+        let messageId = "\(sessionId)-\(channelId)-\(timestamp.timeIntervalSince1970)"
+        
+        // Add to local messages (optimistic update)
+        var message = ChatMessage(
+            id: messageId,
+            senderName: identity?.displayName ?? "You",
+            content: content,
+            timestamp: timestamp,
+            isOutgoing: true
+        )
+        
+        // Add reply context if we're replying
+        if let replying = replying {
+            message.replyToId = replying.id
+            message.replyToSender = replying.senderName
+            message.replyToPreview = String(replying.content.prefix(50))
+        }
+        
+        chatMessages.append(message)
+        
+        // Send to server with reply info
+        Task {
+            do {
+                try await client.sendTextMessage(content, replyToId: replying?.id)
+            } catch {
+                print("[Chat] Failed to send: \(error)")
+            }
+        }
     }
 }
 
@@ -350,6 +518,152 @@ struct Channel: Identifiable, Hashable {
     let id: UInt32
     let name: String
     let icon: String
+}
+
+// MARK: - Chat Message Model
+
+struct ChatMessage: Identifiable, Equatable {
+    let id: String
+    let senderName: String
+    let content: String
+    let timestamp: Date
+    let isOutgoing: Bool
+    
+    // Reply-to threading
+    var replyToId: String?
+    var replyToSender: String?
+    var replyToPreview: String?
+    
+    var formattedTime: String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: timestamp)
+    }
+}
+
+// MARK: - Message Bubble View
+
+struct MessageBubble: View {
+    let message: ChatMessage
+    var onReply: ((ChatMessage) -> Void)?
+    
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if message.isOutgoing { Spacer(minLength: 80) }
+            
+            VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 2) {
+                // Sender name (only for incoming)
+                if !message.isOutgoing {
+                    Text(message.senderName)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                }
+                
+                // Message bubble with optional reply context
+                VStack(alignment: .leading, spacing: 4) {
+                    // Reply context (if this is a reply)
+                    if let replyPreview = message.replyToPreview {
+                        HStack(spacing: 4) {
+                            Rectangle()
+                                .fill(Color.blue.opacity(0.6))
+                                .frame(width: 3)
+                            
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(message.replyToSender ?? "")
+                                    .font(.caption2)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.blue)
+                                Text(replyPreview)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(.bottom, 2)
+                    }
+                    
+                    // Message content with markdown rendering
+                    MarkdownText(message.content, foregroundColor: message.isOutgoing ? .white : .primary)
+                        .font(.body)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    Group {
+                        if message.isOutgoing {
+                            // Blue gradient for outgoing (Messages.app style)
+                            LinearGradient(
+                                colors: [Color.blue, Color.blue.opacity(0.9)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        } else {
+                            // Solid grey for incoming messages
+                            Color(nsColor: .separatorColor)
+                        }
+                    }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
+                .contextMenu {
+                    Button(action: { onReply?(message) }) {
+                        Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    }
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(message.content, forType: .string)
+                    }) {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
+                
+                // Timestamp
+                Text(message.formattedTime)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+            }
+            
+            if !message.isOutgoing { Spacer(minLength: 80) }
+        }
+        .padding(.horizontal, 4)
+    }
+}
+
+// MARK: - Markdown Text View
+
+struct MarkdownText: View {
+    let text: String
+    let foregroundColor: Color
+    
+    init(_ text: String, foregroundColor: Color = .primary) {
+        self.text = text
+        self.foregroundColor = foregroundColor
+    }
+    
+    var body: some View {
+        Text(attributedString)
+            .textSelection(.enabled)
+    }
+    
+    private var attributedString: AttributedString {
+        // Try to parse as markdown (handles **bold**, *italic*, `code`, and links)
+        if let parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            var result = parsed
+            // Apply foreground color to all runs
+            for run in result.runs {
+                result[run.range].foregroundColor = foregroundColor
+            }
+            return result
+        }
+        
+        // Fallback to plain text
+        var result = AttributedString(text)
+        result.foregroundColor = foregroundColor
+        return result
+    }
 }
 
 #Preview {

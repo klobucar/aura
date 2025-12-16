@@ -22,6 +22,9 @@ public class QuicNetworkClient {
     /// Users by channel ID (tracks all channels, not just current)
     public var usersByChannel: [UInt32: [ChannelUser]] = [:]
     
+    /// Received chat messages (populated by incoming text packets)
+    public var receivedMessages: [ReceivedTextMessage] = []
+    
     // MARK: - Private Properties
     
     /// The QUIC connection group (manages the tunnel and accepts streams)
@@ -33,8 +36,17 @@ public class QuicNetworkClient {
     /// Continuation for waiting on server stream
     private var streamContinuation: CheckedContinuation<NWConnection, Error>?
     
-    /// Audio pipeline for E2EE
-    public let audioPipeline = AudioPipeline()
+    /// Audio sender (Rust UniFFI wrapper for encoding + encryption)
+    private var audioSender: AudioSenderWrapper?
+    
+    /// Audio receiver (Rust UniFFI wrapper for decoding + decryption)
+    private var audioReceiver: AudioReceiverWrapper?
+    
+    /// Audio playback engine
+    private let audioPlayback = AudioPlayback()
+    
+    /// Track which users are currently speaking (for UI indicators)
+    public var activeSpeakers: Set<UInt32> = []
     
     private var sequenceNumber: UInt16 = 0
     
@@ -47,6 +59,7 @@ public class QuicNetworkClient {
     private static let MSG_USER_JOINED: UInt8 = 0x11
     private static let MSG_USER_LEFT: UInt8 = 0x12
     private static let MSG_CHANNEL_STATE: UInt8 = 0x13
+    private static let MSG_TEXT_PACKET: UInt8 = 0x30
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
@@ -296,7 +309,7 @@ public class QuicNetworkClient {
         pos += 1
         let errorMsg = errorLen > 0 ? String(data: authResp.subdata(in: pos..<(pos + errorLen)), encoding: .utf8) : nil
         
-        print("[QuicClient] Auth response: success=\(success), userId=\(responseUserId)")
+        print("[QuicClient] Auth response: success=\(success), userId=\(responseUserId), token=\(token.prefix(8))..., verified=\(verified)")
         
         guard success else {
             throw QuicClientError.authenticationFailed(errorMsg ?? "Unknown error")
@@ -305,6 +318,10 @@ public class QuicNetworkClient {
         self.userId = responseUserId
         self.sessionToken = token
         self.isAuthenticated = true
+        
+        // Use userId as sessionId immediately (server sends the real session ID now)
+        self.sessionId = responseUserId
+        print("[QuicClient] Session ID set to: \(responseUserId) from auth response")
         self.connectionStatus = "Authenticated as user \(userId)" + (verified ? " (verified)" : "")
         
         print("[QuicClient] ✓ Authentication SUCCESS!")
@@ -317,8 +334,26 @@ public class QuicNetworkClient {
             let copyCount = min(tokenData.count, 32)
             keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
             
-            try? audioPipeline.initialize(sessionId: responseUserId, key: keyData)
-            print("[QuicClient] Audio pipeline initialized")
+            do {
+                // Initialize audio sender (for transmitting our voice)
+                audioSender = try AudioSenderWrapper(sessionId: responseUserId, key: keyData)
+                audioSender?.setEpoch(epoch: 0)  // Use epoch 0 for now (will use MLS epoch)
+                
+                // Initialize audio receiver (for receiving others' voice)
+                audioReceiver = try AudioReceiverWrapper()
+                
+                // Start audio playback engine
+                audioPlayback.start()
+                
+                // Start audio capture automatically for testing
+                Task { @MainActor in
+                    await self.startAudioCapture()
+                }
+                
+                print("[QuicClient] Audio sender/receiver/playback initialized")
+            } catch {
+                print("[QuicClient] Failed to initialize audio: \(error)")
+            }
             
             // Auto-join default channel for testing
             try await joinChannel(1)
@@ -429,8 +464,14 @@ public class QuicNetworkClient {
         case Self.MSG_CHANNEL_STATE: // 0x13
             await handleChannelState(stream: stream)
             
+        case 0x20: // MSG_AUDIO - audio packet from server
+            await handleAudioPacket(stream: stream)
+            
         case 0x21: // MSG_AUDIO_STREAM - ignore, handled elsewhere
             break
+            
+        case Self.MSG_TEXT_PACKET: // 0x30
+            await handleTextPacket(stream: stream)
             
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
@@ -455,10 +496,15 @@ public class QuicNetworkClient {
             
             // Add to channel's user list (@Observable tracks this automatically)
             await MainActor.run {
-                // Track our own session ID when we see ourselves join
-                if sessionId != self.sessionId && displayName == UserDefaults.standard.string(forKey: "AuraDisplayName") {
+                // Get our saved display name
+                let myDisplayName = UserDefaults.standard.string(forKey: "AuraDisplayName") ?? ""
+                
+                print("[QuicClient] UserJoined: session=\(sessionId), name=\(displayName), myName=\(myDisplayName), mySessionId=\(self.sessionId ?? 999)")
+                
+                // Detect our own session ID by matching display name
+                if self.sessionId == nil && !myDisplayName.isEmpty && displayName == myDisplayName {
                     self.sessionId = sessionId
-                    print("[QuicClient] Detected own session ID: \(sessionId)")
+                    print("[QuicClient] Detected own session ID: \(sessionId) (matched name: \(displayName))")
                 }
                 
                 // Don't add ourselves to the user list
@@ -469,6 +515,20 @@ public class QuicNetworkClient {
                     usersByChannel[channelId]?.append(user)
                     print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
+                    
+                    // Add sender to audio receiver for key exchange (using same key for POC)
+                    if let receiver = self.audioReceiver, let tokenData = self.sessionToken?.data(using: .utf8) {
+                        var keyData = Data(count: 32)
+                        let copyCount = min(tokenData.count, 32)
+                        keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
+                        
+                        do {
+                            try receiver.addSender(sessionId: sessionId, key: keyData)
+                            print("[QuicClient] Added audio sender \(sessionId) for decryption")
+                        } catch {
+                            print("[QuicClient] Failed to add sender: \(error)")
+                        }
+                    }
                 } else {
                     print("[QuicClient] Ignoring own UserJoined for channel \(channelId)")
                 }
@@ -550,6 +610,106 @@ public class QuicNetworkClient {
         }
     }
     
+    /// Handle incoming TextPacket message
+    private func handleTextPacket(stream: NWConnection) async {
+        do {
+            // Read length (4 bytes)
+            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let packetLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            print("[QuicClient] Text packet length: \(packetLen)")
+            
+            // Read the binary packet
+            let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
+            
+            // Parse: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16)
+            guard packetData.count >= 20 else {
+                print("[QuicClient] Text packet too short")
+                return
+            }
+            
+            let senderSessionId = packetData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let channelId = packetData.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let contentLen = packetData.subdata(in: 16..<20).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            // Extract content (currently plaintext, will be encrypted later)
+            var content = "[Unable to decrypt]"
+            let contentEndOffset = 20 + Int(contentLen)
+            if packetData.count >= contentEndOffset {
+                let contentData = packetData.subdata(in: 20..<contentEndOffset)
+                content = String(data: contentData, encoding: .utf8) ?? "[Invalid UTF-8]"
+            }
+            
+            // Parse replyToId after nonce(24) + tag(16) = 40 bytes after content
+            var replyToId: String? = nil
+            let replyOffset = contentEndOffset + 40  // nonce + tag
+            if packetData.count > replyOffset {
+                let replyLen = Int(packetData[replyOffset])
+                if replyLen > 0 && packetData.count >= replyOffset + 1 + replyLen {
+                    let replyData = packetData.subdata(in: (replyOffset + 1)..<(replyOffset + 1 + replyLen))
+                    replyToId = String(data: replyData, encoding: .utf8)
+                }
+            }
+            
+            // Find sender name from usersByChannel
+            var senderName = "User \(senderSessionId)"
+            
+            // Check if it's from us
+            if senderSessionId == sessionId || senderSessionId == userId {
+                senderName = UserDefaults.standard.string(forKey: "AuraDisplayName") ?? "You"
+            } else {
+                // Look up in usersByChannel
+                if let users = usersByChannel[channelId] {
+                    print("[QuicClient] Looking for sender \(senderSessionId) in channel \(channelId) with \(users.count) users: \(users.map { "\($0.id):\($0.displayName)" }.joined(separator: ", "))")
+                    if let user = users.first(where: { $0.id == senderSessionId }) {
+                        senderName = user.displayName
+                    } else {
+                        print("[QuicClient] Sender \(senderSessionId) NOT FOUND in usersByChannel[\(channelId)]")
+                    }
+                }
+            }
+            
+            print("[QuicClient] Text from session \(senderSessionId), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
+            
+            let message = ReceivedTextMessage(
+                id: UUID().uuidString,
+                senderSessionId: senderSessionId,
+                senderName: senderName,
+                channelId: channelId,
+                content: content,
+                timestamp: Date(),
+                rawPacket: packetData,
+                replyToId: replyToId
+            )
+            
+            await MainActor.run {
+                receivedMessages.append(message)
+                print("[QuicClient] Received text message from \(senderName): \(content.prefix(30))")
+            }
+        } catch {
+            print("[QuicClient] Failed to parse TextPacket: \(error)")
+        }
+    }
+    
+    /// Handle incoming audio packet from server
+    private func handleAudioPacket(stream: NWConnection) async {
+        do {
+            // Read length (4 bytes)
+            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let packetLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            // Read audio packet data
+            let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
+            
+            // Process the audio packet (decrypt + decode + play)
+            await MainActor.run {
+                processIncomingAudioPacket(packetData)
+            }
+        } catch {
+            print("[QuicClient] Failed to parse audio packet: \(error)")
+        }
+    }
+    
     /// Non-blocking receive with timeout
     private func receiveNonBlocking(on connection: NWConnection, length: Int) async throws -> Data {
         return try await withCheckedThrowingContinuation { continuation in
@@ -567,13 +727,12 @@ public class QuicNetworkClient {
         }
     }
     
-    // MARK: - Audio (via Control Stream for now)
+    // MARK: - Audio
     
-    /// Send audio frame via control stream.
-    /// TODO: Switch to proper QUIC datagrams once API is figured out.
-    /// Send audio frame via control stream (encapsulated) or datagram (future).
+    /// Send audio frame via QUIC datagram (or control stream for now)
+    /// - Parameter rawPcmBytes: Raw PCM data from AudioCapture (Int16 samples)
     public func sendAudioDatagram(_ rawPcmBytes: Data) async throws {
-        guard isAuthenticated else { return }
+        guard isAuthenticated, let sender = audioSender else { return }
         guard let stream = controlStream else { return }
         
         // Convert Data -> [Int16]
@@ -581,36 +740,75 @@ public class QuicNetworkClient {
             Array($0.bindMemory(to: Int16.self))
         }
         
-        // Process through pipeline (Opus + Encrypt + Packet Header)
-        // This returns the FULL FastAudioPacket bytes
+        // Process through audio sender (Opus + Encrypt)
         let packetData: Data
         do {
-            packetData = try audioPipeline.process(pcm: pcmBuffer)
+            packetData = try Data(sender.process(pcm: pcmBuffer))
         } catch {
-            print("[QuicClient] Audio processing error: \(error)")
+            print("[QuicClient] Audio encoding error: \(error)")
             return
         }
         
-        // Send directly if using Datagrams (TODO: enable real datagrams)
-        // For now, wrap in control stream message 0x20
-        
-        var message = Data()
-        message.append(0x20) // Audio Message Type
-        
-        // Append Length (u32 LE)
-        let length = UInt32(packetData.count)
-        message.append(contentsOf: withUnsafeBytes(of: length.littleEndian) { Data($0) })
-        
-        // Append the ENTIRE fast packet (header + ciphertext)
+        // Send via control stream (0x20 = reliable audio)
+        // TODO: Switch to QUIC datagrams (0x01) once API is stable
+        var message = Data([0x20])
+        message.append(contentsOf: withUnsafeBytes(of: UInt32(packetData.count).littleEndian) { Data($0) })
         message.append(packetData)
         
-        // Send
         try await send(data: message, on: stream)
         
         if sequenceNumber % 100 == 0 {
-            print("[QuicClient] Sent encapsulated audio packet #\(audioPipeline.sequence - 1) (\(packetData.count) bytes)")
+            print("[QuicClient] Sent audio packet #\(sender.sequence()) (\(packetData.count) bytes)")
         }
         sequenceNumber &+= 1
+    }
+    
+    /// Handle incoming audio packet and play it
+    /// - Parameter packetData: Raw packet bytes from network
+    private func processIncomingAudioPacket(_ packetData: Data) {
+        guard let receiver = audioReceiver else { return }
+        
+        // Pass to receiver for decryption + decoding
+        do {
+            try receiver.onPacket(data: packetData)
+            
+            // Pop mixed audio and play it
+            if let mixed = receiver.popMixed() {
+                audioPlayback.enqueue(pcm: mixed)
+            }
+            
+            
+            // Update talking indicators (pop decoded frames to see who's speaking)
+            let decoded = receiver.popDecoded()
+            for frame in decoded {
+                activeSpeakers.insert(frame.sessionId)
+            }
+        } catch {
+            print("[QuicClient] Audio decryption error: \(error)")
+        }
+    }
+    
+    /// Start audio capture and send frames to network
+    private func startAudioCapture() async {
+        guard let sender = audioSender else { return }
+        
+        print("[QuicClient] Starting audio capture...")
+        
+        // Import AudioCapture if needed
+        let capture = AudioCapture()
+        
+        capture.start { [weak self] pcmData in
+            guard let self = self else { return }
+            Task {
+                do {
+                    try await self.sendAudioDatagram(pcmData)
+                } catch {
+                    // Silently ignore send errors
+                }
+            }
+        }
+        
+        print("[QuicClient] Audio capture started and sending packets")
     }
     
     // MARK: - Channel
@@ -628,6 +826,56 @@ public class QuicNetworkClient {
         try await send(data: data, on: stream)
         currentChannelId = channelId
         connectionStatus = "In channel \(channelId)"
+    }
+    
+    // MARK: - Text Messaging
+    
+    /// Send a text message to the current channel
+    public func sendTextMessage(_ content: String, replyToId: String? = nil) async throws {
+        guard let stream = controlStream else {
+            throw QuicClientError.notConnected
+        }
+        guard let channelId = currentChannelId else {
+            throw QuicClientError.protocolError("Not in a channel")
+        }
+        
+        // Use sessionId if available, otherwise fall back to userId
+        let senderSessionId = sessionId ?? userId
+        
+        print("[QuicClient] Sending text message to channel \(channelId): \(content.prefix(30))...")
+        print("[QuicClient] Using session ID: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
+        
+        // Build packet with reply support
+        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16) + reply_len(1) + reply_id
+        var packet = Data()
+        packet.append(contentsOf: withUnsafeBytes(of: senderSessionId.littleEndian) { Data($0) })  // sender_session_id
+        packet.append(contentsOf: withUnsafeBytes(of: channelId.littleEndian) { Data($0) })  // channel_id
+        packet.append(contentsOf: withUnsafeBytes(of: UInt64(0).littleEndian) { Data($0) })  // epoch (0 for now)
+        
+        // Content
+        let contentData = content.data(using: .utf8) ?? Data()
+        packet.append(contentsOf: withUnsafeBytes(of: UInt32(contentData.count).littleEndian) { Data($0) })
+        packet.append(contentData)
+        
+        // Dummy nonce and tag for protocol compliance
+        packet.append(Data(count: 24))  // nonce
+        packet.append(Data(count: 16))  // tag
+        
+        // Reply-to ID (length-prefixed)
+        if let replyId = replyToId, let replyData = replyId.data(using: .utf8), replyData.count <= 255 {
+            packet.append(UInt8(replyData.count))
+            packet.append(replyData)
+        } else {
+            packet.append(UInt8(0))  // No reply
+        }
+        
+        // Build message: 0x30 + length(4) + packet
+        var message = Data([Self.MSG_TEXT_PACKET])
+        message.append(contentsOf: withUnsafeBytes(of: UInt32(packet.count).littleEndian) { Data($0) })
+        message.append(packet)
+        
+        try await send(data: message, on: stream)
+        print("[QuicClient] Sent text message (\(message.count) bytes)")
     }
     
     // MARK: - Disconnect
@@ -711,5 +959,25 @@ public struct ChannelUser: Identifiable, Hashable {
     public init(sessionId: UInt32, displayName: String) {
         self.id = sessionId
         self.displayName = displayName
+    }
+}
+
+// MARK: - Received Text Message Model
+
+/// Represents a received text message from the server
+public struct ReceivedTextMessage: Identifiable, Equatable {
+    public let id: String
+    public let senderSessionId: UInt32
+    public let senderName: String
+    public let channelId: UInt32
+    public let content: String
+    public let timestamp: Date
+    public let rawPacket: Data  // For future decryption
+    public let replyToId: String?  // ID of message being replied to
+    
+    public var formattedTime: String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: timestamp)
     }
 }

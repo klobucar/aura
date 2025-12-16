@@ -1,5 +1,13 @@
 // Include the generated protobuf code
-include!(concat!(env!("OUT_DIR"), "/aura.rs"));
+// Package: aura.v1alpha1 -> aura.v1alpha1.rs
+pub mod aura {
+    pub mod v1alpha1 {
+        include!(concat!(env!("OUT_DIR"), "/aura.v1alpha1.rs"));
+    }
+}
+
+// Re-export v1alpha1 types to top-level for convenience/compat
+pub use aura::v1alpha1::*;
 
 pub mod fast_header;
 pub use fast_header::*;

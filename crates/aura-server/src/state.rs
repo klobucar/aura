@@ -6,12 +6,14 @@ use crate::auth::AuthService;
 use crate::config::{Config, VerificationMode};
 use crate::db::{Database, User};
 use aura_protocol::{
-    FastAudioPacket, UserProfile, MlsEnvelope, MlsGroupType, mls_envelope,
+    FastAudioPacket, UserProfile, MlsEnvelope, MlsGroupType, mls_envelope, EncryptedTextPacket,
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -64,6 +66,8 @@ pub enum ServiceMessage {
         channel_id: u32,
         users: Vec<ChannelUser>,
     },
+    /// Relay encrypted text message to channel members
+    RelayText(EncryptedTextPacket),
 }
 
 /// Information about a user in a channel
@@ -81,13 +85,31 @@ pub struct VoiceGroup {
     pub members: DashSet<u32>, // Session IDs
 }
 
-/// Text MLS Group - HIGH CHURN
-#[derive(Debug)]
+/// Text MLS Group - HIGH CHURN with batched ratcheting
 pub struct TextGroup {
     pub id: u32,
     pub current_epoch: u64,
     pub members: DashSet<u32>, // Session IDs
+    /// Message count since last ratchet (for batched ratcheting)
+    pub message_count: AtomicU32,
+    /// Last ratchet time (for time-based ratcheting)
+    pub last_ratchet: Instant,
 }
+
+impl std::fmt::Debug for TextGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TextGroup")
+            .field("id", &self.id)
+            .field("current_epoch", &self.current_epoch)
+            .field("members", &self.members)
+            .field("message_count", &self.message_count.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+/// Constants for batched ratcheting
+const TEXT_RATCHET_MESSAGE_THRESHOLD: u32 = 50;
+const TEXT_RATCHET_TIME_THRESHOLD_SECS: u64 = 300; // 5 minutes
 
 /// The Zero-Trust Server State with persistence.
 pub struct ServerState {
@@ -186,21 +208,28 @@ impl ServerState {
 
     /// Create a channel with both voice and text groups.
     pub fn create_channel(&self, channel_id: u32) {
-        let voice_group = VoiceGroup {
-            id: channel_id,
-            current_epoch: 0,
-            members: DashSet::new(),
-        };
+        // Only create if not exists - don't overwrite existing groups!
         self.voice_groups
-            .insert(channel_id, Arc::new(RwLock::new(voice_group)));
+            .entry(channel_id)
+            .or_insert_with(|| {
+                Arc::new(RwLock::new(VoiceGroup {
+                    id: channel_id,
+                    current_epoch: 0,
+                    members: DashSet::new(),
+                }))
+            });
 
-        let text_group = TextGroup {
-            id: channel_id,
-            current_epoch: 0,
-            members: DashSet::new(),
-        };
         self.text_groups
-            .insert(channel_id, Arc::new(RwLock::new(text_group)));
+            .entry(channel_id)
+            .or_insert_with(|| {
+                Arc::new(RwLock::new(TextGroup {
+                    id: channel_id,
+                    current_epoch: 0,
+                    members: DashSet::new(),
+                    message_count: AtomicU32::new(0),
+                    last_ratchet: Instant::now(),
+                }))
+            });
 
         info!(
             "Created channel {} with Voice and Text MLS groups",
@@ -303,6 +332,84 @@ impl ServerState {
                 }
             }
         }
+    }
+
+
+    // --- Text Message Routing (Zero-Knowledge) ---
+
+    /// Broadcast an encrypted text message to all members of the text group.
+    /// Server never decrypts - just routes opaque packets.
+    /// Returns true if a ratchet is needed (for batched ratcheting).
+    pub async fn broadcast_text_message(&self, sender_session_id: u32, packet: EncryptedTextPacket) -> bool {
+        let channel_id = packet.channel_id;
+        
+        // Verify sender is a member of this text group
+        let group_lock = match self.text_groups.get(&channel_id) {
+            Some(g) => g.clone(),
+            None => {
+                warn!("Text group not found for channel {}", channel_id);
+                return false;
+            }
+        };
+        
+        let group = group_lock.read().await;
+        
+        if !group.members.contains(&sender_session_id) {
+            warn!("Session {} not a member of text group {}", sender_session_id, channel_id);
+            return false;
+        }
+        
+        // Increment message counter
+        let msg_count = group.message_count.fetch_add(1, Ordering::Relaxed) + 1;
+        
+        // Collect members to send to (excluding sender)
+        let members: Vec<u32> = group.members.iter().map(|id| *id).collect();
+        drop(group); // Release lock before sending
+        
+        // Fan-out to all members except sender
+        for member_id in members {
+            if member_id == sender_session_id {
+                continue; // Don't echo back to sender
+            }
+            
+            if let Some(session) = self.sessions.get(&member_id) {
+                let _ = session.sender.send(ServiceMessage::RelayText(packet.clone()));
+            }
+        }
+        
+        info!("Relayed text message from {} to channel {} (msg #{})", 
+              sender_session_id, channel_id, msg_count);
+        
+        // Check if we need to ratchet
+        self.should_ratchet_text_group(channel_id).await
+    }
+    
+    /// Check if a text group should ratchet based on message count or time.
+    /// Batched ratcheting: every 50 messages OR every 5 minutes.
+    pub async fn should_ratchet_text_group(&self, channel_id: u32) -> bool {
+        let group_lock = match self.text_groups.get(&channel_id) {
+            Some(g) => g.clone(),
+            None => return false,
+        };
+        
+        let group = group_lock.read().await;
+        let msg_count = group.message_count.load(Ordering::Relaxed);
+        let elapsed = group.last_ratchet.elapsed().as_secs();
+        
+        msg_count >= TEXT_RATCHET_MESSAGE_THRESHOLD || elapsed >= TEXT_RATCHET_TIME_THRESHOLD_SECS
+    }
+    
+    /// Reset ratchet counters after a successful epoch advance.
+    pub async fn reset_text_ratchet_counters(&self, channel_id: u32) {
+        let group_lock = match self.text_groups.get(&channel_id) {
+            Some(g) => g.clone(),
+            None => return,
+        };
+        
+        let mut group = group_lock.write().await;
+        group.message_count.store(0, Ordering::Relaxed);
+        group.last_ratchet = Instant::now();
+        info!("Reset ratchet counters for text group {}", channel_id);
     }
 
 

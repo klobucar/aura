@@ -1,46 +1,11 @@
 syntax = "proto3";
 
-package aura;
+// Follows Uber Protobuf Style Guide V2
+package aura.v1alpha1;
 
 // ============================================================================
 // API Versioning - All messages wrapped in Envelope for forward compatibility
 // ============================================================================
-
-// Top-level envelope for all client-server messages.
-// Version 1 is the initial release. Increment on breaking changes.
-message Envelope {
-    uint32 version = 1; // API version, starting at 1
-    
-    oneof payload {
-        // Authentication
-        ChallengeRequest challenge_request = 10;
-        ChallengeResponse challenge_response = 11;
-        AuthRequest auth_request = 12;
-        AuthResponse auth_response = 13;
-        
-        // Control
-        ControlMessage control = 20;
-        
-        // Profiles
-        UpdateProfile update_profile = 30;
-        GetProfile get_profile = 31;
-        UserProfile user_profile = 32;
-        
-        // MLS Signaling
-        MlsEnvelope mls = 40;
-        
-        // Admin
-        VerifyUserRequest verify_user = 50;
-        BanUserRequest ban_user = 51;
-        GrantAdminRequest grant_admin = 52;
-        ListUsersRequest list_users = 53;
-        AdminResponse admin_response = 54;
-        ListUsersResponse list_users_response = 55;
-        
-        // Text Messaging (IRC-style broadcast)
-        EncryptedTextPacket text_packet = 60;
-    }
-}
 
 // MLS envelope for all MLS-related signaling
 message MlsEnvelope {
@@ -78,51 +43,9 @@ message AudioPacket {
 }
 
 enum UserMode {
-    SPEAKER = 0;
-    LISTENER = 1;
-}
-
-enum SignalType {
-    OFFER = 0;
-    ANSWER = 1;
-    ICE_CANDIDATE = 2;
-    MLS_WELCOME = 3;
-    MLS_COMMIT = 4;
-}
-
-message Identify {
-    uint32 user_id = 1;
-}
-
-message JoinChannel {
-    uint64 channel_id = 1;
-    UserMode mode = 2;
-}
-
-message StateUpdate {
-    bool is_muted = 1;
-    bool is_deafened = 2;
-    bool is_speaking = 3;
-}
-
-message Signal {
-    // If 0 or missing, implies broadcast/multicast (protobuf defaults)
-    // but better to be explicit or use oneof. 
-    // We'll use 0 as "no target" (broadcast) since user_ids are likely 1-indexed or strict u32.
-    // Or we can use `oneof target { uint32 user_id = 1; }` to make it optional.
-    uint32 target_user_id = 1; 
-    SignalType kind = 2;
-    bytes payload = 3;
-}
-
-message ControlMessage {
-    oneof content {
-        Identify identify = 1;
-        JoinChannel join_channel = 2;
-        bool leave_channel = 3; // Empty message, using bool as placeholder or just empty struct
-        StateUpdate state_update = 4;
-        Signal signal = 5;
-    }
+    USER_MODE_INVALID = 0;
+    USER_MODE_SPEAKER = 1;
+    USER_MODE_LISTENER = 2;
 }
 
 // ============================================================================
@@ -134,8 +57,9 @@ message ControlMessage {
 // VOICE: Low churn - epoch advances only on join/leave/hourly PFS ratchet
 // TEXT:  High churn - epoch can advance per message batch
 enum MlsGroupType {
-    VOICE = 0;
-    TEXT = 1;
+    MLS_GROUP_TYPE_INVALID = 0;
+    MLS_GROUP_TYPE_VOICE = 1;
+    MLS_GROUP_TYPE_TEXT = 2;
 }
 
 // Information about an MLS group (Voice or Text channel)
@@ -294,4 +218,5 @@ message EncryptedTextPacket {
     bytes ciphertext = 4;          // Encrypted TextMessage (XChaCha20-Poly1305)
     bytes nonce = 5;               // XChaCha20 nonce (24 bytes)
     bytes tag = 6;                 // Poly1305 tag (16 bytes)
+    string reply_to_id = 7;        // Optional: message ID being replied to (plaintext for now)
 }

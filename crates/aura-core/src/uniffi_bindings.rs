@@ -23,23 +23,51 @@ fn format_error(e: InternalError) -> String {
     }
 }
 
+/// Audio error type for UniFFI
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum AudioError {
+    #[error("Invalid key size")]
+    InvalidKeySize,
+    #[error("Opus encoding error")]
+    OpusError,
+    #[error("Crypto error")]
+    CryptoError,
+    #[error("Packet parse error")]
+    PacketParseError,
+    #[error("Unknown sender: {0}")]
+    UnknownSender(u32),
+}
+
+/// Convert internal error to UniFFI-compatible error
+fn convert_error(e: InternalError) -> AudioError {
+    match e {
+        InternalError::Opus(_) => AudioError::OpusError,
+        InternalError::Crypto(_) => AudioError::CryptoError,
+        InternalError::PacketParse(_) => AudioError::PacketParseError,
+        InternalError::UnknownSender(id) => AudioError::UnknownSender(id),
+    }
+}
+
 /// Audio sender wrapper - manages an InternalSender with thread safety
+#[derive(uniffi::Object)]
 pub struct AudioSenderWrapper {
     inner: RwLock<InternalSender>,
 }
 
+#[uniffi::export]
 impl AudioSenderWrapper {
     /// Create a new audio sender
-    pub fn new(session_id: u32, key: &[u8]) -> Result<Self, String> {
+    #[uniffi::constructor]
+    pub fn new(session_id: u32, key: &[u8]) -> Result<Self, AudioError> {
         if key.len() != KEY_SIZE {
-            return Err(format!("Invalid key size: expected {}, got {}", KEY_SIZE, key.len()));
+            return Err(AudioError::InvalidKeySize);
         }
         
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(key);
         
         let inner = InternalSender::new(session_id, &key_arr)
-            .map_err(format_error)?;
+            .map_err(convert_error)?;
         
         Ok(Self {
             inner: RwLock::new(inner),
@@ -54,9 +82,9 @@ impl AudioSenderWrapper {
     }
     
     /// Encode and encrypt PCM audio
-    pub fn process(&self, pcm: &[i16]) -> Result<Vec<u8>, String> {
-        let inner = self.inner.read().map_err(|e| e.to_string())?;
-        let bytes = inner.process(pcm).map_err(format_error)?;
+    pub fn process(&self, pcm: &[i16]) -> Result<Vec<u8>, AudioError> {
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        let bytes = inner.process(pcm).map_err(convert_error)?;
         Ok(bytes.to_vec())
     }
     
@@ -67,18 +95,22 @@ impl AudioSenderWrapper {
 }
 
 /// Audio receiver wrapper - manages an InternalReceiver with thread safety
+#[derive(uniffi::Object)]
 pub struct AudioReceiverWrapper {
     inner: RwLock<InternalReceiver>,
 }
 
 /// Decoded frame with sender info
+#[derive(uniffi::Record)]
 pub struct DecodedFrame {
     pub session_id: u32,
     pub pcm: Vec<i16>,
 }
 
+#[uniffi::export]
 impl AudioReceiverWrapper {
     /// Create a new audio receiver
+    #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(InternalReceiver::new()),
@@ -86,16 +118,16 @@ impl AudioReceiverWrapper {
     }
     
     /// Add a sender with their key
-    pub fn add_sender(&self, session_id: u32, key: &[u8]) -> Result<(), String> {
+    pub fn add_sender(&self, session_id: u32, key: &[u8]) -> Result<(), AudioError> {
         if key.len() != KEY_SIZE {
-            return Err(format!("Invalid key size: expected {}, got {}", KEY_SIZE, key.len()));
+            return Err(AudioError::InvalidKeySize);
         }
         
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(key);
         
-        let inner = self.inner.read().map_err(|e| e.to_string())?;
-        inner.add_sender(session_id, &key_arr).map_err(format_error)?;
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        inner.add_sender(session_id, &key_arr).map_err(convert_error)?;
         Ok(())
     }
     
@@ -107,9 +139,9 @@ impl AudioReceiverWrapper {
     }
     
     /// Process a received packet
-    pub fn on_packet(&self, data: &[u8]) -> Result<(), String> {
-        let inner = self.inner.read().map_err(|e| e.to_string())?;
-        inner.on_packet(Bytes::copy_from_slice(data)).map_err(format_error)?;
+    pub fn on_packet(&self, data: &[u8]) -> Result<(), AudioError> {
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        inner.on_packet(Bytes::copy_from_slice(data)).map_err(convert_error)?;
         Ok(())
     }
     
@@ -135,6 +167,150 @@ impl Default for AudioReceiverWrapper {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// =============================================================================
+// Text Crypto - UniFFI-compatible wrappers
+// =============================================================================
+
+use crate::text_crypto::{encrypt_text, decrypt_text, create_text_message, TextMessage, EncryptedTextPacket};
+
+/// UniFFI-compatible TextMessage (avoids protobuf dependency in bindings)
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TextMessageRecord {
+    pub sender_uuid: String,
+    pub timestamp: u64,
+    pub content: String,
+    pub reply_to_id: String,
+    pub message_id: String,
+}
+
+impl From<TextMessage> for TextMessageRecord {
+    fn from(m: TextMessage) -> Self {
+        Self {
+            sender_uuid: m.sender_uuid,
+            timestamp: m.timestamp,
+            content: m.content,
+            reply_to_id: m.reply_to_id,
+            message_id: m.message_id,
+        }
+    }
+}
+
+impl From<TextMessageRecord> for TextMessage {
+    fn from(r: TextMessageRecord) -> Self {
+        Self {
+            sender_uuid: r.sender_uuid,
+            timestamp: r.timestamp,
+            content: r.content,
+            reply_to_id: r.reply_to_id,
+            message_id: r.message_id,
+        }
+    }
+}
+
+/// UniFFI-compatible EncryptedTextPacket
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct EncryptedTextPacketRecord {
+    pub sender_session_id: u32,
+    pub channel_id: u32,
+    pub epoch: u64,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub tag: Vec<u8>,
+    pub reply_to_id: String,
+}
+
+impl From<EncryptedTextPacket> for EncryptedTextPacketRecord {
+    fn from(p: EncryptedTextPacket) -> Self {
+        Self {
+            sender_session_id: p.sender_session_id,
+            channel_id: p.channel_id,
+            epoch: p.epoch,
+            ciphertext: p.ciphertext,
+            nonce: p.nonce,
+            tag: p.tag,
+            reply_to_id: p.reply_to_id,
+        }
+    }
+}
+
+impl From<EncryptedTextPacketRecord> for EncryptedTextPacket {
+    fn from(r: EncryptedTextPacketRecord) -> Self {
+        Self {
+            sender_session_id: r.sender_session_id,
+            channel_id: r.channel_id,
+            epoch: r.epoch,
+            ciphertext: r.ciphertext,
+            nonce: r.nonce,
+            tag: r.tag,
+            reply_to_id: r.reply_to_id,
+        }
+    }
+}
+
+/// Text crypto error type for UniFFI
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum TextCryptoError {
+    #[error("Invalid key size")]
+    InvalidKeySize,
+    #[error("Encryption failed")]
+    EncryptionFailed,
+    #[error("Decryption failed")]
+    DecryptionFailed,
+}
+
+/// Text crypto wrapper for UniFFI - exposes text encryption/decryption
+#[derive(uniffi::Object)]
+pub struct TextCryptoWrapper {
+    dave_key: [u8; 32],
+}
+
+#[uniffi::export]
+impl TextCryptoWrapper {
+    /// Create a new text crypto context with the given DAVE key
+    #[uniffi::constructor]
+    pub fn new(key: Vec<u8>) -> Result<Self, TextCryptoError> {
+        if key.len() != 32 {
+            return Err(TextCryptoError::InvalidKeySize);
+        }
+        let mut key_arr = [0u8; 32];
+        key_arr.copy_from_slice(&key);
+        Ok(Self { dave_key: key_arr })
+    }
+    
+    /// Encrypt a text message
+    pub fn encrypt(
+        &self,
+        epoch: u64,
+        channel_id: u32,
+        sender_session_id: u32,
+        message: TextMessageRecord,
+    ) -> Result<EncryptedTextPacketRecord, TextCryptoError> {
+        let text_msg: TextMessage = message.into();
+        encrypt_text(&self.dave_key, epoch, channel_id, sender_session_id, &text_msg)
+            .map(|p| p.into())
+            .map_err(|_| TextCryptoError::EncryptionFailed)
+    }
+    
+    /// Decrypt an encrypted text packet
+    pub fn decrypt(&self, packet: EncryptedTextPacketRecord) -> Result<TextMessageRecord, TextCryptoError> {
+        let enc_packet: EncryptedTextPacket = packet.into();
+       decrypt_text(&self.dave_key, &enc_packet)
+            .map(|m| m.into())
+            .map_err(|_| TextCryptoError::DecryptionFailed)
+    }
+}
+
+/// Create a new text message with auto-generated ID and timestamp
+#[uniffi::export]
+pub fn create_text_message_record(
+    sender_uuid: String,
+    content: String,
+    reply_to_id: Option<String>,
+) -> TextMessageRecord {
+    let msg = create_text_message(&sender_uuid, &content, reply_to_id.as_deref());
+    msg.into()
 }
 
 #[cfg(test)]
