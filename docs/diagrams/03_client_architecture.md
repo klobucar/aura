@@ -121,3 +121,26 @@ graph TB
 - QuicNetworkClient adds `sessionId` to `activeSpeakers` Set
 - UI displays green dot next to users in `activeSpeakers`
 - Expire after ~300ms of silence (timer in UI)
+
+### Text Message Flow (Encrypted)
+
+```mermaid
+sequenceDiagram
+    participant UI as SwiftUI View
+    participant Client as QuicNetworkClient
+    participant Server as Aura Server
+    participant Peer as Peer Client
+
+    UI->>Client: sendText("Hello")
+    Note right of UI: Gen msg_UUIDv4 (Optimistic)
+    
+    Client->>Client: Encrypt (XChaCha20)
+    Client->>Server: TEXT Packet [msg_ID][Ciphertext]
+    
+    Server->>Server: Relay (Zero-Knowledge)
+    Server-->>Client: Echo [msg_ID][Ciphertext]
+    Server-->>Peer: Relay [msg_ID][Ciphertext]
+    
+    Peer->>Peer: Decrypt & Display
+    Client->>Client: Match Echo by msg_ID (Dedupe)
+```

@@ -25,6 +25,9 @@ public class QuicNetworkClient {
     /// Received chat messages (populated by incoming text packets)
     public var receivedMessages: [ReceivedTextMessage] = []
     
+    /// System events (user leave/join) for UI
+    public var systemEvents: [SystemEvent] = []
+    
     // MARK: - Private Properties
     
     /// The QUIC connection group (manages the tunnel and accepts streams)
@@ -513,6 +516,11 @@ public class QuicNetworkClient {
                         usersByChannel[channelId] = []
                     }
                     usersByChannel[channelId]?.append(user)
+                    
+                    // Add system event
+                    let event = SystemEvent(content: "\(displayName) joined", channelId: channelId)
+                    systemEvents.append(event)
+                    
                     print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
                     
@@ -548,8 +556,17 @@ public class QuicNetworkClient {
             
             // Remove from channel's user list (@Observable tracks this automatically)
             await MainActor.run {
-                usersByChannel[channelId]?.removeAll { $0.id == sessionId }
-                print("[QuicClient] User left channel \(channelId): session \(sessionId)")
+                if let index = usersByChannel[channelId]?.firstIndex(where: { $0.id == sessionId }) {
+                    let user = usersByChannel[channelId]?[index]
+                    let name = user?.displayName ?? "Unknown"
+                    
+                    // Add system event
+                    let event = SystemEvent(content: "\(name) disconnected", channelId: channelId)
+                    systemEvents.append(event)
+                    
+                    usersByChannel[channelId]?.remove(at: index)
+                    print("[QuicClient] User left channel \(channelId): \(name) (session \(sessionId))")
+                }
                 print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
             }
         } catch {
@@ -622,31 +639,57 @@ public class QuicNetworkClient {
             // Read the binary packet
             let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
             
-            // Parse: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16)
-            guard packetData.count >= 20 else {
-                print("[QuicClient] Text packet too short")
+            // Parse packet
+            // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content...
+            guard packetData.count >= 16 + 1 + 1 + 4 else { // Minimum size: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id(1) + content_len(4)
+                print("[QuicClient] Text packet too short for initial parsing")
                 return
             }
             
-            let senderSessionId = packetData.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let senderSessionId = packetData.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             let channelId = packetData.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let contentLen = packetData.subdata(in: 16..<20).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let epoch = packetData.subdata(in: 8..<16).withUnsafeBytes { $0.load(as: UInt64.self).littleEndian } // epoch is currently unused
             
-            // Extract content (currently plaintext, will be encrypted later)
-            var content = "[Unable to decrypt]"
-            let contentEndOffset = 20 + Int(contentLen)
-            if packetData.count >= contentEndOffset {
-                let contentData = packetData.subdata(in: 20..<contentEndOffset)
-                content = String(data: contentData, encoding: .utf8) ?? "[Invalid UTF-8]"
+            var offset = 16
+            
+            // Parse message ID
+            let messageIdLen = Int(packetData[offset])
+            offset += 1
+            
+            guard offset + messageIdLen <= packetData.count else {
+                print("[QuicClient] Text packet too short for message ID")
+                return
             }
+            let messageIdData = packetData.subdata(in: offset..<offset+messageIdLen)
+            let messageId = String(data: messageIdData, encoding: .utf8) ?? UUID().uuidString
+            offset += messageIdLen
             
-            // Parse replyToId after nonce(24) + tag(16) = 40 bytes after content
+            // Parse content
+            guard offset + 4 <= packetData.count else {
+                print("[QuicClient] Text packet too short for content length")
+                return
+            }
+            let contentLen = Int(packetData.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+            offset += 4
+            
+            guard offset + contentLen <= packetData.count else {
+                print("[QuicClient] Text packet too short for content")
+                return
+            }
+            let contentData = packetData.subdata(in: offset..<offset+contentLen)
+            let content = String(data: contentData, encoding: .utf8) ?? ""
+            offset += contentLen
+            
+            // Skip nonce (24) + tag (16)
+            offset += 40
+            
+            // Parse reply ID if present
             var replyToId: String? = nil
-            let replyOffset = contentEndOffset + 40  // nonce + tag
-            if packetData.count > replyOffset {
-                let replyLen = Int(packetData[replyOffset])
-                if replyLen > 0 && packetData.count >= replyOffset + 1 + replyLen {
-                    let replyData = packetData.subdata(in: (replyOffset + 1)..<(replyOffset + 1 + replyLen))
+            if offset < packetData.count {
+                let replyLen = Int(packetData[offset])
+                offset += 1
+                if replyLen > 0 && offset + replyLen <= packetData.count {
+                    let replyData = packetData.subdata(in: offset..<offset+replyLen)
                     replyToId = String(data: replyData, encoding: .utf8)
                 }
             }
@@ -669,10 +712,10 @@ public class QuicNetworkClient {
                 }
             }
             
-            print("[QuicClient] Text from session \(senderSessionId), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
+            print("[QuicClient] Text from session \(senderSessionId) (msgId: \(messageId)), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
             
             let message = ReceivedTextMessage(
-                id: UUID().uuidString,
+                id: messageId,
                 senderSessionId: senderSessionId,
                 senderName: senderName,
                 channelId: channelId,
@@ -831,7 +874,7 @@ public class QuicNetworkClient {
     // MARK: - Text Messaging
     
     /// Send a text message to the current channel
-    public func sendTextMessage(_ content: String, replyToId: String? = nil) async throws {
+    public func sendTextMessage(_ content: String, messageId: String, replyToId: String? = nil) async throws {
         guard let stream = controlStream else {
             throw QuicClientError.notConnected
         }
@@ -843,14 +886,19 @@ public class QuicNetworkClient {
         let senderSessionId = sessionId ?? userId
         
         print("[QuicClient] Sending text message to channel \(channelId): \(content.prefix(30))...")
-        print("[QuicClient] Using session ID: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
+        print("[QuicClient] ID: \(messageId), Session: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
         
         // Build packet with reply support
-        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + content_len(4) + content + nonce(24) + tag(16) + reply_len(1) + reply_id
+        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16) + reply_len(1) + reply_id
         var packet = Data()
         packet.append(contentsOf: withUnsafeBytes(of: senderSessionId.littleEndian) { Data($0) })  // sender_session_id
         packet.append(contentsOf: withUnsafeBytes(of: channelId.littleEndian) { Data($0) })  // channel_id
         packet.append(contentsOf: withUnsafeBytes(of: UInt64(0).littleEndian) { Data($0) })  // epoch (0 for now)
+        
+        // Message ID (length-prefixed)
+        let messageIdData = messageId.data(using: .utf8) ?? Data()
+        packet.append(UInt8(messageIdData.count))
+        packet.append(messageIdData)
         
         // Content
         let contentData = content.data(using: .utf8) ?? Data()
@@ -979,5 +1027,17 @@ public struct ReceivedTextMessage: Identifiable, Equatable {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter.string(from: timestamp)
+    }
+}
+
+public struct SystemEvent: Identifiable, Equatable {
+    public let id = UUID()
+    public let content: String
+    public let timestamp = Date()
+    public let channelId: UInt32 // 0 for global
+    
+    public init(content: String, channelId: UInt32 = 0) {
+        self.content = content
+        self.channelId = channelId
     }
 }

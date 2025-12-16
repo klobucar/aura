@@ -317,10 +317,24 @@ struct ContentView: View {
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 8) {
                                     ForEach(chatMessages) { message in
-                                        MessageBubble(message: message) { msg in
-                                            replyingTo = msg
+                                        if message.type == .info {
+                                            HStack {
+                                                VStack { Divider() }
+                                                Text(message.content)
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                                    .padding(.horizontal, 4)
+                                                VStack { Divider() }
+                                            }
+                                            .padding(.vertical, 8)
+                                            .padding(.horizontal, 16)
+                                            .id(message.id)
+                                        } else {
+                                            MessageBubble(message: message) { msg in
+                                                replyingTo = msg
+                                            }
+                                            .id(message.id)
                                         }
-                                        .id(message.id)
                                     }
                                 }
                                 .padding()
@@ -398,18 +412,23 @@ struct ContentView: View {
             // Add new incoming messages to chat
             for msg in newValue where !oldValue.contains(msg) {
                 guard msg.channelId == client.currentChannelId else { continue }
-                guard msg.senderSessionId != client.sessionId else { continue }  // Skip own messages
                 
-                // Use deterministic ID for cross-client reply matching
-                let messageId = "\(msg.senderSessionId)-\(msg.channelId)-\(msg.timestamp.timeIntervalSince1970)"
+                // Use message ID from packet (msg_{UUID})
+                let messageId = msg.id
+                
+                // Skip if we already have this message (optimistic update or duplicate)
+                if chatMessages.contains(where: { $0.id == messageId }) {
+                    continue
+                }
                 
                 var chatMsg = ChatMessage(
                     id: messageId,
                     senderName: msg.senderName,
                     content: msg.content,
                     timestamp: msg.timestamp,
-                    isOutgoing: false
+                    isOutgoing: msg.senderSessionId == client.sessionId // Mark as outgoing if it's from us
                 )
+                chatMsg.channelId = msg.channelId
                 
                 // Lookup reply context if this is a reply
                 if let replyId = msg.replyToId,
@@ -420,6 +439,29 @@ struct ContentView: View {
                 }
                 
                 chatMessages.append(chatMsg)
+            }
+        }
+        .onChange(of: client.systemEvents) { oldValue, newValue in
+            // Add new system events to chat (like user disconnects)
+            for event in newValue where !oldValue.contains(event) {
+                // Only show events for current channel or global (0)
+                guard event.channelId == client.currentChannelId || event.channelId == 0 else { continue }
+                
+                // Avoid duplicates
+                let messageId = "sys_\(event.id.uuidString)"
+                if chatMessages.contains(where: { $0.id == messageId }) { continue }
+                
+                var message = ChatMessage(
+                    id: messageId,
+                    senderName: "System",
+                    content: event.content,
+                    timestamp: event.timestamp,
+                    isOutgoing: false
+                )
+                message.type = .info
+                message.channelId = event.channelId
+                
+                chatMessages.append(message)
             }
         }
     }
@@ -433,6 +475,28 @@ struct ContentView: View {
     
     private func switchChannel(to channelId: UInt32, client: QuicNetworkClient) {
         guard channelId != client.currentChannelId else { return }
+        
+        // Capture old/new names for divider
+        let oldChannelId = client.currentChannelId ?? 1
+        let oldChannelName = channels.first(where: { $0.id == oldChannelId })?.name ?? "Unknown"
+        let newChannelName = channels.first(where: { $0.id == channelId })?.name ?? "Unknown"
+        
+        // Add divider if we have chat history
+        if !chatMessages.isEmpty {
+            let truncatedOld = String(oldChannelName.prefix(25))
+            let truncatedNew = String(newChannelName.prefix(25))
+            let text = "Left \(truncatedOld) joined \(truncatedNew)"
+            
+            var divider = ChatMessage(
+                id: "div_\(UUID().uuidString)",
+                senderName: "System",
+                content: text,
+                timestamp: Date(),
+                isOutgoing: false
+            )
+            divider.type = .info
+            chatMessages.append(divider)
+        }
         
         Task {
             do {
@@ -480,8 +544,8 @@ struct ContentView: View {
         let sessionId = client.sessionId ?? 0
         let channelId = client.currentChannelId ?? 0
         
-        // Use deterministic ID for cross-client reply matching
-        let messageId = "\(sessionId)-\(channelId)-\(timestamp.timeIntervalSince1970)"
+        // Use UUID message ID
+        let messageId = "msg_\(UUID().uuidString)"
         
         // Add to local messages (optimistic update)
         var message = ChatMessage(
@@ -491,6 +555,7 @@ struct ContentView: View {
             timestamp: timestamp,
             isOutgoing: true
         )
+        message.channelId = channelId
         
         // Add reply context if we're replying
         if let replying = replying {
@@ -501,12 +566,12 @@ struct ContentView: View {
         
         chatMessages.append(message)
         
-        // Send to server with reply info
+        // Send to server with reply info and message ID
         Task {
             do {
-                try await client.sendTextMessage(content, replyToId: replying?.id)
+                try await client.sendTextMessage(content, messageId: messageId, replyToId: replying?.id)
             } catch {
-                print("[Chat] Failed to send: \(error)")
+                print("[ContentView] Failed to send message: \(error)")
             }
         }
     }
@@ -529,6 +594,10 @@ struct ChatMessage: Identifiable, Equatable {
     let timestamp: Date
     let isOutgoing: Bool
     
+    // Context
+    var channelId: UInt32 = 0
+    var type: MessageType = .regular
+    
     // Reply-to threading
     var replyToId: String?
     var replyToSender: String?
@@ -539,6 +608,12 @@ struct ChatMessage: Identifiable, Equatable {
         formatter.timeStyle = .short
         return formatter.string(from: timestamp)
     }
+}
+
+enum MessageType: Equatable, Codable {
+    case regular
+    case args(String) // For future extensibility if needed, but for now simple cases
+    case info // Divider/System message
 }
 
 // MARK: - Message Bubble View

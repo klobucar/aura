@@ -215,8 +215,9 @@ message EncryptedTextPacket {
     uint32 sender_session_id = 1;  // Session ID for routing
     uint32 channel_id = 2;         // Target channel
     uint64 epoch = 3;              // MLS epoch for key selection
-    bytes ciphertext = 4;          // Encrypted TextMessage (XChaCha20-Poly1305)
-    bytes nonce = 5;               // XChaCha20 nonce (24 bytes)
-    bytes tag = 6;                 // Poly1305 tag (16 bytes)
-    string reply_to_id = 7;        // Optional: message ID being replied to (plaintext for now)
+    string message_id = 4;         // Client-generated UUID
+    bytes ciphertext = 5;          // Encrypted TextMessage (XChaCha20-Poly1305)
+    bytes nonce = 6;               // XChaCha20 nonce (24 bytes)
+    bytes tag = 7;                 // Poly1305 tag (16 bytes)
+    string reply_to_id = 8;        // Optional: message ID being replied to (plaintext for now)
 }
