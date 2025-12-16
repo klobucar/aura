@@ -31,6 +31,14 @@
     
     <!-- Protobuf serialization -->
     <PackageReference Include="Google.Protobuf" Version="3.25.1" />
+    <PackageReference Include="Grpc.Tools" Version="2.62.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="../../crates/aura-protocol/src/aura.proto" GrpcServices="None" />
   </ItemGroup>
 
   <!-- Native Rust Library (optional - copy if exists) -->

@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Quic;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -127,6 +128,9 @@ public class AuraNetworkClient : IAsyncDisposable
         _sessionToken = sessionToken;
         
         OnStatusChanged?.Invoke($"Authenticated as user {userId}" + (verified ? " (verified)" : ""));
+        
+        // Start listening for server messages (presence, chat, etc.)
+        StartListening();
     }
     
     private QuicStream? _audioStream;
@@ -134,48 +138,37 @@ public class AuraNetworkClient : IAsyncDisposable
     /// <summary>
     /// Send audio frame to server.
     /// </summary>
+    private AudioPlayback _audioPlayback = new();
+
     public async Task SendAudioFrameAsync(byte[] pcmData, CancellationToken ct = default)
     {
-        if (_connection == null)
-            return;
-        
-        // Open audio stream on first use
-        if (_audioStream == null)
-        {
-            Console.WriteLine("[AuraClient] Opening unidirectional audio stream...");
-            _audioStream = await _connection.OpenOutboundStreamAsync(QuicStreamType.Unidirectional, ct);
-        }
+        if (_controlStream == null) return;
         
         // Build FastAudioPacket header (32 bytes) + payload
+        // session_id(4) + epoch_hint(2) + sequence(2) + nonce(24) + payload
         var packet = new byte[32 + pcmData.Length];
         
-        // session_id: u32 (4 bytes)
-        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0, 4), _userId);
-        
-        // epoch_hint: u16 (2 bytes) - POC: 0
-        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(4, 2), 0);
-        
-        // sequence: u16 (2 bytes)
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0, 4), UserId);
+        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(4, 2), 0); // epoch
         BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(6, 2), _sequenceNumber++);
+        // nonce (8..32) is zeros
         
-        // nonce: [u8; 24] - POC: zeros
-        // packet[8..32] = zeros (already initialized)
-        
-        // payload
         pcmData.CopyTo(packet, 32);
         
-        // Write length prefix + packet to stream
-        var lengthPrefix = new byte[4];
-        BinaryPrimitives.WriteInt32LittleEndian(lengthPrefix, packet.Length);
+        // Send as 0x20 Control Message
+        // [type 0x20][len 4][packet]
+        var frame = new byte[1 + 4 + packet.Length];
+        frame[0] = 0x20;
+        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), packet.Length);
+        packet.CopyTo(frame, 5);
         
-        try
+        try 
         {
-            await _audioStream.WriteAsync(lengthPrefix, ct);
-            await _audioStream.WriteAsync(packet, ct);
+            await _controlStream.WriteAsync(frame, ct);
         }
         catch (Exception ex)
         {
-            OnError?.Invoke($"Audio send failed: {ex.Message}");
+            OnError?.Invoke($"Audio send error: {ex.Message}");
         }
     }
     
@@ -308,6 +301,281 @@ public class AuraNetworkClient : IAsyncDisposable
         if (_connection != null)
         {
             await _connection.DisposeAsync();
+        }
+    }
+    // ========================================================================
+    // Receive Loop & State Handlers
+    // ========================================================================
+
+    public event Action<uint, uint, string>? OnUserJoined; // channelId, sessionId, name
+    public event Action<uint, uint>? OnUserLeft;           // channelId, sessionId
+    public event Action<uint, List<(uint, string)>>? OnChannelState; // channelId, users
+
+    private CancellationTokenSource? _listenCts;
+
+    public void StartListening()
+    {
+        _listenCts?.Cancel();
+        _listenCts = new CancellationTokenSource();
+        _ = ReceiveLoopAsync(_listenCts.Token);
+    }
+
+    private async Task ReceiveLoopAsync(CancellationToken ct)
+    {
+        Console.WriteLine("[AuraClient] Starting Receive Loop...");
+        try
+        {
+            var typeBuf = new byte[1];
+            while (!ct.IsCancellationRequested && _controlStream != null)
+            {
+                // 1. Read Message Type
+                int read = await _controlStream.ReadAsync(typeBuf, ct);
+                if (read == 0) break; // End of stream
+
+                byte msgType = typeBuf[0];
+                switch (msgType)
+                {
+                    case 0x00: // Keepalive
+                        Console.WriteLine("[AuraClient] Received Keepalive");
+                        break;
+                    case 0x11: // UserJoined
+                        await HandleUserJoinedAsync(ct);
+                        break;
+                    case 0x12: // UserLeft
+                        await HandleUserLeftAsync(ct);
+                        break;
+                    case 0x13: // ChannelState
+                        await HandleChannelStateAsync(ct);
+                        break;
+                    case 0x20: // AudioPacket
+                        await HandleAudioPacketAsync(ct);
+                        break;
+                    case 0x30: // TextPacket
+                        await HandleTextPacketAsync(ct);
+                        break;
+                    default:
+                        Console.WriteLine($"[AuraClient] Unknown message type: 0x{msgType:X2}");
+                        break;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            OnError?.Invoke($"Receive loop error: {ex.Message}");
+        }
+    }
+
+    private async Task HandleAudioPacketAsync(CancellationToken ct)
+    {
+        // 1. Read Length (4 bytes)
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
+        
+        // 2. Read Packet
+        var packet = new byte[len];
+        await ReadExactAsync(packet, ct);
+        
+        // 3. Process Header (FastAudioPacket)
+        // Header size = 32 bytes.
+        if (len <= 32) return; // Header only or invalid?
+        
+        // Extract Payload (skip 32 bytes)
+        var payloadDesc = packet.AsSpan(32);
+        
+        // In POC, payload is Raw PCM?
+        // Swift sends EncryptedOpus.
+        // Server sends EncryptedOpus.
+        // If we receive EncryptedOpus and treat as PCM, it will be static noise.
+        // BUT, for unencrypted usage (if any), this works.
+        // For now, we queue it. Ideally we would decrypt/decode.
+        // Since we lack bindings, we just output it.
+        // If the server sends raw PCM (some debug modes?), it works.
+        // Otherwise, this completes the transport pipe at least.
+        
+        var payload = payloadDesc.ToArray();
+        _audioPlayback.Enqueue(payload);
+    }
+
+    private async Task HandleUserJoinedAsync(CancellationToken ct)
+    {
+        // Format: channel_id(4) + session_id(4) + name_len(1) + name(...)
+        var buf = new byte[9];
+        await ReadExactAsync(buf, ct);
+        
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
+        uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(4, 4));
+        int nameLen = buf[8];
+
+        var nameBuf = new byte[nameLen];
+        await ReadExactAsync(nameBuf, ct);
+        string name = System.Text.Encoding.UTF8.GetString(nameBuf);
+
+        Console.WriteLine($"[AuraClient] UserJoined: {name} (ID: {sessionId}) in Channel {channelId}");
+        OnUserJoined?.Invoke(channelId, sessionId, name);
+    }
+
+    private async Task HandleUserLeftAsync(CancellationToken ct)
+    {
+        // Format: channel_id(4) + session_id(4)
+        var buf = new byte[8];
+        await ReadExactAsync(buf, ct);
+
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
+        uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(4, 4));
+
+        Console.WriteLine($"[AuraClient] UserLeft: ID {sessionId} from Channel {channelId}");
+        OnUserLeft?.Invoke(channelId, sessionId);
+    }
+
+    private async Task HandleChannelStateAsync(CancellationToken ct)
+    {
+        // Format: channel_id(4) + user_count(1) + [session_id(4) + name_len(1) + name(...)]...
+        var header = new byte[5];
+        await ReadExactAsync(header, ct);
+
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(0, 4));
+        int userCount = header[4];
+
+        var users = new List<(uint, string)>();
+        for (int i = 0; i < userCount; i++)
+        {
+            var userHeader = new byte[5];
+            await ReadExactAsync(userHeader, ct);
+
+            uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(userHeader.AsSpan(0, 4));
+            int nameLen = userHeader[4];
+
+            var nameBuf = new byte[nameLen];
+            await ReadExactAsync(nameBuf, ct);
+            string name = System.Text.Encoding.UTF8.GetString(nameBuf);
+
+            users.Add((sessionId, name));
+        }
+
+        Console.WriteLine($"[AuraClient] ChannelState: {users.Count} users in Channel {channelId}");
+        OnChannelState?.Invoke(channelId, users);
+    }
+
+    public async Task SendTextMessageAsync(uint channelId, string content, string messageId, string? replyToId = null)
+    {
+        if (_controlStream == null) return;
+        
+        using var ms = new MemoryStream();
+        
+        // Payload Construction
+        // sender_session_id(4)
+        var senderBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(senderBytes, UserId);
+        ms.Write(senderBytes);
+        
+        // channel_id(4)
+        var chanBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(chanBytes, channelId);
+        ms.Write(chanBytes);
+        
+        // epoch(8) - 0
+        ms.Write(new byte[8]);
+        
+        // message_id_len(1) + message_id
+        var msgIdBytes = System.Text.Encoding.UTF8.GetBytes(messageId);
+        ms.WriteByte((byte)msgIdBytes.Length);
+        ms.Write(msgIdBytes);
+        
+        // content_len(4) + content
+        var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
+        var contentLenBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(contentLenBytes, (uint)contentBytes.Length);
+        ms.Write(contentLenBytes);
+        ms.Write(contentBytes);
+        
+        // nonce(24) + tag(16) (zeros)
+        ms.Write(new byte[40]);
+        
+        // reply_to(1 + bytes)
+        if (!string.IsNullOrEmpty(replyToId))
+        {
+            var replyBytes = System.Text.Encoding.UTF8.GetBytes(replyToId);
+            ms.WriteByte((byte)replyBytes.Length);
+            ms.Write(replyBytes);
+        }
+        else
+        {
+            ms.WriteByte(0);
+        }
+        
+        var packet = ms.ToArray();
+        
+        // Send: [type 0x30][len 4][packet]
+        var frame = new byte[1 + 4 + packet.Length];
+        frame[0] = 0x30;
+        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), packet.Length);
+        packet.CopyTo(frame, 5);
+        
+        await _controlStream.WriteAsync(frame);
+        Console.WriteLine($"[AuraClient] Sent text message ({frame.Length} bytes)");
+    }
+
+    public event Action<string, uint, uint, string, string?>? OnTextMessage; // msgId, senderId, channelId, content, replyToId
+
+    private async Task HandleTextPacketAsync(CancellationToken ct)
+    {
+        // 1. Read Length (4 bytes)
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
+        
+        // 2. Read Packet
+        var packet = new byte[len];
+        await ReadExactAsync(packet, ct);
+        
+        // 3. Parse Packet
+        int offset = 0;
+        
+        uint senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(offset, 4));
+        offset += 4;
+        
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(offset, 4));
+        offset += 4;
+        
+        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(packet.AsSpan(offset, 8));
+        offset += 8;
+        
+        int msgIdLen = packet[offset++];
+        string msgId = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, msgIdLen));
+        offset += msgIdLen;
+        
+        int contentLen = BinaryPrimitives.ReadInt32LittleEndian(packet.AsSpan(offset, 4));
+        offset += 4;
+        
+        string content = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, contentLen));
+        offset += contentLen;
+        
+        // Skip Nonce(24) + Tag(16)
+        offset += 40;
+        
+        string? replyToId = null;
+        if (offset < packet.Length)
+        {
+            int replyLen = packet[offset++];
+            if (replyLen > 0)
+            {
+                replyToId = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, replyLen));
+            }
+        }
+        
+        Console.WriteLine($"[AuraClient] Rx Text: {content} from {senderId}");
+        OnTextMessage?.Invoke(msgId, senderId, channelId, content, replyToId);
+    }
+
+    private async Task ReadExactAsync(byte[] buf, CancellationToken ct)
+    {
+        int offset = 0;
+        while (offset < buf.Length)
+        {
+            int read = await _controlStream!.ReadAsync(buf.AsMemory(offset), ct);
+            if (read == 0) throw new EndOfStreamException();
+            offset += read;
         }
     }
 }

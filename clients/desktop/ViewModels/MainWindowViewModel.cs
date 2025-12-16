@@ -1,8 +1,10 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 using Aura.Desktop.Services;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -140,6 +142,16 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _client.OnError += error => 
                 Dispatcher.UIThread.Post(() => ConnectionStatus = $"Error: {error}");
             
+            _client.OnUserJoined += (cid, sid, name) => 
+                Dispatcher.UIThread.Post(() => HandleUserJoined(cid, sid, name));
+            _client.OnUserLeft += (cid, sid) => 
+                Dispatcher.UIThread.Post(() => HandleUserLeft(cid, sid));
+            _client.OnChannelState += (cid, users) => 
+                Dispatcher.UIThread.Post(() => HandleChannelState(cid, users));
+            
+            _client.OnTextMessage += (mid, sid, cid, content, reply) => 
+                Dispatcher.UIThread.Post(() => HandleTextMessage(mid, sid, cid, content, reply));
+            
             ConnectionStatus = "Connecting...";
             await _client.ConnectAsync(ServerAddress, ServerPort);
             IsConnected = true;
@@ -169,7 +181,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             await DisconnectInternalAsync();
         }
     }
-    
+
     [RelayCommand]
     private async Task DisconnectAsync()
     {
@@ -194,6 +206,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         
         IsConnected = false;
         IsAuthenticated = false;
+        Channels.Clear();
     }
     
     [RelayCommand]
@@ -281,20 +294,61 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
     
     [RelayCommand]
-    private void SendMessage()
+    private async Task SendMessage()
     {
         if (string.IsNullOrWhiteSpace(MessageInput)) return;
+        if (_client == null || SelectedChannel == null) return;
+
+        var content = MessageInput;
+        MessageInput = ""; // Clear input immediately
+
+        try 
+        {
+            uint channelId = uint.Parse(SelectedChannel.Id);
+            string msgId = Guid.NewGuid().ToString();
+
+            // Optimistic Add
+            Messages.Add(new ChatMessage 
+            { 
+                UserId = _client.UserId,
+                UserName = "You",
+                Content = content,
+                IsFromCurrentUser = true
+            });
+
+            await _client.SendTextMessageAsync(channelId, content, msgId);
+        }
+        catch (Exception ex)
+        {
+            Messages.Add(new ChatMessage { Content = $"Failed to send: {ex.Message}", System = true });
+        }
+    }
+
+    private void HandleTextMessage(string msgId, uint senderId, uint channelId, string content, string? replyToId)
+    {
+        // Don't show own messages again
+        if (_client != null && senderId == _client.UserId) return;
+
+        // Only show if for current channel or specific logic?
+        // For simple parity, just show it.
         
+        string senderName = $"User {senderId}";
+        
+        // Try to find name in channel
+        var channel = Channels.FirstOrDefault(c => c.Id == channelId.ToString());
+        if (channel != null)
+        {
+            var user = channel.Users.FirstOrDefault(u => u.Id == senderId);
+            if (user != null) senderName = user.Name;
+        }
+
         Messages.Add(new ChatMessage 
         { 
-            UserId = _client?.UserId ?? 0,
-            UserName = "You",
-            Content = MessageInput,
-            IsFromCurrentUser = true
+            UserId = senderId,
+            UserName = senderName,
+            Content = content,
+            IsFromCurrentUser = false
         });
-        
-        // TODO: Send via client
-        MessageInput = "";
     }
     
     public async ValueTask DisposeAsync()
@@ -302,6 +356,63 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await DisconnectInternalAsync();
         _identity?.Dispose();
         GC.SuppressFinalize(this);
+    }
+    private void HandleUserJoined(uint channelId, uint sessionId, string name)
+    {
+        var channel = GetOrCreateChannel(channelId);
+        
+        // Check if user already exists
+        if (channel.Users.Any(u => u.Id == sessionId)) return;
+        
+        // Don't add self
+        if (_client != null && sessionId == _client.UserId) return;
+        
+        channel.Users.Add(new User { Id = sessionId, Name = name });
+        
+        // Log event
+        Messages.Add(new ChatMessage { Content = $"{name} joined {channel.Name}", System = true });
+    }
+    
+    private void HandleUserLeft(uint channelId, uint sessionId)
+    {
+        var channel = Channels.FirstOrDefault(c => c.Id == channelId.ToString());
+        if (channel == null) return;
+        
+        var user = channel.Users.FirstOrDefault(u => u.Id == sessionId);
+        if (user != null)
+        {
+            channel.Users.Remove(user);
+            Messages.Add(new ChatMessage { Content = $"{user.Name} left {channel.Name}", System = true });
+        }
+    }
+    
+    private void HandleChannelState(uint channelId, List<(uint, string)> users)
+    {
+        var channel = GetOrCreateChannel(channelId);
+        channel.Users.Clear();
+        
+        foreach (var (sid, name) in users)
+        {
+            if (_client != null && sid == _client.UserId) continue; // Skip self
+            channel.Users.Add(new User { Id = sid, Name = name });
+        }
+    }
+    
+    private Channel GetOrCreateChannel(uint channelId)
+    {
+        var idStr = channelId.ToString();
+        var channel = Channels.FirstOrDefault(c => c.Id == idStr);
+        if (channel == null)
+        {
+            channel = new Channel 
+            { 
+                Id = idStr, 
+                Name = $"Channel {channelId}",
+                IsExpanded = true
+            };
+            Channels.Add(channel);
+        }
+        return channel;
     }
 }
 
