@@ -413,6 +413,32 @@ impl ServerState {
     }
 
 
+    // --- Group Membership Helpers ---
+
+    pub async fn add_to_voice_group(&self, channel_id: u32, session_id: u32) {
+        if let Some(group) = self.voice_groups.get(&channel_id) {
+            group.value().write().await.members.insert(session_id);
+        }
+    }
+
+    pub async fn remove_from_voice_group(&self, channel_id: u32, session_id: u32) {
+        if let Some(group) = self.voice_groups.get(&channel_id) {
+            group.value().write().await.members.remove(&session_id);
+        }
+    }
+
+    pub async fn add_to_text_group(&self, channel_id: u32, session_id: u32) {
+        if let Some(group) = self.text_groups.get(&channel_id) {
+            group.value().write().await.members.insert(session_id);
+        }
+    }
+
+    pub async fn remove_from_text_group(&self, channel_id: u32, session_id: u32) {
+        if let Some(group) = self.text_groups.get(&channel_id) {
+            group.value().write().await.members.remove(&session_id);
+        }
+    }
+
     // --- MLS Delivery Service (Reliable Signaling) ---
 
     /// Process an incoming MLS Message.
@@ -574,8 +600,8 @@ mod tests {
         ServerState::new(db, config)
     }
 
-    #[test]
-    fn test_session_management() {
+    #[tokio::test]
+    async fn test_session_management() {
         let state = create_test_state();
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
 
@@ -583,7 +609,7 @@ mod tests {
         let session_id = state.register_session("test-uuid-123".to_string(), addr, tx);
         assert!(state.sessions.contains_key(&session_id));
 
-        state.remove_session(session_id);
+        state.remove_session(session_id).await;
         assert!(!state.sessions.contains_key(&session_id));
     }
 
@@ -617,5 +643,178 @@ mod tests {
         // Verify user
         db.set_user_verified(&user_uuid, true).unwrap();
         assert!(state.can_join_channel(&user_uuid).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_group_membership() {
+        let state = create_test_state();
+        let channel_id = 100;
+        let session_id = 50;
+
+        // Ensure channel exists
+        state.create_channel(channel_id);
+
+        // Test Voice Group
+        state.add_to_voice_group(channel_id, session_id).await;
+        {
+            let group = state.voice_groups.get(&channel_id).unwrap();
+            assert!(group.read().await.members.contains(&session_id));
+        }
+
+        state.remove_from_voice_group(channel_id, session_id).await;
+        {
+            let group = state.voice_groups.get(&channel_id).unwrap();
+            assert!(!group.read().await.members.contains(&session_id));
+        }
+
+        // Test Text Group
+        state.add_to_text_group(channel_id, session_id).await;
+        {
+            let group = state.text_groups.get(&channel_id).unwrap();
+            assert!(group.read().await.members.contains(&session_id));
+        }
+
+        state.remove_from_text_group(channel_id, session_id).await;
+        {
+            let group = state.text_groups.get(&channel_id).unwrap();
+            assert!(!group.read().await.members.contains(&session_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_logic() {
+        let state = create_test_state();
+        let channel_id = 200;
+        
+        // Setup two sessions
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        
+        let addr: SocketAddr = "127.0.0.1:1111".parse().unwrap();
+        let s1 = state.register_session("uuid-1".into(), addr, tx1);
+        let s2 = state.register_session("uuid-2".into(), addr, tx2);
+
+        // Create channel
+        state.create_channel(channel_id);
+        
+        // Add s1 to voice group first
+        state.add_to_voice_group(channel_id, s1).await;
+        
+        // Broadcast joined for s2
+        // We need to add s2 to voice group first for logic to work usually? 
+        // broadcast_user_joined logic iterates voice group members to send state, 
+        // and sends UserJoined to ALL connected sessions.
+        state.broadcast_user_joined(channel_id, s2, "User 2".into()).await;
+
+        // Check s1 received UserJoined
+        if let Some(ServiceMessage::UserJoined { channel_id: c, session_id: s, display_name: n }) = rx1.recv().await {
+            assert_eq!(c, channel_id);
+            assert_eq!(s, s2);
+            assert_eq!(n, "User 2");
+        } else {
+            panic!("s1 did not receive UserJoined");
+        }
+
+        // Check s2 received ChannelState (even if empty/just s1)
+        // Since s1 is in voice group, s2 should see s1 in the state list if s2 is the joiner.
+        // Wait, broadcast_user_joined sends ChannelState to the *joiner* (session_id arg).
+        if let Some(ServiceMessage::ChannelState { channel_id: c, users }) = rx2.recv().await {
+            assert_eq!(c, channel_id);
+            // s1 is in the group, so it should be listed
+            assert_eq!(users.len(), 1);
+            assert_eq!(users[0].session_id, s1);
+        } else {
+            panic!("s2 did not receive ChannelState");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_text_message_routing() {
+        use aura_protocol::EncryptedTextPacket;
+        let state = create_test_state();
+        let channel_id = 300;
+        state.create_channel(channel_id);
+
+        // Setup two sessions
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        
+        let addr: SocketAddr = "127.0.0.1:2222".parse().unwrap();
+        let s1 = state.register_session("uuid-1".into(), addr, tx1);
+        let s2 = state.register_session("uuid-2".into(), addr, tx2);
+
+        // Add both to text group
+        state.add_to_text_group(channel_id, s1).await;
+        state.add_to_text_group(channel_id, s2).await;
+
+        // Create packet
+        let packet = EncryptedTextPacket {
+            sender_session_id: s1,
+            channel_id,
+            epoch: 1,
+            message_id: "msg-123".into(),
+            ciphertext: vec![1, 2, 3],
+            nonce: vec![0; 24],
+            tag: vec![0; 16],
+            reply_to_id: "".into(),
+        };
+
+        // Broadcast from s1
+        let _ = state.broadcast_text_message(s1, packet.clone()).await;
+
+        // s2 should receive it
+        if let Some(ServiceMessage::RelayText(recvd)) = rx2.recv().await {
+            assert_eq!(recvd.sender_session_id, s1);
+            assert_eq!(recvd.message_id, "msg-123");
+            assert_eq!(recvd.ciphertext, vec![1, 2, 3]);
+        } else {
+            panic!("s2 did not receive text packet");
+        }
+
+        // s1 should NOT receive it (echo check)
+        // We use try_recv or timeout to check absence
+        assert!(rx1.try_recv().is_err(), "s1 received its own message (echo should be disabled)");
+    }
+
+    #[tokio::test]
+    async fn test_ratchet_logic() {
+        use aura_protocol::EncryptedTextPacket;
+        let state = create_test_state();
+        let channel_id = 400;
+        state.create_channel(channel_id);
+        
+        // Add fake sender
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let addr: SocketAddr = "127.0.0.1:3333".parse().unwrap();
+        let s1 = state.register_session("uuid-ratchet".into(), addr, tx);
+        state.add_to_text_group(channel_id, s1).await;
+
+        let packet = EncryptedTextPacket {
+            sender_session_id: s1,
+            channel_id,
+            epoch: 1,
+            message_id: "msg-x".into(),
+            ciphertext: vec![],
+            nonce: vec![],
+            tag: vec![],
+            reply_to_id: "".into(),
+        };
+
+        // Send 49 messages (threshold is 50)
+        for _ in 0..49 {
+            let ratchet = state.broadcast_text_message(s1, packet.clone()).await;
+            assert!(!ratchet, "Should not ratchet yet");
+        }
+
+        // 50th message
+        let ratchet = state.broadcast_text_message(s1, packet.clone()).await;
+        assert!(ratchet, "Should trigger ratchet on 50th message");
+
+        // Reset
+        state.reset_text_ratchet_counters(channel_id).await;
+        
+        // Next message should not ratchet
+        let ratchet = state.broadcast_text_message(s1, packet.clone()).await;
+        assert!(!ratchet, "Counter should be reset");
     }
 }
