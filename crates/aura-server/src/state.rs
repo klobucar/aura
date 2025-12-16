@@ -817,4 +817,55 @@ mod tests {
         let ratchet = state.broadcast_text_message(s1, packet.clone()).await;
         assert!(!ratchet, "Counter should be reset");
     }
+    #[tokio::test]
+    async fn test_mls_signaling() {
+        use aura_protocol::{MlsEnvelope, mls_envelope, MlsGroupType};
+        let state = create_test_state();
+        let channel_id = 500;
+        state.create_channel(channel_id); // Creates epoch 0
+
+        // 1. Submit valid COMMIT for Voice Group
+        let mut commit_msg = MlsEnvelope {
+            group_id: channel_id,
+            group_type: MlsGroupType::Voice as i32,
+            epoch: 0, // Current epoch
+            sender_id: 12345,
+            content: Some(mls_envelope::Content::Commit(vec![1, 2, 3])),
+        };
+
+        let res = state.handle_mls_message(commit_msg.clone()).await.unwrap();
+        assert!(res.success);
+        assert_eq!(res.current_epoch, 1); // Epoch should advance
+
+        // 2. Submit STALE commit (replaying epoch 0)
+        let res_stale = state.handle_mls_message(commit_msg.clone()).await.unwrap();
+        assert!(!res_stale.success);
+        assert_eq!(res_stale.error_message, "Error::StaleEpoch");
+        assert_eq!(res_stale.current_epoch, 1);
+
+        // 3. Submit FUTURE commit (epoch 2) - Should catch up or accept if policy allows?
+        // Current logic strictly checks `msg.epoch != group.current_epoch`.
+        // So sending epoch 2 when current is 1 will fail as Stale/Mismatch.
+        // Let's verify that behavior.
+        let future_msg = MlsEnvelope {
+            group_id: channel_id,
+            group_type: MlsGroupType::Voice as i32,
+            epoch: 2, 
+            sender_id: 12345,
+            content: Some(mls_envelope::Content::Commit(vec![4,5,6])),
+        };
+        let res_future = state.handle_mls_message(future_msg).await.unwrap();
+        assert!(!res_future.success); // Should fail strict check
+        assert_eq!(res_future.current_epoch, 1);
+        
+        // 4. Unknown Group
+        let unknown_msg = MlsEnvelope {
+            group_id: 99999,
+            group_type: MlsGroupType::Voice as i32,
+            epoch: 0,
+            sender_id: 12345,
+            content: Some(mls_envelope::Content::Commit(vec![])),
+        };
+        assert!(state.handle_mls_message(unknown_msg).await.is_err());
+    }
 }
