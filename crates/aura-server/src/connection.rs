@@ -439,9 +439,17 @@ impl ConnectionContext {
                     self.state.broadcast_user_joined(channel_id, self.session_id, profile.display_name).await;
                 }
                 
-                // Send channel state (list of users)
-                if let Some(tg) = self.state.text_groups.get(&channel_id) {
-                    let members = tg.value().read().await.members.clone();
+                // Send channel state for ALL active channels so client sees everyone
+                // Iterate over all text groups that have members
+                for r in self.state.text_groups.iter() {
+                    let pid = *r.key();
+                    let tg = r.value();
+                    
+                    let members = tg.read().await.members.clone();
+                    if members.is_empty() {
+                        continue;
+                    }
+
                     // Iterate DashSet by cloning keys
                     let member_ids: Vec<u32> = members.iter().map(|k| *k.key()).collect();
                     
@@ -453,9 +461,13 @@ impl ConnectionContext {
                         }
                     }
                     
+                    if users.is_empty() {
+                         continue;
+                    }
+                    
                     // Send state msg: [0x13] [channel_id u32] [count u8] [users...]
                     let mut msg = vec![0x13u8];
-                    msg.extend_from_slice(&channel_id.to_le_bytes());
+                    msg.extend_from_slice(&pid.to_le_bytes());
                     msg.push(users.len().min(255) as u8);
                     
                     for (sid, name) in users.iter().take(255) {

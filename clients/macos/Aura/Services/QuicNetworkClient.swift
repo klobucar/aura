@@ -45,6 +45,9 @@ public class QuicNetworkClient {
     /// Audio receiver (Rust UniFFI wrapper for decoding + decryption)
     private var audioReceiver: AudioReceiverWrapper?
     
+    /// Text crypto wrapper (Rust UniFFI wrapper for text encryption/decryption)
+    private var textCrypto: TextCryptoWrapper?
+    
     /// Audio playback engine
     private let audioPlayback = AudioPlayback()
     
@@ -338,12 +341,16 @@ public class QuicNetworkClient {
             keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
             
             do {
-                // Initialize audio sender (for transmitting our voice)
+                // Initialize audio sender/receiver with DAVE key
+                let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
                 audioSender = try AudioSenderWrapper(sessionId: responseUserId, key: keyData)
                 audioSender?.setEpoch(epoch: 0)  // Use epoch 0 for now (will use MLS epoch)
                 
                 // Initialize audio receiver (for receiving others' voice)
                 audioReceiver = try AudioReceiverWrapper()
+                
+                // Initialize text crypto with same DAVE key
+                textCrypto = try TextCryptoWrapper(key: keyData)
                 
                 // Start audio playback engine
                 audioPlayback.start()
@@ -639,16 +646,17 @@ public class QuicNetworkClient {
             // Read the binary packet
             let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
             
-            // Parse packet
-            // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content...
-            guard packetData.count >= 16 + 1 + 1 + 4 else { // Minimum size: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id(1) + content_len(4)
-                print("[QuicClient] Text packet too short for initial parsing")
+            // Parse encrypted packet
+            // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
+            let minPacketSize = 16 + 1 + 1 + 4 + 24 + 16  // 62 bytes minimum
+            guard packetData.count >= minPacketSize else {
+                print("[QuicClient] Text packet too short for encrypted format")
                 return
             }
             
             let senderSessionId = packetData.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             let channelId = packetData.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let epoch = packetData.subdata(in: 8..<16).withUnsafeBytes { $0.load(as: UInt64.self).littleEndian } // epoch is currently unused
+            let epoch = packetData.subdata(in: 8..<16).withUnsafeBytes { $0.load(as: UInt64.self).littleEndian }
             
             var offset = 16
             
@@ -664,24 +672,28 @@ public class QuicNetworkClient {
             let messageId = String(data: messageIdData, encoding: .utf8) ?? UUID().uuidString
             offset += messageIdLen
             
-            // Parse content
+            // Parse ciphertext
             guard offset + 4 <= packetData.count else {
-                print("[QuicClient] Text packet too short for content length")
+                print("[QuicClient] Text packet too short for ciphertext length")
                 return
             }
-            let contentLen = Int(packetData.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+            let ciphertextLen = Int(packetData.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
             offset += 4
             
-            guard offset + contentLen <= packetData.count else {
-                print("[QuicClient] Text packet too short for content")
+            guard offset + ciphertextLen + 24 + 16 <= packetData.count else {
+                print("[QuicClient] Text packet too short for ciphertext + nonce + tag")
                 return
             }
-            let contentData = packetData.subdata(in: offset..<offset+contentLen)
-            let content = String(data: contentData, encoding: .utf8) ?? ""
-            offset += contentLen
+            let ciphertext = Array(packetData.subdata(in: offset..<offset+ciphertextLen))
+            offset += ciphertextLen
             
-            // Skip nonce (24) + tag (16)
-            offset += 40
+            // Parse nonce (24 bytes)
+            let nonce = Array(packetData.subdata(in: offset..<offset+24))
+            offset += 24
+            
+            // Parse tag (16 bytes)
+            let tag = Array(packetData.subdata(in: offset..<offset+16))
+            offset += 16
             
             // Parse reply ID if present
             var replyToId: String? = nil
@@ -692,6 +704,30 @@ public class QuicNetworkClient {
                     let replyData = packetData.subdata(in: offset..<offset+replyLen)
                     replyToId = String(data: replyData, encoding: .utf8)
                 }
+            }
+            
+            // Decrypt the message
+            guard let crypto = textCrypto else {
+                print("[QuicClient] Text crypto not initialized, cannot decrypt")
+                return
+            }
+            
+            let encryptedPacket = EncryptedTextPacketRecord(
+                senderSessionId: senderSessionId,
+                channelId: channelId,
+                epoch: epoch,
+                ciphertext: Data(ciphertext),
+                nonce: Data(nonce),
+                tag: Data(tag),
+                replyToId: replyToId ?? ""
+            )
+            
+            let decryptedMessage: TextMessageRecord
+            do {
+                decryptedMessage = try crypto.decrypt(packet: encryptedPacket)
+            } catch {
+                print("[QuicClient] Failed to decrypt text message: \(error)")
+                return
             }
             
             // Find sender name from usersByChannel
@@ -712,25 +748,25 @@ public class QuicNetworkClient {
                 }
             }
             
-            print("[QuicClient] Text from session \(senderSessionId) (msgId: \(messageId)), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
+            print("[QuicClient] Decrypted text from session \(senderSessionId) (msgId: \(messageId)), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
             
             let message = ReceivedTextMessage(
                 id: messageId,
                 senderSessionId: senderSessionId,
                 senderName: senderName,
                 channelId: channelId,
-                content: content,
-                timestamp: Date(),
+                content: decryptedMessage.content,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(decryptedMessage.timestamp) / 1000),
                 rawPacket: packetData,
                 replyToId: replyToId
             )
             
             await MainActor.run {
                 receivedMessages.append(message)
-                print("[QuicClient] Received text message from \(senderName): \(content.prefix(30))")
+                print("[QuicClient] Received encrypted text message from \(senderName): \(decryptedMessage.content.prefix(30))")
             }
         } catch {
-            print("[QuicClient] Failed to parse TextPacket: \(error)")
+            print("[QuicClient] Failed to parse/decrypt TextPacket: \(error)")
         }
     }
     
@@ -881,33 +917,54 @@ public class QuicNetworkClient {
         guard let channelId = currentChannelId else {
             throw QuicClientError.protocolError("Not in a channel")
         }
+        guard let crypto = textCrypto else {
+            throw QuicClientError.protocolError("Text crypto not initialized")
+        }
         
         // Use sessionId if available, otherwise fall back to userId
         let senderSessionId = sessionId ?? userId
         
-        print("[QuicClient] Sending text message to channel \(channelId): \(content.prefix(30))...")
+        print("[QuicClient] Sending encrypted text message to channel \(channelId): \(content.prefix(30))...")
         print("[QuicClient] ID: \(messageId), Session: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
         
-        // Build packet with reply support
-        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16) + reply_len(1) + reply_id
+        // Create plaintext message record
+        let textMsg = TextMessageRecord(
+            senderUuid: "user-\(senderSessionId)",  // TODO: Use real UUID from identity
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            content: content,
+            replyToId: replyToId ?? "",
+            messageId: messageId
+        )
+        
+        // Encrypt using DAVE
+        let encryptedPacket = try crypto.encrypt(
+            epoch: 0,  // TODO: Use actual text epoch from MLS
+            channelId: channelId,
+            senderSessionId: senderSessionId,
+            message: textMsg
+        )
+        
+        // Serialize encrypted packet to binary format
+        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
         var packet = Data()
-        packet.append(contentsOf: withUnsafeBytes(of: senderSessionId.littleEndian) { Data($0) })  // sender_session_id
-        packet.append(contentsOf: withUnsafeBytes(of: channelId.littleEndian) { Data($0) })  // channel_id
-        packet.append(contentsOf: withUnsafeBytes(of: UInt64(0).littleEndian) { Data($0) })  // epoch (0 for now)
+        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.senderSessionId.littleEndian) { Data($0) })
+        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.channelId.littleEndian) { Data($0) })
+        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.epoch.littleEndian) { Data($0) })
         
         // Message ID (length-prefixed)
         let messageIdData = messageId.data(using: .utf8) ?? Data()
         packet.append(UInt8(messageIdData.count))
         packet.append(messageIdData)
         
-        // Content
-        let contentData = content.data(using: .utf8) ?? Data()
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(contentData.count).littleEndian) { Data($0) })
-        packet.append(contentData)
+        // Ciphertext (encrypted content)
+        packet.append(contentsOf: withUnsafeBytes(of: UInt32(encryptedPacket.ciphertext.count).littleEndian) { Data($0) })
+        packet.append(Data(encryptedPacket.ciphertext))
         
-        // Dummy nonce and tag for protocol compliance
-        packet.append(Data(count: 24))  // nonce
-        packet.append(Data(count: 16))  // tag
+        // Nonce (24 bytes from encryption)
+        packet.append(Data(encryptedPacket.nonce))
+        
+        // Tag (16 bytes from encryption)
+        packet.append(Data(encryptedPacket.tag))
         
         // Reply-to ID (length-prefixed)
         if let replyId = replyToId, let replyData = replyId.data(using: .utf8), replyData.count <= 255 {
@@ -921,6 +978,7 @@ public class QuicNetworkClient {
         var message = Data([Self.MSG_TEXT_PACKET])
         message.append(contentsOf: withUnsafeBytes(of: UInt32(packet.count).littleEndian) { Data($0) })
         message.append(packet)
+
         
         try await send(data: message, on: stream)
         print("[QuicClient] Sent text message (\(message.count) bytes)")

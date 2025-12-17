@@ -6,6 +6,7 @@ using System.Net.Quic;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -22,6 +23,7 @@ public class AuraNetworkClient : IAsyncDisposable
     private uint _userId;
     private string? _sessionToken;
     private ushort _sequenceNumber;
+    private TextCryptoService? _textCrypto;
     
     public uint UserId => _userId;
     public string? SessionToken => _sessionToken;
@@ -126,6 +128,11 @@ public class AuraNetworkClient : IAsyncDisposable
         
         _userId = userId;
         _sessionToken = sessionToken;
+        
+        // Initialize text crypto with DAVE key (using hardcoded key for POC)
+        var daveKey = new byte[32];
+        for (int i = 0; i < 32; i++) daveKey[i] = 0x42;  // TODO: Derive from MLS
+        _textCrypto = new TextCryptoService(daveKey);
         
         OnStatusChanged?.Invoke($"Authenticated as user {userId}" + (verified ? " (verified)" : ""));
         
@@ -460,42 +467,66 @@ public class AuraNetworkClient : IAsyncDisposable
     public async Task SendTextMessageAsync(uint channelId, string content, string messageId, string? replyToId = null)
     {
         if (_controlStream == null) return;
+        if (_textCrypto == null)
+        {
+            Console.WriteLine("[AuraClient] Text crypto not initialized");
+            return;
+        }
+        
+        Console.WriteLine($"[AuraClient] Sending encrypted text message to channel {channelId}: {content.Substring(0, Math.Min(30, content.Length))}...");
+        
+        // Encrypt the message using DAVE
+        var encryptedPacket = _textCrypto.Encrypt(
+            epoch: 0,  // TODO: Use actual text epoch from MLS
+            channelId: channelId,
+            senderSessionId: UserId,
+            senderUuid: $"user-{UserId}",  // TODO: Use real UUID from identity
+            content: content,
+            messageId: messageId,
+            replyToId: replyToId ?? ""
+        );
         
         using var ms = new MemoryStream();
         
-        // Payload Construction
+        // Serialize encrypted packet to binary format
+        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
+        
         // sender_session_id(4)
         var senderBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(senderBytes, UserId);
+        BinaryPrimitives.WriteUInt32LittleEndian(senderBytes, encryptedPacket.SenderSessionId);
         ms.Write(senderBytes);
         
         // channel_id(4)
         var chanBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(chanBytes, channelId);
+        BinaryPrimitives.WriteUInt32LittleEndian(chanBytes, encryptedPacket.ChannelId);
         ms.Write(chanBytes);
         
-        // epoch(8) - 0
-        ms.Write(new byte[8]);
+        // epoch(8)
+        var epochBytes = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(epochBytes, encryptedPacket.Epoch);
+        ms.Write(epochBytes);
         
         // message_id_len(1) + message_id
-        var msgIdBytes = System.Text.Encoding.UTF8.GetBytes(messageId);
+        var msgIdBytes = Encoding.UTF8.GetBytes(messageId);
         ms.WriteByte((byte)msgIdBytes.Length);
         ms.Write(msgIdBytes);
         
-        // content_len(4) + content
-        var contentBytes = System.Text.Encoding.UTF8.GetBytes(content);
-        var contentLenBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(contentLenBytes, (uint)contentBytes.Length);
-        ms.Write(contentLenBytes);
-        ms.Write(contentBytes);
+        // ciphertext_len(4) + ciphertext
+        var ciphertextLenBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(ciphertextLenBytes, (uint)encryptedPacket.Ciphertext.Length);
+        ms.Write(ciphertextLenBytes);
+        ms.Write(encryptedPacket.Ciphertext);
         
-        // nonce(24) + tag(16) (zeros)
-        ms.Write(new byte[40]);
+        // nonce(24)
+        ms.Write(encryptedPacket.Nonce);
+        
+        // tag(16)
+        ms.Write(encryptedPacket.Tag);
         
         // reply_to(1 + bytes)
         if (!string.IsNullOrEmpty(replyToId))
         {
-            var replyBytes = System.Text.Encoding.UTF8.GetBytes(replyToId);
+            var replyBytes = Encoding.UTF8.GetBytes(replyToId);
             ms.WriteByte((byte)replyBytes.Length);
             ms.Write(replyBytes);
         }
@@ -513,7 +544,7 @@ public class AuraNetworkClient : IAsyncDisposable
         packet.CopyTo(frame, 5);
         
         await _controlStream.WriteAsync(frame);
-        Console.WriteLine($"[AuraClient] Sent text message ({frame.Length} bytes)");
+        Console.WriteLine($"[AuraClient] Sent encrypted text message ({frame.Length} bytes)");
     }
 
     public event Action<string, uint, uint, string, string?>? OnTextMessage; // msgId, senderId, channelId, content, replyToId
@@ -529,7 +560,7 @@ public class AuraNetworkClient : IAsyncDisposable
         var packet = new byte[len];
         await ReadExactAsync(packet, ct);
         
-        // 3. Parse Packet
+        // 3. Parse Encrypted Packet
         int offset = 0;
         
         uint senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(offset, 4));
@@ -542,17 +573,20 @@ public class AuraNetworkClient : IAsyncDisposable
         offset += 8;
         
         int msgIdLen = packet[offset++];
-        string msgId = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, msgIdLen));
+        string msgId = Encoding.UTF8.GetString(packet.AsSpan(offset, msgIdLen));
         offset += msgIdLen;
         
-        int contentLen = BinaryPrimitives.ReadInt32LittleEndian(packet.AsSpan(offset, 4));
+        int ciphertextLen = BinaryPrimitives.ReadInt32LittleEndian(packet.AsSpan(offset, 4));
         offset += 4;
         
-        string content = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, contentLen));
-        offset += contentLen;
+        var ciphertext = packet.AsSpan(offset, ciphertextLen).ToArray();
+        offset += ciphertextLen;
         
-        // Skip Nonce(24) + Tag(16)
-        offset += 40;
+        var nonce = packet.AsSpan(offset, 24).ToArray();
+        offset += 24;
+        
+        var tag = packet.AsSpan(offset, 16).ToArray();
+        offset += 16;
         
         string? replyToId = null;
         if (offset < packet.Length)
@@ -560,12 +594,39 @@ public class AuraNetworkClient : IAsyncDisposable
             int replyLen = packet[offset++];
             if (replyLen > 0)
             {
-                replyToId = System.Text.Encoding.UTF8.GetString(packet.AsSpan(offset, replyLen));
+                replyToId = Encoding.UTF8.GetString(packet.AsSpan(offset, replyLen));
             }
         }
         
-        Console.WriteLine($"[AuraClient] Rx Text: {content} from {senderId}");
-        OnTextMessage?.Invoke(msgId, senderId, channelId, content, replyToId);
+        // 4. Decrypt the message
+        if (_textCrypto == null)
+        {
+            Console.WriteLine("[AuraClient] Text crypto not initialized, cannot decrypt");
+            return;
+        }
+        
+        var encryptedPacket = new EncryptedTextPacket
+        {
+            SenderSessionId = senderId,
+            ChannelId = channelId,
+            Epoch = epoch,
+            Ciphertext = ciphertext,
+            Nonce = nonce,
+            Tag = tag,
+            MessageId = msgId,
+            ReplyToId = replyToId ?? ""
+        };
+        
+        try
+        {
+            var decryptedMessage = _textCrypto.Decrypt(encryptedPacket);
+            Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.Content} from {senderId}");
+            OnTextMessage?.Invoke(msgId, senderId, channelId, decryptedMessage.Content, replyToId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to decrypt text message: {ex.Message}");
+        }
     }
 
     private async Task ReadExactAsync(byte[] buf, CancellationToken ct)

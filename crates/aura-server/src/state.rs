@@ -168,7 +168,25 @@ impl ServerState {
             sender,
         };
         self.sessions.insert(session_id, session);
-        info!("Registered session {} for user {}", session_id, user_uuid);
+        
+        // Populate profile cache immediately
+        match self.db.find_user_by_uuid(&user_uuid) {
+            Ok(Some(user)) => {
+                let profile = UserProfile {
+                    user_id: session_id,
+                    display_name: user.display_name.clone(),
+                    bio: String::new(), // TODO: Store bio in DB
+                    avatar_url: String::new(), // TODO: Store in DB
+                    signature: vec![], // TODO: Store in DB
+                    signing_key: user.ed25519_public_key.to_vec(),
+                };
+                self.profiles.insert(session_id, profile);
+                info!("Registered session {} for user {} (Profile cached)", session_id, user.display_name);
+            }
+            Ok(None) => warn!("Registered session {} for unknown user {}", session_id, user_uuid),
+            Err(e) => warn!("Failed to fetch profile for user {}: {}", user_uuid, e),
+        }
+
         session_id
     }
 
@@ -189,6 +207,8 @@ impl ServerState {
                 }
             }
             info!("Removed session {}", session_id);
+            // Cleanup profile
+            self.profiles.remove(&session_id);
         }
     }
 
