@@ -439,11 +439,21 @@ impl ServerState {
         if let Some(group) = self.voice_groups.get(&channel_id) {
             group.value().write().await.members.insert(session_id);
         }
+        
+        // Set voice_group_id on session so audio routing works
+        if let Some(mut session) = self.sessions.get_mut(&session_id) {
+            session.voice_group_id = Some(channel_id);
+        }
     }
 
     pub async fn remove_from_voice_group(&self, channel_id: u32, session_id: u32) {
         if let Some(group) = self.voice_groups.get(&channel_id) {
             group.value().write().await.members.remove(&session_id);
+        }
+        
+        // Clear voice_group_id on session
+        if let Some(mut session) = self.sessions.get_mut(&session_id) {
+            session.voice_group_id = None;
         }
     }
 

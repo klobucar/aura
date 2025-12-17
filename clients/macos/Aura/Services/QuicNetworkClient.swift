@@ -31,7 +31,7 @@ public class QuicNetworkClient {
     // MARK: - Private Properties
     
     /// The QUIC connection group (manages the tunnel and accepts streams)
-    private var connectionGroup: NWConnectionGroup?
+    private var quicGroup: NWConnectionGroup?
     
     /// Control stream from server (for auth and signaling)
     private var controlStream: NWConnection?
@@ -53,6 +53,12 @@ public class QuicNetworkClient {
     
     /// Track which users are currently speaking (for UI indicators)
     public var activeSpeakers: Set<UInt32> = []
+    
+    /// Track last activity time for each speaker (for debouncing)
+    private var lastSpeakerActivity: [UInt32: Date] = [:]
+
+    /// Timers for turning off speaking indicators after silence
+    private var speakerTimers: [UInt32: Task<Void, Never>] = [:]
     
     private var sequenceNumber: UInt16 = 0
     
@@ -78,6 +84,9 @@ public class QuicNetworkClient {
     
     /// Task for listening to server messages
     private var listenerTask: Task<Void, Never>?
+    
+    /// Task for listening to QUIC datagrams (unreliable audio)
+    private var datagramTask: Task<Void, Never>?
     
     public init() {}
     
@@ -118,7 +127,7 @@ public class QuicNetworkClient {
         
         // Create NWConnectionGroup
         let group = NWConnectionGroup(with: descriptor, using: parameters)
-        connectionGroup = group
+        quicGroup = group
         
         print("[QuicClient] Creating QUIC connection group...")
         
@@ -127,6 +136,22 @@ public class QuicNetworkClient {
             print("[QuicClient] Received new stream from server!")
             Task { @MainActor in
                 self?.handleIncomingStream(newConnection)
+            }
+        }
+        
+        // Set up handler for incoming datagrams (audio packets)
+        group.setReceiveHandler(maximumMessageSize: 1220, rejectOversizedMessages: true) { [weak self] _, content, _ in
+            guard let self = self, let data = content, !data.isEmpty else { return }
+            
+            print("[QuicClient] Received datagram: \(data.count) bytes")
+            
+            // Parse datagram type
+            if data[0] == 0x01 {  // Audio datagram
+                let audioData = data.subdata(in: 1..<data.count)
+                print("[QuicClient] Processing audio datagram: \(audioData.count) bytes")
+                Task { @MainActor in
+                    self.processIncomingAudioPacket(audioData)
+                }
             }
         }
         
@@ -420,6 +445,7 @@ public class QuicNetworkClient {
     private func startListening() {
         stopListening()
         
+        // Start control stream listener for reliable messages
         listenerTask = Task { [weak self] in
             print("[QuicClient] Listener task started")
             while !Task.isCancelled {
@@ -459,6 +485,8 @@ public class QuicNetworkClient {
     private func stopListening() {
         listenerTask?.cancel()
         listenerTask = nil
+        datagramTask?.cancel()
+        datagramTask = nil
     }
     
     /// Handle incoming server message based on type
@@ -531,11 +559,10 @@ public class QuicNetworkClient {
                     print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
                     
-                    // Add sender to audio receiver for key exchange (using same key for POC)
-                    if let receiver = self.audioReceiver, let tokenData = self.sessionToken?.data(using: .utf8) {
-                        var keyData = Data(count: 32)
-                        let copyCount = min(tokenData.count, 32)
-                        keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
+                    // Add sender to audio receiver for decryption (using same key as sender)
+                    if let receiver = self.audioReceiver {
+                        // Use same DAVE key as AudioSenderWrapper (line 345)
+                        let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
                         
                         do {
                             try receiver.addSender(sessionId: sessionId, key: keyData)
@@ -560,6 +587,10 @@ public class QuicNetworkClient {
             let data = try await receive(on: stream, minimumLength: 8, maximumLength: 8)
             let channelId = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             let sessionId = data.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            // Remove from audio receiver
+            audioReceiver?.removeSender(sessionId: sessionId)
+            print("[QuicClient] Removed audio sender \(sessionId) from receiver")
             
             // Remove from channel's user list (@Observable tracks this automatically)
             await MainActor.run {
@@ -618,6 +649,17 @@ public class QuicNetworkClient {
                 if sessionId != self.sessionId {
                     users.append(ChannelUser(sessionId: sessionId, displayName: displayName))
                     print("[QuicClient]   User \(i+1): \(displayName) (session \(sessionId))")
+                    
+                    // Add to audio receiver for decryption
+                    if let receiver = self.audioReceiver {
+                        let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
+                        do {
+                            try receiver.addSender(sessionId: sessionId, key: keyData)
+                            print("[QuicClient]   Added audio sender \(sessionId)")
+                        } catch {
+                            print("[QuicClient]   Failed to add audio sender: \(error)")
+                        }
+                    }
                 } else {
                     print("[QuicClient]   Skipping self in ChannelState: \(displayName) (session \(sessionId))")
                 }
@@ -780,6 +822,8 @@ public class QuicNetworkClient {
             // Read audio packet data
             let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
             
+            print("[QuicClient] Received audio packet: \(packetLen) bytes")
+            
             // Process the audio packet (decrypt + decode + play)
             await MainActor.run {
                 processIncomingAudioPacket(packetData)
@@ -828,17 +872,23 @@ public class QuicNetworkClient {
             return
         }
         
-        // Send via control stream (0x20 = reliable audio)
-        // TODO: Switch to QUIC datagrams (0x01) once API is stable
-        var message = Data([0x20])
-        message.append(contentsOf: withUnsafeBytes(of: UInt32(packetData.count).littleEndian) { Data($0) })
-        message.append(packetData)
-        
-        try await send(data: message, on: stream)
-        
-        if sequenceNumber % 100 == 0 {
-            print("[QuicClient] Sent audio packet #\(sender.sequence()) (\(packetData.count) bytes)")
+        // Send via QUIC datagram (unreliable, low-latency)
+        guard let group = quicGroup else {
+            print("[QuicClient] Cannot send audio: no connection group")
+            return
         }
+        
+        var datagram = Data([0x01])  // Audio datagram type
+        datagram.append(packetData)
+        
+        group.send(content: datagram) { [weak self] error in
+            if let error = error {
+                print("[QuicClient] ✗ Failed to send audio datagram: \(error)")
+            } else if let self = self, self.sequenceNumber % 100 == 0 {
+                print("[QuicClient] ✓ Sent audio packet #\(sender.sequence()) (67 bytes) via datagram")
+            }
+        }
+        
         sequenceNumber &+= 1
     }
     
@@ -851,16 +901,61 @@ public class QuicNetworkClient {
         do {
             try receiver.onPacket(data: packetData)
             
-            // Pop mixed audio and play it
-            if let mixed = receiver.popMixed() {
-                audioPlayback.enqueue(pcm: mixed)
+            // Pop decoded frames first (popMixed consumes them)
+            let decoded = receiver.popDecoded()
+            
+            if !decoded.isEmpty {
+                print("[QuicClient] ✓ Decoded \(decoded.count) audio frames from \(decoded.map { String($0.sessionId) }.joined(separator: ", "))")
             }
             
-            
-            // Update talking indicators (pop decoded frames to see who's speaking)
-            let decoded = receiver.popDecoded()
+            // Update talking indicators - avoid flashing by using persistent 300ms persistence
+            let now = Date()
             for frame in decoded {
-                activeSpeakers.insert(frame.sessionId)
+                let speakerId = frame.sessionId
+                
+                // 1. Update last seen timestamp
+                lastSpeakerActivity[speakerId] = now
+                
+                // 2. Ensure speaker is marked active
+                if !activeSpeakers.contains(speakerId) {
+                    activeSpeakers.insert(speakerId)
+                }
+                
+                // 3. Ensure we have a monitoring task for this speaker
+                if speakerTimers[speakerId] == nil {
+                    speakerTimers[speakerId] = Task { @MainActor in
+                        while !Task.isCancelled {
+                            // Check every 100ms
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            
+                            guard let lastActivity = self.lastSpeakerActivity[speakerId] else {
+                                break
+                            }
+                            
+                            // If silent for > 300ms, turn off
+                            if -lastActivity.timeIntervalSinceNow > 0.3 {
+                                self.activeSpeakers.remove(speakerId)
+                                self.speakerTimers.removeValue(forKey: speakerId)
+                                self.lastSpeakerActivity.removeValue(forKey: speakerId)
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Mix and play the decoded frames
+            if !decoded.isEmpty {
+                // Mix all frames into one buffer
+                var mixed = [Int16](repeating: 0, count: 960)  // 20ms at 48kHz
+                for frame in decoded {
+                    for (i, sample) in frame.pcm.prefix(960).enumerated() {
+                        let sum = Int32(mixed[i]) + Int32(sample)
+                        mixed[i] = Int16(clamping: sum)
+                    }
+                }
+                print("[QuicClient] ✓ Playing mixed audio: \(mixed.prefix(10).map { $0 })...")
+                audioPlayback.enqueue(pcm: mixed)
             }
         } catch {
             print("[QuicClient] Audio decryption error: \(error)")
@@ -990,9 +1085,9 @@ public class QuicNetworkClient {
         stopKeepalive()
         stopListening()
         controlStream?.cancel()
-        connectionGroup?.cancel()
+        quicGroup?.cancel()
         controlStream = nil
-        connectionGroup = nil
+        quicGroup = nil
         isConnected = false
         isAuthenticated = false
         currentChannelId = nil

@@ -15,15 +15,15 @@ flowchart TB
             DAVE1 -->|"Add nonce + tag"| PKT1["Encrypted Packet"]
         end
         
-        PKT1 -->|"~100 bytes"| NET1["Control Stream<br/>(0x20 message)"]
+        PKT1 -->|"~70 bytes"| NET1["QUIC Datagram<br/>(0x01 opcode)"]
     end
     
-    NET1 -.->|"Zero-knowledge relay"| SERVER["🖥️ Aura Server<br/>(Rust)"]
+    NET1 -.->|"Unreliable UDP<br/>Zero-knowledge relay"| SERVER["🖥️ Aura Server<br/>(Rust)"]
     
-    SERVER -.->|"Broadcast to<br/>voice group members"| NET2["Control Stream<br/>(0x20 message)"]
+    SERVER -.->|"Broadcast to<br/>voice group members"| NET2["QUIC Datagram<br/>(0x01 opcode)"]
     
     subgraph Receive ["🔊 Receive Path (Bob)"]
-        NET2 -->|"~100 bytes"| QNC2["QuicNetworkClient<br/>.handleAudioPacket()"]
+        NET2 -->|"~70 bytes"| QNC2["QuicNetworkClient<br/>.setReceiveHandler()"]
         
         subgraph RustRx ["Rust Core (UniFFI)"]
             QNC2 -->|"[u8]"| ARW["AudioReceiverWrapper<br/>.onPacket()"]
@@ -42,7 +42,7 @@ flowchart TB
     subgraph Indicators ["📊 Talking Indicators"]
         ARW -.->|".popDecoded()"| DEC["DecodedFrame[]<br/>(per sender)"]
         DEC -.->|"sessionId"| AS["activeSpeakers<br/>Set&lt;UInt32&gt;"]
-        AS -.->|"UI polls"| UI["Green dot next to<br/>speaking users"]
+        AS -.->|"Hybrid Debounce"| UI["Microphone Icon<br/>Pulsing Green"]
     end
 
     style Mic fill:#e1f5e1
@@ -58,7 +58,7 @@ flowchart TB
 ### Transmit Path
 1. **AudioCapture** - Captures 48kHz mono PCM from microphone (20ms frames)
 2. **AudioSenderWrapper** - Rust wrapper exposing Opus encoding + DAVE encryption via UniFFI
-3. **QuicNetworkClient** - Swift network layer, sends encrypted packets via control stream
+3. **QuicNetworkClient** - Swift network layer, sends encrypted packets via **QUIC Datagrams (0x01)**
 
 ### Receive Path
 1. **QuicNetworkClient** - Receives encrypted packets from server

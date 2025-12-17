@@ -103,8 +103,8 @@ graph TB
 
 ### Network Layer
 - **QUIC** - TLS 1.3 encrypted transport
-- **Control Stream** - Reliable ordered messages (auth, join, text, audio)
-- **Datagrams** - Unreliable low-latency (future: audio packets)
+- **Control Stream** - Reliable ordered messages (auth, join, text)
+- **Datagrams** - Unreliable low-latency audio packets (opcode 0x01)
 
 ## Data Flows
 

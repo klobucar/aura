@@ -194,12 +194,16 @@ struct ContentView: View {
                                 // Show other users
                                 ForEach(users) { user in
                                     HStack(spacing: 6) {
-                                        Circle()
-                                            .fill(Color.green)
-                                            .frame(width: 6, height: 6)
+                                        // Speaking indicator: microphone icon that's green+pulsing if speaking, grey if silent
+                                        let isSpeaking = client.activeSpeakers.contains(user.id)
+                                        Image(systemName: isSpeaking ? "mic.fill" : "mic.slash.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(isSpeaking ? .green : .secondary.opacity(0.5))
+                                            .scaleEffect(isSpeaking ? 1.2 : 1.0)
+                                            .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isSpeaking)
                                         Text(user.displayName)
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(isSpeaking ? .primary : .secondary)
                                     }
                                     .padding(.leading, 26)
                                 }

@@ -31,10 +31,10 @@ sequenceDiagram
     Note over User, Other: Real-Time Audio
     User->>Client: Speak (Microphone)
     Client->>Client: Encode (Opus) -> Encrypt (DAVE)
-    Client->>Server: MSG_AUDIO (0x20 + Header + EncryptedPayload)
+    Client->>Server: QUIC Datagram (0x01 + Audio Data)
     Server->>Server: Lookup Channel Members
     par Fan-Out
-        Server->>Other: MSG_AUDIO_STREAM (Relayed Packet)
+        Server->>Other: QUIC Datagram (Relayed Packet)
     end
     Other->>Other: Decrypt -> Decode -> Play
 ```

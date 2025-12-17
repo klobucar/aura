@@ -487,6 +487,8 @@ impl ConnectionContext {
                  self.recv.read_exact(&mut len_buf).await?;
                  let packet_len = u32::from_le_bytes(len_buf) as usize;
                  
+                 info!("[{}] Received audio packet: {} bytes", self.remote, packet_len);
+                 
                  // Limit audio packet size too
                  if packet_len > MAX_PACKET_SIZE {
                      warn!("[{}] Audio packet too large: {}", self.remote, packet_len);
@@ -496,6 +498,7 @@ impl ConnectionContext {
                  let mut packet_buf = vec![0u8; packet_len];
                  self.recv.read_exact(&mut packet_buf).await?;
                  self.state.route_audio_packet(bytes::Bytes::from(packet_buf)).await;
+                 info!("[{}] Routed audio packet from session {}", self.remote, self.session_id);
             }
             MSG_TEXT_PACKET => {
                 // [0x30] [Length u32] [BinaryPacket]
@@ -538,13 +541,14 @@ impl ConnectionContext {
     async fn handle_service_message(&mut self, msg: ServiceMessage) -> Result<()> {
         match msg {
             ServiceMessage::RelayAudio(packet) => {
-                // Try datagram first (fast path)
+                // Use QUIC datagrams for unreliable, low-latency audio
                 let mut dgram_data = vec![0x01u8]; // Audio type
                 dgram_data.extend_from_slice(&packet);
                 
                 if self.conn.send_datagram(bytes::Bytes::from(dgram_data)).is_err() {
-                    // Fallback to reliable stream
-                    self.send.write_u8(MSG_AUDIO_STREAM).await?;
+                    // Fallback to reliable stream if datagrams fail
+                    self.send.write_u8(0x20).await?;  // MSG_AUDIO
+                    self.send.write_u32_le(packet.len() as u32).await?;
                     self.send.write_all(&packet).await?;
                     self.send.flush().await?;
                 }
