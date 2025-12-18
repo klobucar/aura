@@ -11,6 +11,7 @@ name = "aura_core"
 aura-protocol = { path = "../aura-protocol" }
 uniffi = { version = "0.30", features = ["cli"] }
 lazy_static = "1.4"
+regex = "1.11"
 prost = "0.14"
 bytes = "1.0"
 thiserror = "2.0"

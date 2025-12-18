@@ -18,6 +18,7 @@ pub mod voice_session;
 #[cfg(feature = "native-audio")]
 pub mod audio_io;
 pub mod vad;
+pub mod tts;
 pub mod uniffi_bindings;
 #[cfg(feature = "native-audio")]
 use crate::uniffi_bindings::AudioHardware;
@@ -269,10 +270,15 @@ impl AuraClient {
         *self.delegate.lock().unwrap() = Some(delegate);
     }
 
-    /// Update own profile comment/bio
+    /// Set own profile comment/bio
     pub fn set_comment(&self, text: String) {
         println!("Setting own comment: {} chars", text.len());
         // TODO: Sign profile and send to server
+    }
+
+    /// Get a TTS formatter for sanitizing text
+    pub fn get_tts_formatter(&self) -> Arc<crate::tts::TtsFormatter> {
+        Arc::new(crate::tts::TtsFormatter::new())
     }
 }
 

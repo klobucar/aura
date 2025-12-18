@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var client: QuicNetworkClient?
     @State private var identity: UserIdentity?
     @StateObject private var audioCapture = AudioCapture()
+    @StateObject private var tts = TtsManager.shared
     @State private var isMicEnabled = false
     
     // Chat state
@@ -228,6 +229,37 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        
+        Divider()
+        
+        // TTS Settings in sidebar footer
+        VStack(alignment: .leading, spacing: 8) {
+            Text("TTS SETTINGS")
+                .font(.caption2)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+            
+            Toggle("Enable Text-to-Speech", isOn: $tts.settings.enabled)
+                .toggleStyle(.checkbox)
+            
+            if tts.settings.enabled {
+                Toggle("Speak Chat", isOn: $tts.settings.speakChat)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                Toggle("Speak Join/Leave", isOn: $tts.settings.speakJoinLeave)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                
+                HStack {
+                    Image(systemName: "tortoise")
+                    Slider(value: $tts.settings.rate, in: 0.0...1.0)
+                    Image(systemName: "hare")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding()
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
     }
     
     // MARK: - Channel Detail View
@@ -443,6 +475,9 @@ struct ContentView: View {
                 }
                 
                 chatMessages.append(chatMsg)
+                
+                // Speak the message
+                tts.speakMessage(sender: msg.senderName, content: msg.content)
             }
         }
         .onChange(of: client.systemEvents) { oldValue, newValue in
@@ -466,6 +501,16 @@ struct ContentView: View {
                 message.channelId = event.channelId
                 
                 chatMessages.append(message)
+                
+                // Speak the system event
+                if event.content.contains("joined") {
+                    // Extract name from "Name joined the channel"
+                    let name = event.content.replacingOccurrences(of: " joined the channel", with: "")
+                    tts.speakJoin(name: name)
+                } else if event.content.contains("left") {
+                    let name = event.content.replacingOccurrences(of: " left the channel", with: "")
+                    tts.speakLeave(name: name)
+                }
             }
         }
     }

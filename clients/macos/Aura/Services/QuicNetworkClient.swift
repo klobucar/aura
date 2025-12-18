@@ -565,7 +565,7 @@ public class QuicNetworkClient {
                         let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
                         
                         do {
-                            try receiver.addSender(sessionId: sessionId, key: keyData)
+                            try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: 0)
                             print("[QuicClient] Added audio sender \(sessionId) for decryption")
                         } catch {
                             print("[QuicClient] Failed to add sender: \(error)")
@@ -654,7 +654,7 @@ public class QuicNetworkClient {
                     if let receiver = self.audioReceiver {
                         let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
                         do {
-                            try receiver.addSender(sessionId: sessionId, key: keyData)
+                            try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: 0)
                             print("[QuicClient]   Added audio sender \(sessionId)")
                         } catch {
                             print("[QuicClient]   Failed to add audio sender: \(error)")
@@ -758,6 +758,7 @@ public class QuicNetworkClient {
                 senderSessionId: senderSessionId,
                 channelId: channelId,
                 epoch: epoch,
+                messageId: messageId,
                 ciphertext: Data(ciphertext),
                 nonce: Data(nonce),
                 tag: Data(tag),

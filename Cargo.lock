@@ -196,6 +196,7 @@ dependencies = [
  "openmls_rust_crypto",
  "prost",
  "rand 0.9.2",
+ "regex",
  "thiserror 2.0.17",
  "tokio",
  "uniffi",

@@ -54,9 +54,14 @@ fi
 if [ "$BUILD_CONFIG" = "debug" ]; then
     RUST_PROFILE="debug"
     CARGO_FLAGS=""
+    # Disable bitcode and set deployment target to avoid LLVM mismatches
+    export MACOSX_DEPLOYMENT_TARGET=15.0
+    export RUSTFLAGS="-C embed-bitcode=no -C lto=off"
 else
     RUST_PROFILE="release"
     CARGO_FLAGS="--release"
+    export MACOSX_DEPLOYMENT_TARGET=15.0
+    export RUSTFLAGS="-C embed-bitcode=no"
 fi
 
 TARGET_DIR="$REPO_ROOT/target/$RUST_TARGET/$RUST_PROFILE"
@@ -130,6 +135,10 @@ DYLIB="$TARGET_DIR/libaura_core.dylib"
 DYLIB="$TARGET_DIR/libaura_core.dylib"
 if [ -f "$DYLIB" ]; then
     cp "$DYLIB" "$OUTPUT_DIR/"
+    
+    # Fix the install name to use @rpath so Xcode can find it
+    install_name_tool -id "@rpath/libaura_core.dylib" "$OUTPUT_DIR/libaura_core.dylib"
+    
     echo "✅ Copied libaura_core.dylib"
 fi
 
@@ -154,10 +163,12 @@ echo "✅ Module map created"
 # Step 5: Sync to Xcode Location (Fix for Path Issues)
 # =============================================================================
 
+# Always sync to target/release so Xcode can find the library via its hardcoded search paths
 echo ""
-echo "🔄 Syncing library to target/release/ (where Xcode looks)..."
+echo "🔄 Syncing libraries to target/release/ (where Xcode looks)..."
 mkdir -p "$REPO_ROOT/target/release"
 cp "$TARGET_DIR/libaura_core.a" "$REPO_ROOT/target/release/libaura_core.a"
+cp "$TARGET_DIR/libaura_core.dylib" "$REPO_ROOT/target/release/libaura_core.dylib"
 echo "✅ Library synced to target/release/"
 
 # =============================================================================
