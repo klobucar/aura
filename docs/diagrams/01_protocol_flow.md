@@ -26,11 +26,12 @@ sequenceDiagram
     Note over Client, Server: Channel Join
     Client->>Server: MSG_JOIN_CHANNEL (Channel 1)
     Server->>Server: Add User to Channel Group
-    Server->>Client: Join Ack (Optional/Implicit)
+    Server->>Client: Join Ack + MLS Welcome
+    Note over Client, Other: MLS Epoch Handover (Bob adds Alice)
 
     Note over User, Other: Real-Time Audio
     User->>Client: Speak (Microphone)
-    Client->>Client: Encode (Opus) -> Encrypt (DAVE)
+    Client->>Client: Encode (Opus) -> Encrypt (DAVE: Per-Sender Key)
     Client->>Server: QUIC Datagram (0x01 + Audio Data)
     Server->>Server: Lookup Channel Members
     par Fan-Out

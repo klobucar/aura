@@ -117,13 +117,23 @@ impl MlsClient {
         Ok(())
     }
     
-    /// Export a DAVE encryption key for the current epoch
-    pub fn export_dave_key(&self, group_id: &[u8]) -> Result<([u8; DAVE_KEY_LEN], u64), MlsError> {
+    /// Export a per-sender DAVE encryption key for the current epoch
+    /// 
+    /// Each sender in the group derives a unique key by using their sender_id
+    /// as context in the MLS key export. This prevents impersonation attacks
+    /// where group members could forge packets for other members.
+    /// 
+    /// # Arguments
+    /// * `group_id` - The MLS group identifier
+    /// * `sender_id` - The unique session ID of the sender (little-endian in context)
+    pub fn export_sender_key(&self, group_id: &[u8], sender_id: u32) -> Result<([u8; DAVE_KEY_LEN], u64), MlsError> {
         let group = self.groups.get(group_id)
             .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
         
         let epoch = group.epoch().as_u64();
-        let context = epoch.to_le_bytes();
+        
+        // Context = sender_id (little-endian, per DAVE spec)
+        let context = sender_id.to_le_bytes();
         
         let secret = group.export_secret(
             self.provider.crypto(),
@@ -138,6 +148,8 @@ impl MlsClient {
         
         Ok((key, epoch))
     }
+
+
     
     /// Get the current epoch for a group
     pub fn epoch(&self, group_id: &[u8]) -> Result<u64, MlsError> {
@@ -366,7 +378,7 @@ mod tests {
         
         client.create_group(group_id).expect("Failed to create group");
         
-        let (key, epoch) = client.export_dave_key(group_id).expect("Failed to export key");
+        let (key, epoch) = client.export_sender_key(group_id, 1).expect("Failed to export key");
         assert_eq!(key.len(), DAVE_KEY_LEN);
         assert_eq!(epoch, 0);
     }
@@ -435,9 +447,9 @@ mod tests {
         
         bob.process_welcome(&welcome).expect("Failed to process welcome");
         
-        // Both should derive the same DAVE key
-        let (alice_key, alice_epoch) = alice.export_dave_key(group_id).expect("Alice key export");
-        let (bob_key, bob_epoch) = bob.export_dave_key(group_id).expect("Bob key export");
+        // Both should derive the same DAVE key when using the same sender_id
+        let (alice_key, alice_epoch) = alice.export_sender_key(group_id, 0).expect("Alice key export");
+        let (bob_key, bob_epoch) = bob.export_sender_key(group_id, 0).expect("Bob key export");
         
         assert_eq!(alice_epoch, bob_epoch);
         assert_eq!(alice_key, bob_key);
@@ -465,10 +477,10 @@ mod tests {
         // Bob processes the commit from Alice adding Charlie
         bob.process_commit(group_id, &commit2).expect("Bob processes commit");
         
-        // All three should have the same epoch and DAVE key
-        let (alice_key, epoch_a) = alice.export_dave_key(group_id).expect("Alice key");
-        let (bob_key, epoch_b) = bob.export_dave_key(group_id).expect("Bob key");
-        let (charlie_key, epoch_c) = charlie.export_dave_key(group_id).expect("Charlie key");
+        // All three should have the same epoch and derive matching keys with same sender_id
+        let (alice_key, epoch_a) = alice.export_sender_key(group_id, 0).expect("Alice key");
+        let (bob_key, epoch_b) = bob.export_sender_key(group_id, 0).expect("Bob key");
+        let (charlie_key, epoch_c) = charlie.export_sender_key(group_id, 0).expect("Charlie key");
         
         assert_eq!(epoch_a, epoch_b);
         assert_eq!(epoch_b, epoch_c);

@@ -81,8 +81,8 @@ impl VoiceSession {
         // Create the MLS group
         mls.create_group(channel_id)?;
         
-        // Get the DAVE key for audio encryption
-        let (dave_key, epoch) = mls.export_dave_key(channel_id)?;
+        // Get the DAVE key for audio encryption (per-sender derivation with our session_id)
+        let (dave_key, epoch) = mls.export_sender_key(channel_id, self.session_id)?;
         
         // Set up audio encryption
         self.sender.update_key(&dave_key, epoch);
@@ -109,8 +109,8 @@ impl VoiceSession {
         // Process the Welcome and join the group
         let group_id = mls.process_welcome(welcome_bytes)?;
         
-        // Get the DAVE key for audio encryption
-        let (dave_key, epoch) = mls.export_dave_key(&group_id)?;
+        // Get the DAVE key for audio encryption (per-sender derivation with our session_id)
+        let (dave_key, epoch) = mls.export_sender_key(&group_id, self.session_id)?;
         
         // Set up audio encryption
         self.sender.update_key(&dave_key, epoch);
@@ -137,8 +137,8 @@ impl VoiceSession {
         // Add the member
         let (commit, welcome) = mls.add_member(&group_id, key_package_bytes)?;
         
-        // Re-key our sender with the new epoch's key
-        let (dave_key, epoch) = mls.export_dave_key(&group_id)?;
+        // Re-key our sender with the new epoch's key (per-sender derivation)
+        let (dave_key, epoch) = mls.export_sender_key(&group_id, self.session_id)?;
         self.sender.update_key(&dave_key, epoch);
         
         Ok((commit, welcome))
@@ -156,8 +156,8 @@ impl VoiceSession {
         // Process the commit
         let new_epoch = mls.process_commit(&group_id, commit_bytes)?;
         
-        // Re-key our sender with the new epoch's key
-        let (dave_key, _) = mls.export_dave_key(&group_id)?;
+        // Re-key our sender with the new epoch's key (per-sender derivation)
+        let (dave_key, _) = mls.export_sender_key(&group_id, self.session_id)?;
         self.sender.update_key(&dave_key, new_epoch);
         
         Ok(new_epoch)
@@ -185,10 +185,10 @@ impl VoiceSession {
             .clone()
             .ok_or(VoiceSessionError::NotInChannel)?;
         
-        // All members use the same DAVE key
-        let (dave_key, _) = mls.export_dave_key(&group_id)?;
+        // Per-sender key derivation using session_id as context
+        let (dave_key, epoch) = mls.export_sender_key(&group_id, remote_session_id)?;
         
-        self.receiver.add_sender(remote_session_id, &dave_key)?;
+        self.receiver.add_sender(remote_session_id, &dave_key, (epoch & 0xFFFF) as u16)?;
         Ok(())
     }
     
@@ -199,10 +199,10 @@ impl VoiceSession {
             .clone()
             .ok_or(VoiceSessionError::NotInChannel)?;
         
-        let (dave_key, _) = mls.export_dave_key(&group_id)?;
-        
         for &session_id in remote_session_ids {
-            self.receiver.update_sender_key(session_id, &dave_key);
+            // Per-sender key derivation
+            let (dave_key, epoch) = mls.export_sender_key(&group_id, session_id)?;
+            self.receiver.update_sender_key(session_id, &dave_key, (epoch & 0xFFFF) as u16);
         }
         
         Ok(())

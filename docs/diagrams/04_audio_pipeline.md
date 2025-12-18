@@ -28,7 +28,7 @@ flowchart TB
         subgraph RustRx ["Rust Core (UniFFI)"]
             QNC2 -->|"[u8]"| ARW["AudioReceiverWrapper<br/>.onPacket()"]
             ARW -->|"Decrypt"| DAVE2["DAVE Decryption<br/>(XChaCha20-Poly1305)"]
-            DAVE2 -->|"~40 bytes"| OPUS2["Opus Decoder<br/>(decompress)"]
+            DAVE2 -->|"Replay Guard"| OPUS2["Opus Decoder<br/>(decompress)"]
             OPUS2 -->|"960 samples"| JB["Jitter Buffer<br/>(reorder)"]
             JB -->|"Buffered frames"| MIX["Audio Mixer<br/>(multi-sender)"]
             MIX -->|".popMixed()"| MIXED["[Int16] PCM"]
@@ -73,7 +73,7 @@ flowchart TB
 ## Encryption
 
 All audio is encrypted end-to-end using **DAVE Protocol** (XChaCha20-Poly1305):
-- **Key**: Derived from MLS voice group secret (currently using session token for PoC)
+- **Key**: Derived from MLS export_secret using sender_id context (Per-sender isolation)
 - **Nonce**: 192-bit random nonce per packet (avoids birthday bound)
 - **Authentication**: Poly1305 MAC tag ensures integrity
 - **Server**: Cannot decrypt audio, acts as zero-knowledge relay

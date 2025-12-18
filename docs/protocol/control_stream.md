@@ -19,11 +19,13 @@ The control stream is a bidirectional QUIC stream opened by the server immediate
 | `0x02` | ServerHello | S→C | Challenge for authentication |
 | `0x03` | AuthRequest | C→S | Client authentication |
 | `0x04` | AuthResponse | S→C | Auth result |
-| `0x10` | JoinChannel | C→S | Join a voice channel |
-| `0x11` | UserJoined | S→C | User joined channel |
+| `0x10` | JoinChannel | C→S | Join channel (includes KeyPackage) |
+| `0x11` | UserJoined | S→C | User joined (includes KeyPackage) |
 | `0x12` | UserLeft | S→C | User left channel |
 | `0x13` | ChannelState | S→C | Full channel user list |
 | `0x20` | AudioPacket | Both | Encapsulated audio (fallback) |
+| `0x21` | MlsSignal | Both | MLS Signaling (Commit, Welcome, Proposal) |
+| `0x30` | TextPacket | Both | End-to-end encrypted text message |
 
 ## Message Formats
 
@@ -61,8 +63,11 @@ Server sends 32 random bytes for client to sign.
 
 ### 0x10 - JoinChannel
 ```
-[0x10] [channel_id: u32 LE]
+[0x10] 
+[channel_id: u32 LE]
+[key_package_len: u16 LE] [key_package: bytes]
 ```
+Client sends their initial MLS KeyPackage to join the group.
 
 ### 0x11 - UserJoined
 ```
@@ -70,7 +75,9 @@ Server sends 32 random bytes for client to sign.
 [channel_id: u32 LE]
 [session_id: u32 LE]
 [display_name_len: u8] [display_name: UTF-8]
+[key_package_len: u16 LE] [key_package: bytes]
 ```
+Broadcast to channel members. Includes KeyPackage for group inclusion.
 Sent to **ALL connected users** when a user joins any channel.
 
 ### 0x12 - UserLeft
@@ -89,17 +96,35 @@ Sent to **ALL connected users** when a user leaves any channel or disconnects.
 [users: repeated {
     [session_id: u32 LE]
     [display_name_len: u8] [display_name: UTF-8]
+    [key_package_len: u16 LE] [key_package: bytes]
 }]
 ```
-Sent to new joiners with the full list of users already in the channel.
+Sent to new joiners with the full list of users and their MLS KeyPackages.
 
-### 0x20 - AudioPacket (Reliable Fallback)
+### 0x21 - MlsSignal
 ```
-[0x20]
-[length: u32 LE]
+[0x21]
+[channel_id: u32 LE]
+[signal_type: u8] (0=Welcome, 1=Commit, 2=Proposal)
+[payload_len: u32 LE]
 [payload: bytes]
 ```
-Used when QUIC datagrams are unavailable. Payload is a FastAudioPacket.
+Transports opaque MLS messages. `Welcome` is sent by an existing member to a joiner; `Commit` and `Proposal` are broadcast.
+
+### 0x30 - TextPacket
+```
+[0x30]
+[packet_len: u32 LE]
+[sender_session_id: u32 LE]
+[channel_id: u32 LE]
+[epoch: u64 LE]
+[message_id_len: u8] [message_id: UTF-8]
+[content_len: u32 LE] [content: encrypted bytes]
+[nonce: 24 bytes]
+[tag: 16 bytes]
+[reply_to_id_len: u8] [reply_to_id: UTF-8] (optional)
+```
+End-to-end encrypted text message. Payload is XChaCha20-Poly1305.
 
 ## Connection Flow
 
@@ -118,15 +143,15 @@ Client                              Server
   |           [success, user_id...]    |
   |                                    |
   |  -------- JoinChannel (0x10) --->  |
-  |           [channel_id: 1]          |
+  |           [channel_id, KeyPackage] |
   |                                    |
   |  <------- ChannelState (0x13) ---  |
-  |           [existing users...]      |
+  |           [existing users + KPs]   |
   |                                    |
-  |  <------- UserJoined (0x11) -----  |
-  |           (to other users)         |
+  |  <------- MlsSignal (Welcome) ---  |
+  |           (from existing member)   |
   |                                    |
-  |  <======= Audio/Keepalive ======>  |
+  |  <======= E2EE Audio/Text =======> |
   |                                    |
   |  -------- Disconnect ----------->  |
   |                                    |

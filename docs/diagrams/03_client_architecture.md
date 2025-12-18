@@ -29,6 +29,7 @@ graph TB
             OPUS["Opus Codec"]
             DAVE["DAVE Crypto<br/>(XChaCha20-Poly1305)"]
             JB["Jitter Buffer"]
+            ES["Epoch Store"]
         end
     end
 
@@ -111,7 +112,7 @@ graph TB
 ### Voice Transmit (Alice → Server → Bob)
 1. Mic → AudioCapture → PCM Data
 2. PCM → AudioSenderWrapper → Encrypted Packet
-3. Packet → QuicNetworkClient → Control Stream (0x20)
+3. Packet → QuicNetworkClient → QUIC Datagram (0x01)
 4. Server relays to Bob's QuicNetworkClient
 5. Bob's QuicNetworkClient → AudioReceiverWrapper → Decrypt/Decode
 6. AudioReceiverWrapper.popMixed() → AudioPlayback → Speakers

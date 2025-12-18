@@ -109,8 +109,13 @@ impl AudioReceiverWrapper {
         }
     }
     
-    /// Add a sender with their key
-    pub fn add_sender(&self, session_id: u32, key: &[u8]) -> Result<(), AudioError> {
+    /// Add a sender with their key and epoch hint
+    /// 
+    /// # Arguments
+    /// * `session_id` - Unique session ID for this sender
+    /// * `key` - 32-byte encryption key derived from MLS
+    /// * `epoch_hint` - Current MLS epoch (low 16 bits)
+    pub fn add_sender(&self, session_id: u32, key: &[u8], epoch_hint: u16) -> Result<(), AudioError> {
         if key.len() != KEY_SIZE {
             return Err(AudioError::InvalidKeySize);
         }
@@ -119,8 +124,23 @@ impl AudioReceiverWrapper {
         key_arr.copy_from_slice(key);
         
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        inner.add_sender(session_id, &key_arr).map_err(convert_error)?;
+        inner.add_sender(session_id, &key_arr, epoch_hint).map_err(convert_error)?;
         Ok(())
+    }
+    
+    /// Update a sender's key (called when MLS epoch advances)
+    /// 
+    /// Old keys are retained for graceful epoch handover.
+    pub fn update_sender_key(&self, session_id: u32, key: &[u8], epoch_hint: u16) -> Result<bool, AudioError> {
+        if key.len() != KEY_SIZE {
+            return Err(AudioError::InvalidKeySize);
+        }
+        
+        let mut key_arr = [0u8; KEY_SIZE];
+        key_arr.copy_from_slice(key);
+        
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        Ok(inner.update_sender_key(session_id, &key_arr, epoch_hint))
     }
     
     /// Remove a sender
@@ -154,6 +174,7 @@ impl AudioReceiverWrapper {
         self.inner.read().ok()?.pop_mixed()
     }
 }
+
 
 impl Default for AudioReceiverWrapper {
     fn default() -> Self {
@@ -377,7 +398,7 @@ mod tests {
         
         let sender = AudioSenderWrapper::new(session_id, &key).expect("Create sender");
         let receiver = AudioReceiverWrapper::new();
-        receiver.add_sender(session_id, &key).expect("Add sender");
+        receiver.add_sender(session_id, &key, 0).expect("Add sender");
         
         let pcm = vec![1000i16; 960];
         let packet = sender.process(&pcm).expect("Process");

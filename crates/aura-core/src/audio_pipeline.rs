@@ -115,10 +115,14 @@ pub struct AudioReceiver {
 struct SenderState {
     /// Opus decoder (per-sender for independent state)
     codec: OpusCodec,
-    /// Decryption context
-    crypto: DaveCrypto,
+    /// Decryption keys indexed by epoch_hint (retains old epochs for handover)
+    key_store: HashMap<u16, DaveCrypto>,
+    /// Current epoch hint
+    current_epoch: u16,
     /// Jitter buffer
     jitter: JitterBuffer,
+    /// Last processed sequence number (for replay protection)
+    last_sequence: u16,
 }
 
 impl AudioReceiver {
@@ -139,12 +143,21 @@ impl AudioReceiver {
     }
     
     /// Register a sender with their decryption key
-    pub fn add_sender(&self, session_id: u32, key: &[u8; 32]) -> Result<(), AudioPipelineError> {
+    pub fn add_sender(&self, session_id: u32, key: &[u8; 32], epoch_hint: u16) -> Result<(), AudioPipelineError> {
         let codec = OpusCodec::new().map_err(AudioPipelineError::Opus)?;
         let crypto = DaveCrypto::new(key);
         let jitter = JitterBuffer::new(self.jitter_config.clone());
         
-        let state = SenderState { codec, crypto, jitter };
+        let mut key_store = HashMap::new();
+        key_store.insert(epoch_hint, crypto);
+        
+        let state = SenderState { 
+            codec, 
+            key_store, 
+            current_epoch: epoch_hint,
+            jitter,
+            last_sequence: 0,
+        };
         self.senders.write().unwrap().insert(session_id, state);
         Ok(())
     }
@@ -155,9 +168,25 @@ impl AudioReceiver {
     }
     
     /// Update a sender's decryption key (called when MLS epoch advances)
-    pub fn update_sender_key(&self, session_id: u32, new_key: &[u8; 32]) -> bool {
+    /// 
+    /// Retains old keys for graceful epoch handover (~10s worth of packets).
+    /// Old epochs are pruned when more than 3 are stored.
+    pub fn update_sender_key(&self, session_id: u32, new_key: &[u8; 32], new_epoch: u16) -> bool {
         if let Some(state) = self.senders.write().unwrap().get_mut(&session_id) {
-            state.crypto = DaveCrypto::new(new_key);
+            // Add new key
+            state.key_store.insert(new_epoch, DaveCrypto::new(new_key));
+            state.current_epoch = new_epoch;
+            
+            // Prune old epochs (keep at most 3)
+            while state.key_store.len() > 3 {
+                // Find and remove the oldest epoch
+                if let Some(&oldest) = state.key_store.keys()
+                    .filter(|&&e| e != state.current_epoch)
+                    .min() 
+                {
+                    state.key_store.remove(&oldest);
+                }
+            }
             true
         } else {
             false
@@ -166,7 +195,7 @@ impl AudioReceiver {
     
     /// Process a received packet
     /// 
-    /// Pipeline: Parse -> Decrypt -> Remove padding -> Insert into jitter buffer
+    /// Pipeline: Parse -> Try decrypt with epoch_hint key -> Fallback to other epochs -> Insert
     pub fn on_packet(&self, data: Bytes) -> Result<(), AudioPipelineError> {
         // 1. Parse packet
         let packet = FastAudioPacket::parse(data)
@@ -177,11 +206,33 @@ impl AudioReceiver {
         let state = senders.get_mut(&packet.session_id)
             .ok_or(AudioPipelineError::UnknownSender(packet.session_id))?;
         
-        // 3. Decrypt
-        let opus_data = state.crypto.decrypt(&packet.payload, &packet.nonce)
-            .map_err(AudioPipelineError::Crypto)?;
+        // 3. Replay protection: reject if sequence is too old
+        let seq_diff = packet.sequence.wrapping_sub(state.last_sequence);
+        if seq_diff > 32768 && seq_diff != 0 {
+            // Sequence went backwards by more than half the range - likely replay
+            return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
+        }
+        state.last_sequence = state.last_sequence.max(packet.sequence);
         
-        // 4. Insert into jitter buffer
+        // 4. Try decryption with epoch_hint key first, then fallback
+        let opus_data = if let Some(crypto) = state.key_store.get(&packet.epoch_hint) {
+            crypto.decrypt(&packet.payload, &packet.nonce)
+                .map_err(AudioPipelineError::Crypto)?
+        } else {
+            // Fallback: try other epochs (for packets in-flight during transition)
+            let mut decrypted = None;
+            for crypto in state.key_store.values() {
+                if let Ok(data) = crypto.decrypt(&packet.payload, &packet.nonce) {
+                    decrypted = Some(data);
+                    break;
+                }
+            }
+            decrypted.ok_or(AudioPipelineError::Crypto(
+                crate::crypto::CryptoError::DecryptionFailed
+            ))?
+        };
+        
+        // 5. Insert into jitter buffer
         state.jitter.push(
             packet.sequence as u64,
             packet.sequence as u32 * 960, // Approximate timestamp
@@ -190,6 +241,7 @@ impl AudioReceiver {
         
         Ok(())
     }
+
     
     /// Pop and decode ready frames from all senders
     /// 
@@ -288,7 +340,7 @@ mod tests {
         // Create sender and receiver
         let sender = AudioSender::new(session_id, &key).expect("Create sender");
         let receiver = AudioReceiver::new();
-        receiver.add_sender(session_id, &key).expect("Add sender");
+        receiver.add_sender(session_id, &key, 0).expect("Add sender");
         
         // Generate test tone
         let pcm: Vec<i16> = (0..960).map(|i| ((i % 100) * 100) as i16).collect();
@@ -316,8 +368,8 @@ mod tests {
         let sender2 = AudioSender::new(2, &key2).expect("Create sender 2");
         let receiver = AudioReceiver::new();
         
-        receiver.add_sender(1, &key1).expect("Add sender 1");
-        receiver.add_sender(2, &key2).expect("Add sender 2");
+        receiver.add_sender(1, &key1, 0).expect("Add sender 1");
+        receiver.add_sender(2, &key2, 0).expect("Add sender 2");
         
         let pcm = vec![1000i16; 960];
         
