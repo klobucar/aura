@@ -15,9 +15,12 @@ pub mod audio_pipeline;
 pub mod mls;
 pub mod text_crypto;
 pub mod voice_session;
+#[cfg(feature = "native-audio")]
 pub mod audio_io;
 pub mod vad;
 pub mod uniffi_bindings;
+#[cfg(feature = "native-audio")]
+use crate::uniffi_bindings::AudioHardware;
 
 uniffi::setup_scaffolding!("aura_core");
 
@@ -271,6 +274,68 @@ impl AuraClient {
         println!("Setting own comment: {} chars", text.len());
         // TODO: Sign profile and send to server
     }
+}
+
+// =============================================================================
+// Simple C-FFI for C# Audio (Fallback when UniFFI generator is unavailable)
+// =============================================================================
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_new() -> *mut AudioHardware {
+    if let Ok(hw) = AudioHardware::new() {
+        Box::into_raw(Box::new(hw))
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_free(hw: *mut AudioHardware) {
+    if !hw.is_null() {
+        unsafe { drop(Box::from_raw(hw)) };
+    }
+}
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32 {
+    let hw = unsafe { &*hw };
+    if hw.start_capture().is_ok() { 0 } else { -1 }
+}
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_stop_capture(hw: *mut AudioHardware) -> i32 {
+    let hw = unsafe { &*hw };
+    if hw.stop_capture().is_ok() { 0 } else { -1 }
+}
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_read_capture(hw: *mut AudioHardware, buf: *mut i16, len: usize) -> i32 {
+    let hw = unsafe { &*hw };
+    if let Some(samples) = hw.read_capture() {
+        let to_copy = samples.len().min(len);
+        unsafe {
+            std::ptr::copy_nonoverlapping(samples.as_ptr(), buf, to_copy);
+        }
+        to_copy as i32
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "native-audio")]
+#[no_mangle]
+pub extern "C" fn aura_audio_write_playback(hw: *mut AudioHardware, buf: *const i16, len: usize) -> i32 {
+    let hw = unsafe { &*hw };
+    let mut vec = vec![0i16; len];
+    unsafe {
+        std::ptr::copy_nonoverlapping(buf, vec.as_mut_ptr(), len);
+    }
+    if hw.write_playback(vec).is_ok() { 0 } else { -1 }
 }
 
 /// Callback interface for receiving async events from Rust

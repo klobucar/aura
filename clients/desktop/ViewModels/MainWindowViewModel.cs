@@ -20,7 +20,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
     private AuraNetworkClient? _client;
     private UserIdentity? _identity;
-    private MicrophoneCapture? _mic;
+    private RustAudioEngine? _audioEngine;
     private CancellationTokenSource? _audioCts;
     
     // ==========================================================================
@@ -137,6 +137,8 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             
             // 2. Create client and connect
             _client = new AuraNetworkClient();
+            _audioEngine ??= new RustAudioEngine();
+            _client.SetAudioEngine(_audioEngine);
             _client.OnStatusChanged += status => 
                 Dispatcher.UIThread.Post(() => ConnectionStatus = status);
             _client.OnError += error => 
@@ -248,38 +250,27 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     
     private void StartMic()
     {
-        if (_mic != null || _client == null) return;
+        if (_audioEngine == null || _client == null) return;
         
-        _mic = new MicrophoneCapture();
         _audioCts = new CancellationTokenSource();
         
-        _mic.OnAudioData += async data =>
+        _audioEngine.OnAudioData += d =>
         {
             if (_client != null && IsAuthenticated)
             {
-                await _client.SendAudioFrameAsync(data, _audioCts.Token);
+                // Off-thread send to avoid blocking engine
+                _ = _client.SendAudioFrameAsync(d, _audioCts.Token);
             }
         };
         
-        _mic.OnError += error =>
-            Dispatcher.UIThread.Post(() => ConnectionStatus = $"Mic error: {error}");
+        _audioEngine.OnError += error =>
+            Dispatcher.UIThread.Post(() => ConnectionStatus = $"Audio error: {error}");
         
-        _mic.Start();
-        
-        // Update stats periodically
-        _ = Task.Run(async () =>
-        {
-            while (_mic?.IsRunning == true && !_audioCts!.Token.IsCancellationRequested)
-            {
-                await Task.Delay(1000);
-                Dispatcher.UIThread.Post(() => 
-                    AudioStats = $"Audio: {_mic.PacketsSent} packets sent");
-            }
-        });
+        _audioEngine.StartCapture();
         
         Messages.Add(new ChatMessage 
         { 
-            Content = "Microphone enabled - streaming audio",
+            Content = "Rust Audio Engine enabled (CPAL)",
             System = true 
         });
     }
@@ -287,8 +278,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private void StopMic()
     {
         _audioCts?.Cancel();
-        _mic?.Dispose();
-        _mic = null;
+        _audioEngine?.StopCapture();
         _audioCts = null;
         AudioStats = "";
     }

@@ -31,12 +31,29 @@ pub enum AudioError {
     UnsupportedFormat,
 }
 
+/// A wrapper for cpal::Stream to make it Send + Sync.
+/// 
+/// On some platforms (like macOS), cpal's Stream is not Send + Sync
+/// because it contains CoreAudio callbacks that might not be thread-safe
+/// to move. However, for use in UniFFI objects protected by a Mutex,
+/// we need this marker.
+struct SendableStream(Stream);
+unsafe impl Send for SendableStream {}
+unsafe impl Sync for SendableStream {}
+
+impl std::ops::Deref for SendableStream {
+    type Target = Stream;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Microphone capture
 /// 
 /// Captures audio from the default input device and sends 20ms frames
 /// through a channel for processing.
 pub struct AudioCapture {
-    stream: Stream,
+    stream: SendableStream,
     running: Arc<AtomicBool>,
 }
 
@@ -84,7 +101,7 @@ impl AudioCapture {
             None, // No timeout
         ).map_err(|e| AudioError::Device(e.to_string()))?;
         
-        Ok((Self { stream, running }, rx))
+        Ok((Self { stream: SendableStream(stream), running }, rx))
     }
     
     /// Start capturing audio
@@ -110,7 +127,7 @@ impl AudioCapture {
 /// Plays audio through the default output device. Receives 20ms PCM frames
 /// through a channel.
 pub struct AudioPlayback {
-    stream: Stream,
+    stream: SendableStream,
     running: Arc<AtomicBool>,
 }
 
@@ -168,7 +185,7 @@ impl AudioPlayback {
             None, // No timeout
         ).map_err(|e| AudioError::Device(e.to_string()))?;
         
-        Ok((Self { stream, running }, tx))
+        Ok((Self { stream: SendableStream(stream), running }, tx))
     }
     
     /// Start playing audio

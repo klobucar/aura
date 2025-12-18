@@ -24,6 +24,9 @@ public class AuraNetworkClient : IAsyncDisposable
     private string? _sessionToken;
     private ushort _sequenceNumber;
     private TextCryptoService? _textCrypto;
+    private RustAudioEngine? _audioEngine;
+    
+    public void SetAudioEngine(RustAudioEngine engine) => _audioEngine = engine;
     
     public uint UserId => _userId;
     public string? SessionToken => _sessionToken;
@@ -64,7 +67,7 @@ public class AuraNetworkClient : IAsyncDisposable
             MaxInboundBidirectionalStreams = 10,
             ClientAuthenticationOptions = new SslClientAuthenticationOptions
             {
-                ApplicationProtocols = [new SslApplicationProtocol("aura")],
+                ApplicationProtocols = [new SslApplicationProtocol("aura-dave")],
                 TargetHost = host,
                 // Accept self-signed certificates for POC
                 RemoteCertificateValidationCallback = (sender, cert, chain, errors) => 
@@ -79,10 +82,10 @@ public class AuraNetworkClient : IAsyncDisposable
         _connection = await QuicConnection.ConnectAsync(options, ct);
         Console.WriteLine("[AuraClient] QUIC connection established!");
         
-        // Open control stream for authentication
-        Console.WriteLine("[AuraClient] Opening bidirectional control stream...");
-        _controlStream = await _connection.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, ct);
-        Console.WriteLine("[AuraClient] Control stream opened!");
+        // Wait for server to open control stream (server-first protocol)
+        Console.WriteLine("[AuraClient] Waiting for server to open bidirectional control stream...");
+        _controlStream = await _connection.AcceptInboundStreamAsync(ct);
+        Console.WriteLine("[AuraClient] Control stream received from server!");
         
         OnStatusChanged?.Invoke("Connected (unauthenticated)");
     }
@@ -98,12 +101,8 @@ public class AuraNetworkClient : IAsyncDisposable
         Console.WriteLine($"[AuraClient] Authenticating as '{identity.DisplayName}'...");
         OnStatusChanged?.Invoke("Authenticating...");
         
-        // 1. Send challenge request
-        Console.WriteLine("[AuraClient] Sending challenge request...");
-        await SendChallengeRequestAsync(identity.PublicKey, ct);
-        
-        // 2. Receive challenge
-        Console.WriteLine("[AuraClient] Waiting for challenge response...");
+        // 1. Receive challenge (Server-first protocol: server sends challenge immediately on connection)
+        Console.WriteLine("[AuraClient] Waiting for challenge response (ServerHello)...");
         var challenge = await ReceiveChallengeResponseAsync(ct);
         Console.WriteLine($"[AuraClient] Received challenge: {Convert.ToHexString(challenge[..8])}...");
         
@@ -141,11 +140,6 @@ public class AuraNetworkClient : IAsyncDisposable
     }
     
     private QuicStream? _audioStream;
-
-    /// <summary>
-    /// Send audio frame to server.
-    /// </summary>
-    private AudioPlayback _audioPlayback = new();
 
     public async Task SendAudioFrameAsync(byte[] pcmData, CancellationToken ct = default)
     {
@@ -216,12 +210,12 @@ public class AuraNetworkClient : IAsyncDisposable
     private async Task<byte[]> ReceiveChallengeResponseAsync(CancellationToken ct)
     {
         var buffer = new byte[33]; // [1 byte type][32 bytes challenge]
-        var read = await _controlStream!.ReadAsync(buffer, ct);
-        Console.WriteLine($"[AuraClient] ReceiveChallengeResponse: read {read} bytes, type={buffer[0]}");
+        await ReadExactAsync(buffer, ct);
+        Console.WriteLine($"[AuraClient] ReceiveChallengeResponse: type={buffer[0]}");
         
-        if (read < 33 || buffer[0] != 0x02) // ChallengeResponse type
+        if (buffer[0] != 0x02) // ChallengeResponse type
         {
-            throw new ProtocolException($"Invalid challenge response: read={read}, type={buffer[0]}");
+            throw new ProtocolException($"Invalid challenge response: type={buffer[0]}");
         }
         
         var challenge = new byte[32];
@@ -401,7 +395,7 @@ public class AuraNetworkClient : IAsyncDisposable
         // Otherwise, this completes the transport pipe at least.
         
         var payload = payloadDesc.ToArray();
-        _audioPlayback.Enqueue(payload);
+        _audioEngine?.PlayAudio(payload);
     }
 
     private async Task HandleUserJoinedAsync(CancellationToken ct)

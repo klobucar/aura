@@ -15,7 +15,7 @@ prost = "0.14"
 bytes = "1.0"
 thiserror = "2.0"
 audiopus = "0.2"
-cpal = "0.16"
+cpal = { version = "0.16", optional = true }
 tokio = { version = "1.48", features = ["full"] }
 # DAVE Protocol Encryption
 chacha20poly1305 = "0.10"
@@ -26,6 +26,9 @@ hex = "0.4.3"
 openmls_basic_credential = "0.4.1"
 uuid = { version = "1.19.0", features = ["v4"] }
 
+[features]
+default = ["native-audio"]
+native-audio = ["dep:cpal"]
 
 [build-dependencies]
 uniffi = { version = "0.30", features = ["build"] }

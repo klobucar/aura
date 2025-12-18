@@ -38,6 +38,7 @@ pub fn encrypt_text(
         sender_session_id,
         channel_id,
         epoch,
+        message_id: message.message_id.clone(),
         ciphertext: ciphertext_without_tag,
         nonce: nonce.to_vec(),
         tag,

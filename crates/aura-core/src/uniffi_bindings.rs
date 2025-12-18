@@ -3,7 +3,7 @@
 //! These wrapper types are used by the UDL-defined interfaces.
 //! They provide a simpler API that works with UniFFI's scaffolding.
 
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use bytes::Bytes;
 
 use crate::audio_pipeline::{
@@ -11,17 +11,9 @@ use crate::audio_pipeline::{
     AudioReceiver as InternalReceiver,
     AudioPipelineError as InternalError,
 };
+#[cfg(feature = "native-audio")]
+use crate::audio_io::AudioDevice;
 use crate::crypto::KEY_SIZE;
-
-/// Convert internal error to UniFFI-compatible string description
-fn format_error(e: InternalError) -> String {
-    match e {
-        InternalError::Opus(o) => format!("Opus: {}", o),
-        InternalError::Crypto(c) => format!("Crypto: {}", c),
-        InternalError::PacketParse(p) => format!("Parse: {}", p),
-        InternalError::UnknownSender(id) => format!("Unknown sender: {}", id),
-    }
-}
 
 /// Audio error type for UniFFI
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -170,6 +162,63 @@ impl Default for AudioReceiverWrapper {
 }
 
 // =============================================================================
+// Audio Hardware - UniFFI-compatible wrapper for cpal
+// =============================================================================
+
+#[cfg(feature = "native-audio")]
+#[derive(uniffi::Object)]
+pub struct AudioHardware {
+    device: Mutex<AudioDevice>,
+}
+
+#[cfg(feature = "native-audio")]
+#[uniffi::export]
+impl AudioHardware {
+    #[uniffi::constructor]
+    pub fn new() -> Result<Self, AudioError> {
+        let device = AudioDevice::new().map_err(|_e| AudioError::OpusError)?;
+        Ok(Self {
+            device: Mutex::new(device),
+        })
+    }
+
+    pub fn start(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.start().map_err(|_| AudioError::OpusError)?;
+        Ok(())
+    }
+
+    pub fn stop(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.stop().map_err(|_| AudioError::OpusError)?;
+        Ok(())
+    }
+
+    pub fn start_capture(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.start_capture().map_err(|_| AudioError::OpusError)?;
+        Ok(())
+    }
+
+    pub fn stop_capture(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.stop_capture().map_err(|_| AudioError::OpusError)?;
+        Ok(())
+    }
+
+    pub fn read_capture(&self) -> Option<Vec<i16>> {
+        let device = self.device.lock().ok()?;
+        device.try_recv_capture()
+    }
+
+    pub fn write_playback(&self, pcm: Vec<i16>) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.send_playback(pcm).map_err(|_| AudioError::OpusError)?;
+        Ok(())
+    }
+}
+
+// =============================================================================
 // Text Crypto - UniFFI-compatible wrappers
 // =============================================================================
 
@@ -215,6 +264,7 @@ pub struct EncryptedTextPacketRecord {
     pub sender_session_id: u32,
     pub channel_id: u32,
     pub epoch: u64,
+    pub message_id: String,
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
     pub tag: Vec<u8>,
@@ -227,6 +277,7 @@ impl From<EncryptedTextPacket> for EncryptedTextPacketRecord {
             sender_session_id: p.sender_session_id,
             channel_id: p.channel_id,
             epoch: p.epoch,
+            message_id: p.message_id,
             ciphertext: p.ciphertext,
             nonce: p.nonce,
             tag: p.tag,
@@ -241,6 +292,7 @@ impl From<EncryptedTextPacketRecord> for EncryptedTextPacket {
             sender_session_id: r.sender_session_id,
             channel_id: r.channel_id,
             epoch: r.epoch,
+            message_id: r.message_id,
             ciphertext: r.ciphertext,
             nonce: r.nonce,
             tag: r.tag,
