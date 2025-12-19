@@ -105,9 +105,10 @@ public class AudioPipeline: ObservableObject {
         try receiver.onPacket(data: data)
     }
     
-    /// Pop mixed audio from all senders
+    /// Pop mixed audio from all senders with speaker metadata
     /// Call this every 20ms to get playback audio
-    public func popMixed() -> [Int16]? {
+    /// Returns mixed PCM and list of active speaker session IDs
+    public func popMixed() -> MixedAudioResult? {
         return receiver?.popMixed()
     }
     

@@ -27,10 +27,12 @@ hex = "0.4.3"
 openmls_basic_credential = "0.4.1"
 uuid = { version = "1.19.0", features = ["v4"] }
 nnnoiseless = "0.5.2"
+webrtc-audio-processing = { version = "0.5", optional = true, features = ["bundled"] }
 
 [features]
 default = ["native-audio"]
 native-audio = ["dep:cpal"]
+webrtc-audio = ["dep:webrtc-audio-processing"]
 
 [build-dependencies]
 uniffi = { version = "0.30", features = ["build"] }

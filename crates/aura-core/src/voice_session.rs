@@ -238,7 +238,7 @@ impl VoiceSession {
             return Err(VoiceSessionError::NotInChannel);
         }
         
-        Ok(self.sender.process_float(pcm)?)
+        Ok(self.sender.process_float_with_reference(pcm, None)?)
     }
     
     /// Receive incoming audio packet
@@ -252,7 +252,7 @@ impl VoiceSession {
     /// 
     /// Returns mixed PCM from all active senders
     pub fn pop_playback(&self) -> Option<Vec<i16>> {
-        self.receiver.pop_mixed()
+        self.receiver.pop_mixed().map(|mixed| mixed.pcm)
     }
     
     /// Pop individual decoded frames

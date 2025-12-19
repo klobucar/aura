@@ -83,7 +83,7 @@ impl AudioSenderWrapper {
     /// Encode and encrypt f32 PCM audio
     pub fn process_float(&self, pcm: Vec<f32>) -> Result<Vec<u8>, AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        let bytes = inner.process_float(&pcm).map_err(convert_error)?;
+        let bytes = inner.process_float_with_reference(&pcm, None).map_err(convert_error)?;
         Ok(bytes.to_vec())
     }
     
@@ -92,6 +92,46 @@ impl AudioSenderWrapper {
         if let Ok(inner) = self.inner.read() {
             let _ = inner.set_dred_duration(duration);
         }
+    }
+    
+    /// Enable or disable noise suppression (RNNoise)
+    pub fn set_noise_suppression_enabled(&self, enabled: bool) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_rnnoise_enabled(enabled);
+        }
+    }
+    
+    /// Enable or disable WebRTC AEC (Echo Cancellation)
+    /// Note: Only works if compiled with --features webrtc-audio
+    pub fn set_webrtc_aec_enabled(&self, enabled: bool) {
+        #[cfg(feature = "webrtc-audio")]
+        if let Ok(inner) = self.inner.read() {
+            inner.set_webrtc_aec_enabled(enabled);
+        }
+        #[cfg(not(feature = "webrtc-audio"))]
+        let _ = enabled; // Suppress unused warning
+    }
+    
+    /// Enable or disable WebRTC NS (Noise Suppression)
+    /// Note: Only works if compiled with --features webrtc-audio
+    pub fn set_webrtc_ns_enabled(&self, enabled: bool) {
+        #[cfg(feature = "webrtc-audio")]
+        if let Ok(inner) = self.inner.read() {
+            inner.set_webrtc_ns_enabled(enabled);
+        }
+        #[cfg(not(feature = "webrtc-audio"))]
+        let _ = enabled; // Suppress unused warning
+    }
+    
+    /// Enable or disable WebRTC AGC (Auto Gain Control)
+    /// Note: Only works if compiled with --features webrtc-audio
+    pub fn set_webrtc_agc_enabled(&self, enabled: bool) {
+        #[cfg(feature = "webrtc-audio")]
+        if let Ok(inner) = self.inner.read() {
+            inner.set_webrtc_agc_enabled(enabled);
+        }
+        #[cfg(not(feature = "webrtc-audio"))]
+        let _ = enabled; // Suppress unused warning
     }
 
     /// Get current sequence number
@@ -106,11 +146,20 @@ pub struct AudioReceiverWrapper {
     inner: RwLock<InternalReceiver>,
 }
 
-/// Decoded frame with sender info
+/// Decoded audio frame from a specific sender
 #[derive(uniffi::Record)]
 pub struct DecodedFrame {
     pub session_id: u32,
     pub pcm: Vec<i16>,
+}
+
+/// Mixed audio with speaker metadata
+#[derive(uniffi::Record)]
+pub struct MixedAudioResult {
+    /// Mixed PCM samples (960 samples, 20ms at 48kHz)
+    pub pcm: Vec<i16>,
+    /// Session IDs that contributed to this mix
+    pub active_speakers: Vec<u32>,
 }
 
 #[uniffi::export]
@@ -183,9 +232,20 @@ impl AudioReceiverWrapper {
             .unwrap_or_default()
     }
     
-    /// Pop mixed audio
-    pub fn pop_mixed(&self) -> Option<Vec<i16>> {
-        self.inner.read().ok()?.pop_mixed()
+    /// Pop mixed audio for playback
+    /// Returns mixed PCM and list of active speaker session IDs
+    pub fn pop_mixed(&self) -> Option<MixedAudioResult> {
+        self.inner.read().ok()?.pop_mixed().map(|mixed| MixedAudioResult {
+            pcm: mixed.pcm,
+            active_speakers: mixed.active_speakers,
+        })
+    }
+    
+    /// Set jitter buffer target latency in milliseconds
+    pub fn set_jitter_buffer_ms(&self, latency_ms: u32) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_jitter_buffer_ms(latency_ms);
+        }
     }
 }
 

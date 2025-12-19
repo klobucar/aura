@@ -125,6 +125,11 @@ impl JitterBuffer {
         Self::new(JitterBufferConfig::default())
     }
     
+    /// Set target latency at runtime
+    pub fn set_target_latency(&mut self, latency_ms: u32) {
+        self.config.target_latency_ms = latency_ms;
+    }
+    
     /// Insert a received packet into the buffer
     /// 
     /// Returns `true` if the packet was accepted, `false` if dropped

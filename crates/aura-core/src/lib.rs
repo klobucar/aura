@@ -20,6 +20,8 @@ pub mod voice_session;
 pub mod audio_io;
 pub mod vad;
 pub mod noise_suppression;
+#[cfg(feature = "webrtc-audio")]
+pub mod webrtc_processor;
 pub mod tts;
 pub mod uniffi_bindings;
 #[cfg(feature = "native-audio")]

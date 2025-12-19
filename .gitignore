@@ -54,3 +54,10 @@ Thumbs.db
 # Test artifacts
 coverage/
 *.profdata
+
+# Opus 1.6 ML Models (DRED/Deep PLC)
+crates/opus16-sys/vendor/opus/dnn/*_data.c
+crates/opus16-sys/vendor/opus/dnn/*_data.h
+crates/opus16-sys/vendor/opus/dnn/plc_data.c
+crates/opus16-sys/vendor/opus/dnn/plc_data.h
+crates/opus16-sys/vendor/opus/opus_data-*.tar.gz
