@@ -19,6 +19,7 @@ pub mod voice_session;
 #[cfg(feature = "native-audio")]
 pub mod audio_io;
 pub mod vad;
+pub mod noise_suppression;
 pub mod tts;
 pub mod uniffi_bindings;
 #[cfg(feature = "native-audio")]

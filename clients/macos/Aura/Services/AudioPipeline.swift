@@ -20,13 +20,12 @@ public class AudioPipeline: ObservableObject {
     @Published public var isInitialized = false
     @Published public var activeTransmitters: Set<UInt32> = []
     
+    private var sender: AudioSenderWrapper?
+    private var receiver: AudioReceiverWrapper?
+    
     private var sessionId: UInt32 = 0
     private var encryptionKey: Data?
-    public private(set) var sequence: UInt16 = 0
     private var epochHint: UInt16 = 0
-    
-    // Other sender keys for decryption
-    private var senderKeys: [UInt32: Data] = [:]
     
     // MARK: - Constants
     
@@ -40,32 +39,29 @@ public class AudioPipeline: ObservableObject {
     
     /// Initialize the audio pipeline with session ID and encryption key
     public func initialize(sessionId: UInt32, key: Data) throws {
-        guard key.count == 32 else {
-            throw AudioPipelineError.invalidKeySize
-        }
-        
         self.sessionId = sessionId
         self.encryptionKey = key
-        self.sequence = 0
-        self.isInitialized = true
         
+        // Create Rust wrappers
+        self.sender = try AudioSenderWrapper(sessionId: sessionId, key: key)
+        self.receiver = AudioReceiverWrapper()
+        
+        self.isInitialized = true
         print("[AudioPipeline] Initialized for session \(sessionId)")
     }
     
     /// Add a remote sender's key for decryption
     public func addSender(sessionId: UInt32, key: Data) throws {
-        guard key.count == 32 else {
-            throw AudioPipelineError.invalidKeySize
-        }
+        guard let receiver = receiver else { throw AudioPipelineError.notInitialized }
         
-        senderKeys[sessionId] = key
+        try receiver.addSender(sessionId: sessionId, key: key, epochHint: epochHint)
         activeTransmitters.insert(sessionId)
         print("[AudioPipeline] Added sender \(sessionId)")
     }
     
     /// Remove a sender (when they leave)
     public func removeSender(sessionId: UInt32) {
-        senderKeys.removeValue(forKey: sessionId)
+        receiver?.removeSender(sessionId: sessionId)
         activeTransmitters.remove(sessionId)
         print("[AudioPipeline] Removed sender \(sessionId)")
     }
@@ -73,106 +69,55 @@ public class AudioPipeline: ObservableObject {
     /// Set current MLS epoch
     public func setEpoch(_ epoch: UInt64) {
         epochHint = UInt16(truncatingIfNeeded: epoch)
+        sender?.setEpoch(epoch: epoch)
+    }
+    
+    /// Set DRED duration (0-100 frames, each 10ms)
+    public func setDredDuration(_ duration: Int32) {
+        sender?.setDredDuration(duration: duration)
     }
     
     // MARK: - Transmit Pipeline
     
     /// Process PCM audio for transmission
-    ///
-    /// Pipeline: PCM → Opus → Zero-pad → Encrypt → Header → Packet
-    ///
-    /// - Parameter pcm: 960 samples of Int16 PCM (20ms at 48kHz)
-    /// - Returns: Serialized packet ready for QUIC datagram
     public func process(pcm: [Int16]) throws -> Data {
-        guard isInitialized, let _ = encryptionKey else {
-            throw AudioPipelineError.notInitialized
-        }
-        
-        guard pcm.count == Self.frameSize else {
-            throw AudioPipelineError.invalidFrameSize
-        }
-        
-        // TODO: Call Rust core via UniFFI
-        // For now, create a packet with the raw PCM (temporary)
-        
-        // Build packet header (32 bytes)
-        var packet = Data(capacity: 32 + pcm.count * 2)
-        
-        // SessionID: u32 (4 bytes)
-        withUnsafeBytes(of: sessionId.littleEndian) { packet.append(contentsOf: $0) }
-        
-        // EpochHint: u16 (2 bytes)
-        withUnsafeBytes(of: epochHint.littleEndian) { packet.append(contentsOf: $0) }
-        
-        // Sequence: u16 (2 bytes)
-        withUnsafeBytes(of: sequence.littleEndian) { packet.append(contentsOf: $0) }
-        sequence &+= 1
-        
-        // Nonce: 24 bytes (using sequence-based for now)
-        var nonce = Data(repeating: 0, count: 24)
-        withUnsafeBytes(of: sessionId.littleEndian) { nonce.replaceSubrange(0..<4, with: $0) }
-        withUnsafeBytes(of: sequence.littleEndian) { nonce.replaceSubrange(4..<6, with: $0) }
-        packet.append(nonce)
-        
-        // Payload: PCM data (temporary - should be Opus + encrypted)
-        for sample in pcm {
-            withUnsafeBytes(of: sample.littleEndian) { packet.append(contentsOf: $0) }
-        }
-        
-        return packet
+        guard let sender = sender else { throw AudioPipelineError.notInitialized }
+        let packet = try sender.process(pcm: pcm)
+        return Data(packet)
     }
     
-    /// Process float PCM for transmission
+    /// Process float PCM for transmission (preferred for libopus 1.6)
     public func process(floatPcm: [Float]) throws -> Data {
-        let pcm = floatPcm.map { sample -> Int16 in
-            let clamped = max(-1.0, min(1.0, sample))
-            return Int16(clamped * Float(Int16.max))
-        }
-        return try process(pcm: pcm)
+        guard let sender = sender else { throw AudioPipelineError.notInitialized }
+        let packet = try sender.processFloat(pcm: floatPcm)
+        return Data(packet)
+    }
+    
+    public func getSequence() -> UInt16 {
+        return sender?.sequence() ?? 0
     }
     
     // MARK: - Receive Pipeline
     
     /// Process received QUIC datagram
-    ///
-    /// Pipeline: Packet → Parse Header → Decrypt → Opus Decode → PCM
-    ///
-    /// - Parameter data: Raw QUIC datagram
-    /// - Returns: Decoded PCM samples, or nil if not ready
     public func onPacketReceived(_ data: Data) throws {
-        guard data.count >= 32 else {
-            throw AudioPipelineError.packetTooShort
-        }
-        
-        // TODO: Call Rust core via UniFFI
-        // Parse header
-        let senderSessionId = data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt32.self).littleEndian }
-        
-        // Check if we have this sender's key
-        guard senderKeys[senderSessionId] != nil else {
-            print("[AudioPipeline] Unknown sender: \(senderSessionId)")
-            throw AudioPipelineError.unknownSender
-        }
-        
-        // Would insert into jitter buffer and decrypt here
-        print("[AudioPipeline] Received packet from sender \(senderSessionId)")
+        guard let receiver = receiver else { throw AudioPipelineError.notInitialized }
+        try receiver.onPacket(data: data)
     }
     
     /// Pop mixed audio from all senders
     /// Call this every 20ms to get playback audio
     public func popMixed() -> [Int16]? {
-        // TODO: Call Rust core via UniFFI
-        // For now return nil (no audio)
-        return nil
+        return receiver?.popMixed()
     }
     
     // MARK: - Cleanup
     
     public func reset() {
+        sender = nil
+        receiver = nil
         sessionId = 0
         encryptionKey = nil
-        sequence = 0
-        senderKeys.removeAll()
         activeTransmitters.removeAll()
         isInitialized = false
     }

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::opus::{OpusCodec, OpusError};
 use crate::crypto::{DaveCrypto, CryptoError, NONCE_SIZE};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
+use crate::noise_suppression::NoiseSuppressor;
 use aura_protocol::FastAudioPacket;
 
 /// Audio sender for transmitting encrypted Opus audio
@@ -19,6 +20,8 @@ pub struct AudioSender {
     codec: OpusCodec,
     /// Encryption context (mutable for epoch key rotation)
     crypto: RwLock<DaveCrypto>,
+    /// Noise suppressor (RNNoise)
+    noise_suppressor: std::sync::Mutex<NoiseSuppressor>,
     /// Our session ID
     session_id: u32,
     /// Current MLS epoch hint
@@ -36,6 +39,7 @@ impl AudioSender {
         Ok(Self {
             codec,
             crypto: RwLock::new(crypto),
+            noise_suppressor: std::sync::Mutex::new(NoiseSuppressor::new()),
             session_id,
             epoch_hint: AtomicU16::new(0),
             sequence: AtomicU16::new(0),
@@ -52,6 +56,14 @@ impl AudioSender {
         let mut crypto = self.crypto.write().unwrap();
         *crypto = DaveCrypto::new(new_key);
         self.set_epoch(new_epoch);
+    }
+    
+    /// Set DRED duration (number of 10ms frames of redundancy)
+    /// 
+    /// Example: duration=10 means 100ms of redundancy
+    pub fn set_dred_duration(&self, duration: i32) -> Result<(), AudioPipelineError> {
+        self.codec.set_dred_duration(duration)
+            .map_err(AudioPipelineError::Opus)
     }
     
     /// Encode and encrypt PCM audio for transmission
@@ -90,10 +102,16 @@ impl AudioSender {
     
     /// Encode and encrypt f32 PCM audio
     pub fn process_float(&self, pcm: &[f32]) -> Result<Bytes, AudioPipelineError> {
-        // 1. Encode to Opus using native float API
-        let opus_data = self.codec.encode_float(pcm).map_err(AudioPipelineError::Opus)?;
+        // 1. Apply noise suppression (RNNoise)
+        let denoised = {
+            let mut suppressor = self.noise_suppressor.lock().unwrap();
+            suppressor.process(pcm)
+        };
         
-        // 2. Generate nonce and encrypt
+        // 2. Encode to Opus using native float API
+        let opus_data = self.codec.encode_float(&denoised).map_err(AudioPipelineError::Opus)?;
+        
+        // 3. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
@@ -101,7 +119,7 @@ impl AudioSender {
                 .map_err(AudioPipelineError::Crypto)?
         };
         
-        // 3. Build packet
+        // 4. Build packet
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
         
