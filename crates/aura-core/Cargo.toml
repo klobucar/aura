@@ -15,7 +15,7 @@ regex = "1.11"
 prost = "0.14"
 bytes = "1.0"
 thiserror = "2.0"
-audiopus = "0.2"
+opus16-sys = { path = "../opus16-sys" }
 cpal = { version = "0.16", optional = true }
 tokio = { version = "1.48", features = ["full"] }
 # DAVE Protocol Encryption

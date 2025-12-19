@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU16, AtomicBool, Ordering}
 use aura_protocol::Position;
 
 pub mod opus;
+pub mod opus16;
 pub mod jitter_buffer;
 pub mod crypto;
 pub mod audio_pipeline;

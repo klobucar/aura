@@ -90,11 +90,30 @@ impl AudioSender {
     
     /// Encode and encrypt f32 PCM audio
     pub fn process_float(&self, pcm: &[f32]) -> Result<Bytes, AudioPipelineError> {
-        // Convert f32 to i16
-        let pcm_i16: Vec<i16> = pcm.iter()
-            .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-            .collect();
-        self.process(&pcm_i16)
+        // 1. Encode to Opus using native float API
+        let opus_data = self.codec.encode_float(pcm).map_err(AudioPipelineError::Opus)?;
+        
+        // 2. Generate nonce and encrypt
+        let nonce = DaveCrypto::random_nonce();
+        let ciphertext = {
+            let crypto = self.crypto.read().unwrap();
+            crypto.encrypt(&opus_data, &nonce)
+                .map_err(AudioPipelineError::Crypto)?
+        };
+        
+        // 3. Build packet
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
+        
+        let packet = FastAudioPacket {
+            session_id: self.session_id,
+            epoch_hint,
+            sequence,
+            nonce,
+            payload: Bytes::from(ciphertext),
+        };
+        
+        Ok(packet.to_bytes())
     }
     
     /// Get current sequence number
@@ -252,8 +271,22 @@ impl AudioReceiver {
         
         for (&session_id, state) in senders.iter_mut() {
             match state.jitter.pop() {
-                PopResult::Packet(opus_data) | PopResult::PacketWithGap { data: opus_data, .. } => {
-                    if let Ok(pcm) = state.codec.decode(&opus_data) {
+                PopResult::Packet(opus_data) => {
+                    if let Ok(pcm) = state.codec.decode(&opus_data, false) {
+                        results.push((session_id, pcm));
+                    }
+                }
+                PopResult::PacketWithGap { data: opus_data, lost } => {
+                    // If we have a gap of 1 packet, we can try to use FEC from this packet
+                    // to recover the missing one before playing THIS packet.
+                    if lost == 1 {
+                        if let Ok(recovered_pcm) = state.codec.decode(&opus_data, true) {
+                            results.push((session_id, recovered_pcm));
+                        }
+                    }
+                    
+                    // Then play the actual current packet
+                    if let Ok(pcm) = state.codec.decode(&opus_data, false) {
                         results.push((session_id, pcm));
                     }
                 }
