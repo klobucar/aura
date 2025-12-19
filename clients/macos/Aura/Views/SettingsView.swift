@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var settings: AudioSettings
     @ObservedObject var ttsManager: TtsManager
+    @StateObject private var appSettings = AppSettings.shared
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @StateObject private var deviceManager = AudioDeviceManager()
     
@@ -13,267 +14,318 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Settings")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                Spacer()
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Settings")
+                        .font(.system(size: 24, weight: .bold))
+                    Text("Customize your Aura experience")
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(8)
+                        .background(Circle().fill(Color.white.opacity(0.1)))
+                }
                 .buttonStyle(.plain)
+                .auraFluidHover()
             }
-            .padding()
+            .padding(24)
             
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Appearance Section
+                    settingsSection("Appearance", icon: "paintbrush.fill") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(AuraThemeType.allCases, id: \.self) { theme in
+                                themeRow(theme: theme)
+                            }
+                        }
+                    }
+
                     // Audio Devices Section
-                    settingsSection("Audio Devices") {
+                    settingsSection("Audio Devices", icon: "hifispeaker.2.fill") {
                         VStack(alignment: .leading, spacing: 16) {
-                            // Input Device
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Input Device (Microphone)")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                
-                                Picker("", selection: Binding(
+                            devicePicker(
+                                title: "Input Device",
+                                subtitle: "Select your microphone",
+                                selection: Binding(
                                     get: { deviceManager.selectedInputDeviceID },
                                     set: { if let deviceID = $0 { deviceManager.setInputDevice(deviceID) } }
-                                )) {
-                                    Text("System Default").tag(nil as AudioDeviceID?)
-                                    ForEach(deviceManager.availableInputDevices) { device in
-                                        Text(device.name).tag(device.id as AudioDeviceID?)
-                                    }
-                                }
-                                .labelsHidden()
-                            }
+                                ),
+                                devices: deviceManager.availableInputDevices
+                            )
                             
-                            // Output Device
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Output Device (Speakers)")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                
-                                Picker("", selection: Binding(
+                            devicePicker(
+                                title: "Output Device",
+                                subtitle: "Select your speakers/headphones",
+                                selection: Binding(
                                     get: { deviceManager.selectedOutputDeviceID },
                                     set: { if let deviceID = $0 { deviceManager.setOutputDevice(deviceID) } }
-                                )) {
-                                    Text("System Default").tag(nil as AudioDeviceID?)
-                                    ForEach(deviceManager.availableOutputDevices) { device in
-                                        Text(device.name).tag(device.id as AudioDeviceID?)
-                                    }
-                                }
-                                .labelsHidden()
-                            }
+                                ),
+                                devices: deviceManager.availableOutputDevices
+                            )
                         }
                     }
-                    
-                    Divider()
                     
                     // Transmission Mode Section
-                    settingsSection("Transmission") {
+                    settingsSection("Transmission", icon: "wave.3.right") {
                         VStack(alignment: .leading, spacing: 12) {
                             ForEach(AudioSettings.TransmissionMode.allCases, id: \.self) { mode in
-                                HStack {
-                                    Image(systemName: settings.transmissionMode == mode ? "largecircle.fill.circle" : "circle")
-                                        .foregroundColor(settings.transmissionMode == mode ? .blue : .secondary)
-                                    
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(mode.displayName)
-                                            .font(.body)
-                                        
-                                        Text(transmissionModeDescription(mode))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    settings.transmissionMode = mode
-                                }
+                                transmissionModeRow(mode: mode)
+                            }
+                            
+                            if settings.transmissionMode == .pushToTalk {
+                                pttSettings.padding(.top, 8)
+                            } else if settings.transmissionMode == .voiceActivation {
+                                vadSettings.padding(.top, 8)
                             }
                         }
                     }
-                    
-                    // Conditional settings based on mode
-                    if settings.transmissionMode == .pushToTalk {
-                        Divider()
-                        pttSettings
-                    } else if settings.transmissionMode == .voiceActivation {
-                        Divider()
-                        vadSettings
-                    }
-                    
-                    Divider()
                     
                     // TTS Settings Section
-                    settingsSection("Text-to-Speech") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Toggle("Enable Text-to-Speech", isOn: $ttsManager.settings.enabled)
-                                .toggleStyle(.checkbox)
-                            
-                            if ttsManager.settings.enabled {
-                                Toggle("Speak Chat Messages", isOn: $ttsManager.settings.speakChat)
-                                    .toggleStyle(.checkbox)
-                                    .padding(.leading, 20)
-                                
-                                Toggle("Speak Join/Leave Events", isOn: $ttsManager.settings.speakJoinLeave)
-                                    .toggleStyle(.checkbox)
-                                    .padding(.leading, 20)
-                                
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text("Speech Rate")
-                                            .font(.subheadline)
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                        Text(speedLabel)
-                                            .font(.caption)
-                                            .foregroundColor(.blue)
-                                    }
-                                    
-                                    HStack {
-                                        Image(systemName: "tortoise")
-                                            .foregroundColor(.secondary)
-                                        Slider(value: $ttsManager.settings.rate, in: 0.0...1.0)
-                                            .accentColor(.blue)
-                                        Image(systemName: "hare")
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding(.leading, 20)
-                                
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Text("Volume")
-                                            .font(.subheadline)
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                        Text("\(Int(ttsManager.settings.volume * 100))%")
-                                            .font(.caption)
-                                            .foregroundColor(.blue)
-                                    }
-                                    
-                                    HStack {
-                                        Image(systemName: "speaker")
-                                            .foregroundColor(.secondary)
-                                        Slider(value: $ttsManager.settings.volume, in: 0.0...1.0)
-                                            .accentColor(.blue)
-                                        Image(systemName: "speaker.wave.3")
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding(.leading, 20)
-                            }
-                        }
+                    settingsSection("Text-to-Speech", icon: "bubble.left.and.exclamationmark.bubble.right.fill") {
+                        ttsSettings
                     }
                 }
-                .padding()
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
             
-            // Footer
             HStack {
                 Spacer()
                 Button("Done") {
                     settings.saveSettings()
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 28)
+                .background(AuraTheme.Gradients.lushIndigo)
+                .cornerRadius(12)
+                .foregroundColor(.white)
+                .font(.system(size: 14, weight: .bold))
+                .modifier(AuraTheme.Shadows.soft())
+                .auraFluidHover()
             }
-            .padding()
+            .padding(24)
         }
-        .frame(width: 500, height: 650)
-        .background(VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow))
+        .frame(width: 550, height: 750)
+        .auraGlass(material: .hudWindow)
     }
     
-    // MARK: - PTT Settings
+    // MARK: - Components
+    
+    private func settingsSection<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .foregroundColor(AuraTheme.Colors.primary)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .kerning(1)
+            }
+            
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(Color.white.opacity(0.03))
+        .cornerRadius(AuraTheme.Layout.glassCornerRadius)
+        .overlay(
+            RoundedRectangle(cornerRadius: AuraTheme.Layout.glassCornerRadius)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+        )
+    }
+    
+    private func devicePicker(title: String, subtitle: String, selection: Binding<AudioDeviceID?>, devices: [AudioDeviceManager.AudioDevice]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+            Text(subtitle)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            
+            Picker("", selection: selection) {
+                Text("System Default").tag(nil as AudioDeviceID?)
+                ForEach(devices) { device in
+                    Text(device.name).tag(device.id as AudioDeviceID?)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.large)
+        }
+    }
+    
+    private func themeRow(theme: AuraThemeType) -> some View {
+        let isSelected = appSettings.theme == theme
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(theme.displayName)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(AuraTheme.Colors.primary)
+                    .font(.title3)
+            } else {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: 2)
+                    .frame(width: 18, height: 18)
+            }
+        }
+        .padding(10)
+        .background(isSelected ? AuraTheme.Colors.primary.opacity(0.1) : Color.clear)
+        .cornerRadius(8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.spring()) {
+                appSettings.theme = theme
+                appSettings.saveSettings()
+            }
+        }
+        .auraFluidHover()
+    }
+    
+    private func transmissionModeRow(mode: AudioSettings.TransmissionMode) -> some View {
+        let isSelected = settings.transmissionMode == mode
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mode.displayName)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+                Text(transmissionModeDescription(mode))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(AuraTheme.Colors.primary)
+                    .font(.title2)
+            } else {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: 2)
+                    .frame(width: 20, height: 20)
+            }
+        }
+        .padding(10)
+        .background(isSelected ? AuraTheme.Colors.primary.opacity(0.1) : Color.clear)
+        .cornerRadius(8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.spring()) {
+                settings.transmissionMode = mode
+            }
+        }
+        .auraFluidHover()
+    }
     
     private var pttSettings: some View {
-        settingsSection("Push-to-Talk") {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Hotkey")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                
-                HotkeyRecorderButton(hotkey: $settings.pttHotkey)
-                
-                if !hotkeyManager.hasAccessibilityPermission {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Accessibility Permission Required")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                            Text("Aura needs accessibility permission to capture global hotkeys.")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding(8)
-                    .background(Color.orange.opacity(0.1))
-                    .cornerRadius(6)
-                    
-                    Button("Open System Settings") {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("PTT HOTKEY")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+            
+            HotkeyRecorderButton(hotkey: $settings.pttHotkey)
+            
+            if !hotkeyManager.hasAccessibilityPermission {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("Accessibility Permission Required")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Button("Grant") {
                         hotkeyManager.requestAccessibilityPermission()
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                
-                Text("Hold the hotkey to transmit audio")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .padding(8)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(6)
             }
         }
+        .padding(12)
+        .background(Color.black.opacity(0.1))
+        .cornerRadius(10)
     }
-    
-    // MARK: - VAD Settings
     
     private var vadSettings: some View {
-        settingsSection("Voice Activation") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Sensitivity")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text(sensitivityLabel)
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
-                
-                Slider(value: $settings.vadSensitivity, in: 0.0...1.0) {
-                    Text("Sensitivity")
-                }
-                .accentColor(.blue)
-                
-                HStack {
-                    Text("Very Sensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text("Loud Speech Only")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                
-                Text("Automatically transmit when speech is detected above the threshold")
-                    .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("VAD SENSITIVITY")
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
+                Spacer()
+                Text("\(Int(settings.vadSensitivity * 100))%")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(AuraTheme.Colors.primary)
+            }
+            
+            Slider(value: $settings.vadSensitivity, in: 0.0...1.0)
+                .accentColor(AuraTheme.Colors.primary)
+        }
+        .padding(12)
+        .background(Color.black.opacity(0.1))
+        .cornerRadius(10)
+    }
+    
+    private var ttsSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Toggle(isOn: $ttsManager.settings.enabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Master Switch")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("Hear messages spoken aloud")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            
+            if ttsManager.settings.enabled {
+                VStack(spacing: 12) {
+                    Toggle("Speak Chat Messages", isOn: $ttsManager.settings.speakChat)
+                    Toggle("Speak Join/Leave Events", isOn: $ttsManager.settings.speakJoinLeave)
+                }
+                .font(.system(size: 13))
+                .padding(.leading, 4)
+                
+                Divider().opacity(0.2)
+                
+                VStack(spacing: 16) {
+                    sliderRow(title: "Speech Rate", icon: "hare", value: $ttsManager.settings.rate)
+                    sliderRow(title: "Voice Volume", icon: "speaker.wave.2", value: $ttsManager.settings.volume)
+                }
             }
         }
     }
     
-    // MARK: - Helper Views
-    
-    private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
-            content()
+    private func sliderRow(title: String, icon: String, value: Binding<Float>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                Text(title.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                Spacer()
+                Text("\(Int(value.wrappedValue * 100))%")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(AuraTheme.Colors.primary)
+            }
+            .foregroundColor(.secondary)
+            
+            Slider(value: value, in: 0.0...1.0)
+                .accentColor(AuraTheme.Colors.primary)
+                .controlSize(.small)
         }
     }
     
@@ -281,31 +333,9 @@ struct SettingsView: View {
     
     private func transmissionModeDescription(_ mode: AudioSettings.TransmissionMode) -> String {
         switch mode {
-        case .pushToTalk: return "Hold a hotkey to transmit"
-        case .alwaysOn: return "Continuous transmission"
-        case .voiceActivation: return "Automatic speech detection"
-        }
-    }
-    
-    private var sensitivityLabel: String {
-        let percent = Int(settings.vadSensitivity * 100)
-        if settings.vadSensitivity < 0.3 {
-            return "Very Sensitive (\(percent)%)"
-        } else if settings.vadSensitivity < 0.7 {
-            return "Moderate (\(percent)%)"
-        } else {
-            return "Less Sensitive (\(percent)%)"
-        }
-    }
-    
-    private var speedLabel: String {
-        let percent = Int(ttsManager.settings.rate * 100)
-        if ttsManager.settings.rate < 0.3 {
-            return "Slow (\(percent)%)"
-        } else if ttsManager.settings.rate < 0.7 {
-            return "Normal (\(percent)%)"
-        } else {
-            return "Fast (\(percent)%)"
+        case .pushToTalk: return "Hold a hotkey to transmit audio"
+        case .alwaysOn: return "Continuous audio transmission"
+        case .voiceActivation: return "Transmit when speech is detected"
         }
     }
 }

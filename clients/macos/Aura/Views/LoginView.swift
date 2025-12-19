@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct LoginView: View {
     @StateObject private var identity = UserIdentity()
+    @StateObject private var appSettings = AppSettings.shared
     @State private var client = QuicNetworkClient()
     
     // Parse old format that might include port
@@ -20,104 +21,127 @@ struct LoginView: View {
     var onConnected: ((QuicNetworkClient, UserIdentity) -> Void)?
     
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 32) {
             // Logo / Header
-            VStack {
+            VStack(spacing: 12) {
                 Image(systemName: "wave.3.right.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.linearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                Text("Aura")
-                    .font(.largeTitle)
-                    .fontWeight(.bold)
-                Text("Zero-Trust Voice")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.top, 40)
-            
-            // Identity Info
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Your Identity")
-                    .font(.headline)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 80))
+                    .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                    .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
                 
-                HStack {
+                VStack(spacing: 4) {
+                    Text("Aura")
+                        .font(.system(size: 32, weight: .bold))
+                    Text("Zero-Trust Voice")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.top, 48)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("YOUR IDENTITY")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .kerning(1)
+                
+                HStack(spacing: 10) {
                     Image(systemName: "key.fill")
-                        .foregroundColor(.blue)
+                        .font(.system(size: 14))
+                        .foregroundColor(AuraTheme.Colors.primary)
+                    
                     Text(identity.publicKeyHex.isEmpty ? "Generating..." : "\(identity.publicKeyHex.prefix(16))...")
-                        .font(.system(.caption, design: .monospaced))
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundColor(.primary)
                 }
-                .padding(10)
-                .background(VisualEffectBlur(material: .sidebar, blendingMode: .withinWindow).cornerRadius(8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .auraGlass(cornerRadius: 10, material: .sidebar)
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 32)
             
             // Form Fields
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Server Address")
-                        .font(.headline)
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("SERVER ADDRESS")
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
-                    HStack(spacing: 8) {
+                        .kerning(1)
+                    
+                    HStack(spacing: 12) {
                         TextField("127.0.0.1", text: $serverAddress)
                             .textFieldStyle(.plain)
-                            .padding(10)
-                            .background(VisualEffectBlur(material: .sidebar, blendingMode: .withinWindow).cornerRadius(8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                            .font(.system(size: 14, weight: .medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .auraGlass(cornerRadius: 10, material: .sidebar)
                         
                         TextField("8443", text: $serverPort)
                             .textFieldStyle(.plain)
-                            .frame(width: 60)
-                            .padding(10)
-                            .background(VisualEffectBlur(material: .sidebar, blendingMode: .withinWindow).cornerRadius(8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(width: 70)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .auraGlass(cornerRadius: 10, material: .sidebar)
                     }
                 }
                 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Display Name")
-                        .font(.headline)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("DISPLAY NAME")
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
-                    TextField("Your name", text: $displayName)
+                        .kerning(1)
+                    
+                    TextField("How others see you", text: $displayName)
                         .textFieldStyle(.plain)
-                        .padding(10)
-                        .background(VisualEffectBlur(material: .sidebar, blendingMode: .withinWindow).cornerRadius(8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                        .font(.system(size: 14, weight: .medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .auraGlass(cornerRadius: 10, material: .sidebar)
                 }
                 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Server Password")
-                        .font(.headline)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("SERVER PASSWORD")
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
+                        .kerning(1)
+                    
                     SecureField("Optional", text: $serverPassword)
                         .textFieldStyle(.plain)
-                        .padding(10)
-                        .background(VisualEffectBlur(material: .sidebar, blendingMode: .withinWindow).cornerRadius(8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                        .font(.system(size: 14, weight: .medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .auraGlass(cornerRadius: 10, material: .sidebar)
                 }
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 32)
             
             // Connect Button
             Button(action: connect) {
-                HStack {
+                HStack(spacing: 10) {
                     if isConnecting {
                         ProgressView()
                             .controlSize(.small)
-                            .padding(.trailing, 4)
+                            .colorInvert()
+                            .brightness(1)
                     }
-                    Text("Connect")
+                    Text(isConnecting ? "Connecting..." : "Enter Aura")
+                        .font(.system(size: 16, weight: .bold))
                 }
-                .font(.headline)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
-                .padding()
-                .background(isConnecting ? Color.gray : Color.blue)
-                .cornerRadius(12)
+                .padding(.vertical, 16)
+                .background(
+                    isConnecting ? 
+                    AnyShapeStyle(Color.secondary.opacity(0.3)) : 
+                    AnyShapeStyle(AuraTheme.Gradients.lushIndigo)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .modifier(AuraTheme.Shadows.soft())
+                .auraFluidHover()
             }
-            .padding(.horizontal)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 32)
             .disabled(displayName.isEmpty || serverAddress.isEmpty || isConnecting)
             
             // Status
@@ -133,10 +157,9 @@ struct LoginView: View {
                     .foregroundColor(.secondary)
             }
             
-            Spacer()
         }
-        .padding(.bottom, 24)
-        .background(VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow))
+        .padding(.bottom, 48)
+        .auraGlass(material: .hudWindow)
         .onAppear {
             identity.loadOrGenerate()
         }
@@ -174,25 +197,7 @@ struct LoginView: View {
     }
 }
 
-// MARK: - Visual Effect Blur
-
-struct VisualEffectBlur: NSViewRepresentable {
-    var material: NSVisualEffectView.Material
-    var blendingMode: NSVisualEffectView.BlendingMode
-    
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        return view
-    }
-    
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-    }
-}
+// MARK: - AppKit Helpers (Moved to View+Modifiers.swift)
 
 #Preview {
     LoginView()

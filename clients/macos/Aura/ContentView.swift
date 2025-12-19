@@ -15,6 +15,8 @@ struct ContentView: View {
     @StateObject private var audioSettings = AudioSettings()
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @State private var isMicEnabled = false
+    @State private var isDeafened = false
+    @StateObject private var appSettings = AppSettings.shared
     @State private var showingSettings = false
     @State private var pttCancellable: AnyCancellable?
     
@@ -47,28 +49,35 @@ struct ContentView: View {
     @ViewBuilder
     private var loginView: some View {
         ZStack {
-            // Background gradient
-            LinearGradient(
-                colors: [
-                    Color(nsColor: .windowBackgroundColor),
-                    Color(nsColor: .controlBackgroundColor)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            // High-fidelity background
+            AuraTheme.Colors.background
+                .ignoresSafeArea()
+            
+            // Animated background elements (aura-style)
+            Circle()
+                .fill(AuraTheme.Gradients.lushIndigo.opacity(0.15))
+                .frame(width: 600, height: 600)
+                .blur(radius: 80)
+                .offset(x: -200, y: -200)
+            
+            Circle()
+                .fill(AuraTheme.Gradients.lushMint.opacity(0.1))
+                .frame(width: 400, height: 400)
+                .blur(radius: 60)
+                .offset(x: 200, y: 200)
             
             // Centered login card
             LoginView { connectedClient, connectedIdentity in
-                self.client = connectedClient
-                self.identity = connectedIdentity
-                self.isConnected = true
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                    self.client = connectedClient
+                    self.identity = connectedIdentity
+                    self.isConnected = true
+                }
             }
-            .frame(width: 400, height: 550)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 10)
+            .frame(width: 460, height: 680)
+            .modifier(AuraTheme.Shadows.deep())
         }
-        .frame(minWidth: 500, minHeight: 600)
+        .frame(minWidth: 600, minHeight: 750)
     }
     
     // MARK: - Connected View
@@ -99,9 +108,16 @@ struct ContentView: View {
             }
         } detail: {
             // Main content area
-            channelDetailView(client: client)
+            ZStack(alignment: .bottom) {
+                channelDetailView(client: client)
+                
+                // Background message handlers
+                setupMessageHandlers(client: client)
+            }
         }
         .navigationTitle("")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AuraTheme.Colors.background)
     }
     
     // MARK: - User Header
@@ -111,8 +127,9 @@ struct ContentView: View {
         HStack(spacing: 12) {
             // Avatar
             Circle()
-                .fill(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                .fill(AuraTheme.Gradients.primary)
                 .frame(width: 40, height: 40)
+                .modifier(AuraTheme.Shadows.soft())
                 .overlay(
                     Text(identity.displayName.prefix(1).uppercased())
                         .font(.headline)
@@ -138,8 +155,10 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .help("Disconnect")
         }
-        .padding()
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(10)
+        .auraGlass(cornerRadius: 12)
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
     }
     
     // MARK: - Channel List
@@ -161,24 +180,40 @@ struct ContentView: View {
                                     Image(systemName: channel.icon)
                                         .foregroundColor(channel.id == currentId ? .blue : .secondary)
                                         .frame(width: 20)
-                                    
                                     Text(channel.name)
                                         .foregroundColor(channel.id == currentId ? .primary : .secondary)
-                                        .fontWeight(channel.id == currentId ? .medium : .regular)
+                                        .fontWeight(channel.id == currentId ? .semibold : .regular)
                                     
                                     Spacer()
                                     
                                     // User count
                                     if let users = client.usersByChannel[channel.id], !users.isEmpty {
                                         Text("\(users.count + (channel.id == currentId ? 1 : 0))")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.white.opacity(0.1)))
                                     } else if channel.id == currentId {
                                         Text("1")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.white.opacity(0.1)))
+                                    }
+                                    
+                                    // Active Indicator
+                                    if channel.id == currentId {
+                                        Circle()
+                                            .fill(AuraTheme.Colors.accent)
+                                            .frame(width: 6, height: 6)
+                                            .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
                                     }
                                 }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(channel.id == currentId ? AuraTheme.Colors.primary.opacity(0.15) : Color.clear)
+                                .cornerRadius(8)
+                                .auraFluidHover()
                             }
                             .buttonStyle(.plain)
                             
@@ -242,15 +277,18 @@ struct ContentView: View {
             Button(action: { showingSettings = true }) {
                 HStack {
                     Image(systemName: "gearshape.fill")
+                        .font(.system(size: 14, weight: .semibold))
                     Text("Settings")
+                        .font(.system(size: 13, weight: .medium))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
+                .padding(.vertical, 10)
+                .auraGlass(cornerRadius: 10)
+                .auraFluidHover()
             }
             .buttonStyle(.plain)
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
         .sheet(isPresented: $showingSettings) {
@@ -263,253 +301,376 @@ struct ContentView: View {
     
     @ViewBuilder
     private func channelDetailView(client: QuicNetworkClient) -> some View {
+        VStack(spacing: 0) {
+            channelHeader(client: client)
+            
+            Divider().opacity(0.1)
+            
+            HSplitView {
+                voiceStatusPanel(client: client)
+                
+                if showingChat {
+                    chatPanel(client: client)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func channelHeader(client: QuicNetworkClient) -> some View {
         let channel = currentChannel(for: client)
         let userCount = (client.usersByChannel[client.currentChannelId ?? 1]?.count ?? 0) + 1
         
-        VStack(spacing: 0) {
-            // Channel header
-            HStack {
-                Image(systemName: channel?.icon ?? "speaker.wave.2")
-                    .font(.title2)
-                    .foregroundColor(.blue)
+        HStack {
+            Image(systemName: channel?.icon ?? "speaker.wave.2")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(AuraTheme.Colors.primary)
+                .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+            
+            Text(channel?.name ?? "Channel")
+                .font(.system(size: 18, weight: .bold))
+            
+            Spacer()
+            
+            // Toggle chat button
+            Button(action: { 
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    showingChat.toggle()
+                }
+            }) {
+                Image(systemName: showingChat ? "bubble.left.fill" : "bubble.left")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(showingChat ? AuraTheme.Colors.primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .auraFluidHover()
+            
+            // User count badge
+            Text("\(userCount)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .auraGlass(cornerRadius: 10)
+        }
+        .padding(16)
+        .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .behindWindow))
+    }
+    
+    @ViewBuilder
+    private func voiceStatusPanel(client: QuicNetworkClient) -> some View {
+        VStack(spacing: 24) {
+            Spacer()
+            
+            ZStack {
+                // Outer glow - smaller and more subtle
+                Circle()
+                    .fill(isMicEnabled ? AuraTheme.Colors.accent.opacity(0.12) : Color.white.opacity(0.03))
+                    .frame(width: 120, height: 120)
+                    .blur(radius: 15)
                 
-                Text(channel?.name ?? "Channel")
-                    .font(.title2)
-                    .fontWeight(.semibold)
+                // Refined glass ring
+                Circle()
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.2), Color.white.opacity(0.05)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                    .frame(width: 100, height: 100)
                 
-                Spacer()
+                if !isMicEnabled {
+                    Circle()
+                        .fill(Color.primary.opacity(0.05))
+                        .frame(width: 80, height: 80)
+                        .auraGlass(cornerRadius: 40, material: .ultraThin)
+                } else {
+                    Circle()
+                        .fill(AuraTheme.Gradients.lushMint)
+                        .frame(width: 80, height: 80)
+                        .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
+                }
                 
-                // Toggle chat button
-                Button(action: { showingChat.toggle() }) {
-                    Image(systemName: showingChat ? "bubble.left.fill" : "bubble.left")
-                        .foregroundColor(showingChat ? .blue : .secondary)
+                Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isMicEnabled)
+            
+            VStack(spacing: 8) {
+                Text(isDeafened ? "Deafened" : (isMicEnabled ? "Transmitting" : "Muted"))
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(isDeafened ? .secondary : .primary)
+                
+                if isMicEnabled && !isDeafened {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
+                        Text("\(audioCapture.packetsSent) packets sent")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.white.opacity(0.05)))
+                } else if isDeafened {
+                    Text("You cannot hear or speak")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                } else {
+                    Text("Your audio is currently private")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+            }
+            
+            // Lush Control Duo: Compact Icon Capsule
+            HStack(spacing: 0) {
+                // Mic Toggle
+                Button(action: { toggleMic(client: client) }) {
+                    Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(isMicEnabled ? .white : .secondary)
+                        .frame(width: 44, height: 38)
+                        .background(
+                            isMicEnabled ? 
+                            AnyShapeStyle(AuraTheme.Gradients.lushIndigo) : 
+                            AnyShapeStyle(Color.clear)
+                        )
+                        .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
-                .help(showingChat ? "Hide Chat" : "Show Chat")
+                .help(isMicEnabled ? "Mute" : "Unmute")
                 
-                // User count badge
-                Text("\(userCount)")
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundColor(.secondary)
+                Divider()
+                    .frame(height: 20)
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.1))
-                    .clipShape(Capsule())
+                
+                // Deafen Toggle
+                Button(action: { toggleDeafen(client: client) }) {
+                    Image(systemName: isDeafened ? "headphones.slash" : "headphones")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(isDeafened ? .white : .secondary)
+                        .frame(width: 44, height: 38)
+                        .background(isDeafened ? Color.red.opacity(0.6) : Color.clear)
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                .help(isDeafened ? "Undeafen" : "Deafen")
             }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            .padding(6)
+            .auraGlass(cornerRadius: 12)
+            .auraFluidHover()
             
-            Divider()
+            Spacer()
+        }
+        .frame(minWidth: 200)
+    }
+        @ViewBuilder
+    private func chatPanel(client: QuicNetworkClient) -> some View {
+        VStack(spacing: 0) {
+            // Messages list
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(chatMessages) { message in
+                            if message.type == .info {
+                                infoMessageRow(message.content)
+                                    .id(message.id)
+                            } else {
+                                MessageBubble(message: message) { msg in
+                                    replyingTo = msg
+                                }
+                                .id(message.id)
+                            }
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: chatMessages.count) { _, _ in
+                    if let lastMessage = chatMessages.last {
+                        withAnimation {
+                            scrollProxy.scrollTo(lastMessage.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
             
-            // Main content - Voice and Chat
-            HSplitView {
-                // Voice status (left)
-                VStack(spacing: 24) {
-                    Spacer()
-                    
-                    ZStack {
-                        Circle()
-                            .fill(isMicEnabled ? Color.green.opacity(0.1) : Color.secondary.opacity(0.05))
-                            .frame(width: 100, height: 100)
-                        
-                        Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
-                            .font(.system(size: 40))
-                            .foregroundColor(isMicEnabled ? .green : .secondary)
-                    }
-                    
-                    VStack(spacing: 8) {
-                        Text(isMicEnabled ? "Transmitting" : "Muted")
-                            .font(.headline)
-                            .fontWeight(.medium)
-                        
-                        if isMicEnabled {
-                            Text("\(audioCapture.packetsSent) packets")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    
-                    Button(action: { toggleMic(client: client) }) {
-                        Label(isMicEnabled ? "Mute" : "Unmute", 
-                              systemImage: isMicEnabled ? "mic.fill" : "mic.slash")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(isMicEnabled ? .green : .secondary)
-                    .controlSize(.regular)
-                    
-                    Spacer()
+            divider()
+            
+            // Reply preview bar
+            if let replying = replyingTo {
+                replyPreview(replying)
+            }
+            
+            messageInputArea(client: client)
+        }
+        .frame(minWidth: 250)
+        .background(AuraTheme.Colors.background.opacity(0.5))
+    }
+    
+    private func infoMessageRow(_ content: String) -> some View {
+        HStack {
+            VStack { divider() }
+            Text(content)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .auraGlass(cornerRadius: 10)
+            VStack { divider() }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+    }
+    
+    private func replyPreview(_ message: ChatMessage) -> some View {
+        HStack {
+            Rectangle()
+                .fill(AuraTheme.Colors.primary)
+                .frame(width: 3)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Replying to \(message.senderName)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(AuraTheme.Colors.primary)
+                Text(message.content)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            Spacer()
+            
+            Button(action: { replyingTo = nil }) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .auraFluidHover()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(VisualEffectBlur(auraMaterial: .thin, blendingMode: .withinWindow))
+    }
+    
+    private func messageInputArea(client: QuicNetworkClient) -> some View {
+        HStack(spacing: 12) {
+            TextField("Message...", text: $messageText)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(10)
+                .onSubmit {
+                    sendMessage(client: client)
                 }
-                .frame(minWidth: 200)
-                
-                // Chat panel (right)
-                if showingChat {
-                    VStack(spacing: 0) {
-                        // Messages list
-                        ScrollViewReader { scrollProxy in
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 8) {
-                                    ForEach(chatMessages) { message in
-                                        if message.type == .info {
-                                            HStack {
-                                                VStack { Divider() }
-                                                Text(message.content)
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                                    .padding(.horizontal, 4)
-                                                VStack { Divider() }
-                                            }
-                                            .padding(.vertical, 8)
-                                            .padding(.horizontal, 16)
-                                            .id(message.id)
-                                        } else {
-                                            MessageBubble(message: message) { msg in
-                                                replyingTo = msg
-                                            }
-                                            .id(message.id)
-                                        }
-                                    }
-                                }
-                                .padding()
-                            }
-                            .onChange(of: chatMessages.count) { _, _ in
-                                if let lastMessage = chatMessages.last {
-                                    withAnimation {
-                                        scrollProxy.scrollTo(lastMessage.id, anchor: .bottom)
-                                    }
-                                }
+            
+            Button(action: { sendMessage(client: client) }) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Group {
+                            if messageText.isEmpty {
+                                Color.secondary.opacity(0.3)
+                            } else {
+                                AuraTheme.Gradients.lushIndigo
                             }
                         }
-                        
-                        Divider()
-                        
-                        // Reply preview bar
-                        if let replying = replyingTo {
-                            HStack {
-                                Rectangle()
-                                    .fill(Color.blue)
-                                    .frame(width: 4)
-                                
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Replying to \(replying.senderName)")
-                                        .font(.caption)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.blue)
-                                    Text(replying.content)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                }
-                                
-                                Spacer()
-                                
-                                Button(action: { replyingTo = nil }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal)
-                            .padding(.vertical, 8)
-                            .background(Color(nsColor: .controlBackgroundColor))
-                        }
-                        
-                        // Message input
-                        HStack(spacing: 8) {
-                            TextField("Message...", text: $messageText)
-                                .textFieldStyle(.plain)
-                                .padding(8)
-                                .background(Color(nsColor: .textBackgroundColor))
-                                .cornerRadius(8)
-                                .onSubmit {
-                                    sendMessage(client: client)
-                                }
-                            
-                            Button(action: { sendMessage(client: client) }) {
-                                Image(systemName: "paperplane.fill")
-                                    .foregroundColor(messageText.isEmpty ? .secondary : .blue)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(messageText.isEmpty)
-                        }
-                        .padding()
-                        .background(Color(nsColor: .controlBackgroundColor))
+                    )
+                    .clipShape(Circle())
+                    .modifier(AuraTheme.Shadows.soft())
+            }
+            .buttonStyle(.plain)
+            .disabled(messageText.isEmpty)
+            .auraFluidHover()
+        }
+        .padding(12)
+        .auraGlass(cornerRadius: 20, material: .thin)
+        .padding(16)
+    }
+    
+    private func divider() -> some View {
+        Divider().opacity(0.1)
+    }
+    
+    // MARK: - Message Handling
+    
+    private func setupMessageHandlers(client: QuicNetworkClient) -> some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: client.receivedMessages) { oldValue, newValue in
+                // Add new incoming messages to chat
+                for msg in newValue where !oldValue.contains(msg) {
+                    guard msg.channelId == client.currentChannelId else { continue }
+                    
+                    // Use message ID from packet (msg_{UUID})
+                    let messageId = msg.id
+                    
+                    // Skip if we already have this message (optimistic update or duplicate)
+                    if chatMessages.contains(where: { $0.id == messageId }) {
+                        continue
                     }
-                    .frame(minWidth: 250)
+                    
+                    var chatMsg = ChatMessage(
+                        id: messageId,
+                        senderName: msg.senderName,
+                        content: msg.content,
+                        timestamp: msg.timestamp,
+                        isOutgoing: msg.senderSessionId == client.sessionId // Mark as outgoing if it's from us
+                    )
+                    chatMsg.channelId = msg.channelId
+                    
+                    // Lookup reply context if this is a reply
+                    if let replyId = msg.replyToId,
+                       let originalMsg = chatMessages.first(where: { $0.id == replyId }) {
+                        chatMsg.replyToId = replyId
+                        chatMsg.replyToSender = originalMsg.senderName
+                        chatMsg.replyToPreview = String(originalMsg.content.prefix(50))
+                    }
+                    
+                    chatMessages.append(chatMsg)
+                    
+                    // Speak the message
+                    tts.speakMessage(sender: msg.senderName, content: msg.content)
                 }
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
-        .onChange(of: client.receivedMessages) { oldValue, newValue in
-            // Add new incoming messages to chat
-            for msg in newValue where !oldValue.contains(msg) {
-                guard msg.channelId == client.currentChannelId else { continue }
-                
-                // Use message ID from packet (msg_{UUID})
-                let messageId = msg.id
-                
-                // Skip if we already have this message (optimistic update or duplicate)
-                if chatMessages.contains(where: { $0.id == messageId }) {
-                    continue
-                }
-                
-                var chatMsg = ChatMessage(
-                    id: messageId,
-                    senderName: msg.senderName,
-                    content: msg.content,
-                    timestamp: msg.timestamp,
-                    isOutgoing: msg.senderSessionId == client.sessionId // Mark as outgoing if it's from us
-                )
-                chatMsg.channelId = msg.channelId
-                
-                // Lookup reply context if this is a reply
-                if let replyId = msg.replyToId,
-                   let originalMsg = chatMessages.first(where: { $0.id == replyId }) {
-                    chatMsg.replyToId = replyId
-                    chatMsg.replyToSender = originalMsg.senderName
-                    chatMsg.replyToPreview = String(originalMsg.content.prefix(50))
-                }
-                
-                chatMessages.append(chatMsg)
-                
-                // Speak the message
-                tts.speakMessage(sender: msg.senderName, content: msg.content)
-            }
-        }
-        .onChange(of: client.systemEvents) { oldValue, newValue in
-            // Add new system events to chat (like user disconnects)
-            for event in newValue where !oldValue.contains(event) {
-                // Only show events for current channel or global (0)
-                guard event.channelId == client.currentChannelId || event.channelId == 0 else { continue }
-                
-                // Avoid duplicates
-                let messageId = "sys_\(event.id.uuidString)"
-                if chatMessages.contains(where: { $0.id == messageId }) { continue }
-                
-                var message = ChatMessage(
-                    id: messageId,
-                    senderName: "System",
-                    content: event.content,
-                    timestamp: event.timestamp,
-                    isOutgoing: false
-                )
-                message.type = .info
-                message.channelId = event.channelId
-                
-                chatMessages.append(message)
-                
-                // Speak the system event
-                if event.content.contains("joined") {
-                    // Extract name from "Name joined the channel"
-                    let name = event.content.replacingOccurrences(of: " joined the channel", with: "")
-                    tts.speakJoin(name: name)
-                } else if event.content.contains("left") {
-                    let name = event.content.replacingOccurrences(of: " left the channel", with: "")
-                    tts.speakLeave(name: name)
+            .onChange(of: client.systemEvents) { oldValue, newValue in
+                // Add new system events to chat (like user disconnects)
+                for event in newValue where !oldValue.contains(event) {
+                    // Only show events for current channel or global (0)
+                    guard event.channelId == client.currentChannelId || event.channelId == 0 else { continue }
+                    
+                    // Avoid duplicates
+                    let messageId = "sys_\(event.id.uuidString)"
+                    if chatMessages.contains(where: { $0.id == messageId }) { continue }
+                    
+                    var message = ChatMessage(
+                        id: messageId,
+                        senderName: "System",
+                        content: event.content,
+                        timestamp: event.timestamp,
+                        isOutgoing: false
+                    )
+                    message.type = .info
+                    message.channelId = event.channelId
+                    
+                    chatMessages.append(message)
+                    
+                    // Speak the system event
+                    if event.content.contains("joined") {
+                        // Extract name from "Name joined the channel"
+                        let name = event.content.replacingOccurrences(of: " joined the channel", with: "")
+                        tts.speakJoin(name: name)
+                    } else if event.content.contains("left") {
+                        let name = event.content.replacingOccurrences(of: " left the channel", with: "")
+                        tts.speakLeave(name: name)
+                    }
                 }
             }
-        }
     }
     
     // MARK: - Helpers
@@ -555,6 +716,11 @@ struct ContentView: View {
     }
     
     private func toggleMic(client: QuicNetworkClient) {
+        // Cannot unmute if deafened
+        if isDeafened && !isMicEnabled {
+            return
+        }
+        
         switch audioSettings.transmissionMode {
         case .pushToTalk:
             // PTT is handled by hotkey subscription, this just toggles the subscription
@@ -616,6 +782,20 @@ struct ContentView: View {
         }
     }
     
+    private func toggleDeafen(client: QuicNetworkClient) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            isDeafened.toggle()
+            
+            if isDeafened {
+                // Auto-mute on deafen
+                if isMicEnabled {
+                    toggleMic(client: client)
+                }
+                // TODO: Actually mute the output (AudioSettings/AudioPipeline)
+            }
+        }
+    }
+    
     private func disconnect() {
         audioCapture.stop()
         client?.disconnect()
@@ -667,6 +847,20 @@ struct ContentView: View {
             } catch {
                 print("[ContentView] Failed to send message: \(error)")
             }
+        }
+    }
+}
+
+// MARK: - Shadow Provider Helper
+
+struct ShadowProvider: ViewModifier {
+    let isMicEnabled: Bool
+    
+    func body(content: Content) -> some View {
+        if isMicEnabled {
+            content.modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
+        } else {
+            content.modifier(AuraTheme.Shadows.deep())
         }
     }
 }
@@ -736,17 +930,16 @@ struct MessageBubble: View {
                     if let replyPreview = message.replyToPreview {
                         HStack(spacing: 4) {
                             Rectangle()
-                                .fill(Color.blue.opacity(0.6))
+                                .fill(message.isOutgoing ? .white.opacity(0.6) : .blue.opacity(0.6))
                                 .frame(width: 3)
                             
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(message.replyToSender ?? "")
-                                    .font(.caption2)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.blue)
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(message.isOutgoing ? .white.opacity(0.8) : .blue)
                                 Text(replyPreview)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(message.isOutgoing ? .white.opacity(0.6) : .secondary)
                                     .lineLimit(1)
                             }
                         }
@@ -755,27 +948,13 @@ struct MessageBubble: View {
                     
                     // Message content with markdown rendering
                     MarkdownText(message.content, foregroundColor: message.isOutgoing ? .white : .primary)
-                        .font(.body)
+                        .font(.system(size: 14, weight: .regular))
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    Group {
-                        if message.isOutgoing {
-                            // Blue gradient for outgoing (Messages.app style)
-                            LinearGradient(
-                                colors: [Color.blue, Color.blue.opacity(0.9)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        } else {
-                            // Solid grey for incoming messages
-                            Color(nsColor: .separatorColor)
-                        }
-                    }
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
+                .auraMessageBubble(isOutgoing: message.isOutgoing)
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .bottom).combined(with: .scale(scale: 0.95))),
+                    removal: .opacity
+                ))
                 .contextMenu {
                     Button(action: { onReply?(message) }) {
                         Label("Reply", systemImage: "arrowshape.turn.up.left")

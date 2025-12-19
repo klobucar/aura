@@ -40,19 +40,33 @@ $(SRCROOT)/Aura/Generated
 
 ---
 
-## Step 3: Link the Static Library
+## Step 3: Link and Embed the Dynamic Library
 
-1. Go to **Build Phases** tab
-2. Expand **Link Binary With Libraries**
+Aura uses dynamic linking (`.dylib`) to simplify multi-architecture support.
+
+1. Go to **General** tab for the Aura target.
+2. Scroll to **Frameworks, Libraries, and Embedded Content**.
 3. Click **+** → **Add Other...** → **Add Files...**
-4. Navigate to `clients/macos/Aura/Generated/`
-5. Select `libaura_core.a`
-6. Click **Add**
+4. Navigate to `clients/macos/Aura/Generated/`.
+5. Select `libaura_core.dylib`.
+6. Click **Add**.
+7. **CRITICAL**: Ensure the "Embed" column is set to **Embed & Sign**.
 
 If the file doesn't exist yet, run the build script manually first:
 ```bash
 ./scripts/build_macos.sh
 ```
+
+---
+### The Tester's Workaround (Unsigned)
+If you send a ZIP of the app, the tester must run this in their terminal to bypass Gatekeeper:
+```bash
+xattr -cr /path/to/Aura.app
+```
+
+4.  (Optional) Change **Architectures** from "Standard Architectures" to `Apple Silicon`.
+
+### Official Way (Signed)
 
 ---
 
@@ -101,11 +115,32 @@ cd /Users/crabclaw/src/aura
 ./scripts/build_macos.sh
 ```
 
-### "Symbol not found"
-Ensure the static library is linked in Build Phases → Link Binary With Libraries.
+### Linker error: x86_64 symbols not found
+This happens because Xcode is trying to build for both Intel and Apple Silicon.
 
-### Swift compiler errors
-The UniFFI bindings may have changed. Clean build: **⌘⇧K** then **⌘B**.
+### To fix (Building arm64 only):
+1.  Go to **Build Settings** in Xcode.
+2.  Search for **Architectures**.
+3.  Click on "Standard Architectures (Apple Silicon, Intel)".
+4.  Select **Other...** at the bottom of the list.
+5.  Double-click the existing line and type `arm64`.
+6.  Ensure **Build Active Architecture Only** is set to **Yes** for Debug, and optionally **No** for Archive if you want it to work on all ARM Macs.
+
+> [!NOTE]
+> Our new build script now supports **Universal Binaries** automatically. If you leave the setting at "Standard Architectures", the script will build for both Intel and ARM.
+
+### Build Error during x86_64 compilation (audiopus_sys)
+If the build fails only for `x86_64` with a message about `audiopus_sys` or `Opus`, it's because the C-library compiler needs extra tools.
+1.  Install the base build tools:
+    ```bash
+    brew install cmake pkg-config opus
+    ```
+
+### Sandbox: cp deny(1) file-write-data
+This happens on Xcode 15+ because of a new security feature "User Script Sandboxing".
+1. Go to **Build Settings** for the Aura target.
+2. Search for **Enable User Script Sandboxing**.
+3. Set it to **No**.
 
 ### Slow builds
 The script only rebuilds if source changed. For faster iteration, use:
