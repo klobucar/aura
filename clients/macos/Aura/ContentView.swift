@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ContentView: View {
     @State private var isConnected = false
@@ -11,7 +12,11 @@ struct ContentView: View {
     @State private var identity: UserIdentity?
     @StateObject private var audioCapture = AudioCapture()
     @StateObject private var tts = TtsManager.shared
+    @StateObject private var audioSettings = AudioSettings()
+    @StateObject private var hotkeyManager = HotkeyManager.shared
     @State private var isMicEnabled = false
+    @State private var showingSettings = false
+    @State private var pttCancellable: AnyCancellable?
     
     // Chat state
     @State private var chatMessages: [ChatMessage] = []
@@ -143,124 +148,116 @@ struct ContentView: View {
     private func channelList(client: QuicNetworkClient) -> some View {
         let currentId = client.currentChannelId ?? 1
         
-        List {
-            Section("Voice Channels") {
-                ForEach(channels) { channel in
-                    VStack(alignment: .leading, spacing: 4) {
-                        // Channel header
-                        Button(action: {
-                            switchChannel(to: channel.id, client: client)
-                        }) {
-                            HStack {
-                                Image(systemName: channel.icon)
-                                    .foregroundColor(channel.id == currentId ? .blue : .secondary)
-                                    .frame(width: 20)
-                                
-                                Text(channel.name)
-                                    .foregroundColor(channel.id == currentId ? .primary : .secondary)
-                                    .fontWeight(channel.id == currentId ? .medium : .regular)
-                                
-                                Spacer()
-                                
-                                // User count
-                                if let users = client.usersByChannel[channel.id], !users.isEmpty {
-                                    Text("\(users.count + (channel.id == currentId ? 1 : 0))")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                } else if channel.id == currentId {
-                                    Text("1")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        
-                        // Users in this channel
-                        if let users = client.usersByChannel[channel.id], !users.isEmpty {
-                            VStack(alignment: .leading, spacing: 2) {
-                                // Show current user if in this channel
-                                if channel.id == currentId {
-                                    HStack(spacing: 6) {
-                                        Circle()
-                                            .fill(isMicEnabled ? Color.green : Color.secondary)
-                                            .frame(width: 6, height: 6)
-                                        Text("You")
-                                            .font(.caption)
+        VStack(spacing: 0) {
+            List {
+                Section("Voice Channels") {
+                    ForEach(channels) { channel in
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Channel header
+                            Button(action: {
+                                switchChannel(to: channel.id, client: client)
+                            }) {
+                                HStack {
+                                    Image(systemName: channel.icon)
+                                        .foregroundColor(channel.id == currentId ? .blue : .secondary)
+                                        .frame(width: 20)
+                                    
+                                    Text(channel.name)
+                                        .foregroundColor(channel.id == currentId ? .primary : .secondary)
+                                        .fontWeight(channel.id == currentId ? .medium : .regular)
+                                    
+                                    Spacer()
+                                    
+                                    // User count
+                                    if let users = client.usersByChannel[channel.id], !users.isEmpty {
+                                        Text("\(users.count + (channel.id == currentId ? 1 : 0))")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    } else if channel.id == currentId {
+                                        Text("1")
+                                            .font(.caption2)
                                             .foregroundColor(.secondary)
                                     }
-                                    .padding(.leading, 26)
                                 }
-                                
-                                // Show other users
-                                ForEach(users) { user in
-                                    HStack(spacing: 6) {
-                                        // Speaking indicator: microphone icon that's green+pulsing if speaking, grey if silent
-                                        let isSpeaking = client.activeSpeakers.contains(user.id)
-                                        Image(systemName: isSpeaking ? "mic.fill" : "mic.slash.fill")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(isSpeaking ? .green : .secondary.opacity(0.5))
-                                            .scaleEffect(isSpeaking ? 1.2 : 1.0)
-                                            .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isSpeaking)
-                                        Text(user.displayName)
-                                            .font(.caption)
-                                            .foregroundColor(isSpeaking ? .primary : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                            
+                            // Users in this channel
+                            if let users = client.usersByChannel[channel.id], !users.isEmpty {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    // Show current user if in this channel
+                                    if channel.id == currentId {
+                                        HStack(spacing: 6) {
+                                            Circle()
+                                                .fill(isMicEnabled ? Color.green : Color.secondary)
+                                                .frame(width: 6, height: 6)
+                                            Text("You")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(.leading, 26)
                                     }
-                                    .padding(.leading, 26)
+                                    
+                                    // Show other users
+                                    ForEach(users) { user in
+                                        HStack(spacing: 6) {
+                                            // Speaking indicator: microphone icon that's green+pulsing if speaking, grey if silent
+                                            let isSpeaking = client.activeSpeakers.contains(user.id)
+                                            Image(systemName: isSpeaking ? "mic.fill" : "mic.slash.fill")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(isSpeaking ? .green : .secondary.opacity(0.5))
+                                                .scaleEffect(isSpeaking ? 1.2 : 1.0)
+                                                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isSpeaking)
+                                            Text(user.displayName)
+                                                .font(.caption)
+                                                .foregroundColor(isSpeaking ? .primary : .secondary)
+                                        }
+                                        .padding(.leading, 26)
+                                    }
                                 }
+                                .padding(.top, 2)
+                            } else if channel.id == currentId {
+                                // Just show "You" if alone in channel
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(isMicEnabled ? Color.green : Color.secondary)
+                                        .frame(width: 6, height: 6)
+                                    Text("You")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.leading, 26)
+                                .padding(.top, 2)
                             }
-                            .padding(.top, 2)
-                        } else if channel.id == currentId {
-                            // Just show "You" if alone in channel
-                            HStack(spacing: 6) {
-                                Circle()
-                                    .fill(isMicEnabled ? Color.green : Color.secondary)
-                                    .frame(width: 6, height: 6)
-                                Text("You")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.leading, 26)
-                            .padding(.top, 2)
                         }
+                        .padding(.vertical, 2)
                     }
-                    .padding(.vertical, 2)
                 }
             }
-        }
-        .listStyle(.sidebar)
-        
-        Divider()
-        
-        // TTS Settings in sidebar footer
-        VStack(alignment: .leading, spacing: 8) {
-            Text("TTS SETTINGS")
-                .font(.caption2)
-                .fontWeight(.bold)
-                .foregroundColor(.secondary)
+            .listStyle(.sidebar)
             
-            Toggle("Enable Text-to-Speech", isOn: $tts.settings.enabled)
-                .toggleStyle(.checkbox)
+            Divider()
             
-            if tts.settings.enabled {
-                Toggle("Speak Chat", isOn: $tts.settings.speakChat)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                Toggle("Speak Join/Leave", isOn: $tts.settings.speakJoinLeave)
-                    .toggleStyle(.checkbox)
-                    .font(.caption)
-                
+            // Settings Button
+            Button(action: { showingSettings = true }) {
                 HStack {
-                    Image(systemName: "tortoise")
-                    Slider(value: $tts.settings.rate, in: 0.0...1.0)
-                    Image(systemName: "hare")
+                    Image(systemName: "gearshape.fill")
+                    Text("Settings")
                 }
-                .controlSize(.small)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
             }
+            .buttonStyle(.plain)
+            .padding()
         }
-        .padding()
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(settings: audioSettings, ttsManager: tts)
+        }
     }
+
     
     // MARK: - Channel Detail View
     
@@ -558,16 +555,64 @@ struct ContentView: View {
     }
     
     private func toggleMic(client: QuicNetworkClient) {
-        if isMicEnabled {
-            audioCapture.stop()
-            isMicEnabled = false
-        } else {
-            audioCapture.start { pcmData in
-                Task {
-                    try? await client.sendAudioDatagram(pcmData)
+        switch audioSettings.transmissionMode {
+        case .pushToTalk:
+            // PTT is handled by hotkey subscription, this just toggles the subscription
+            if pttCancellable != nil {
+                // Disable PTT
+                pttCancellable?.cancel()
+                pttCancellable = nil
+                audioCapture.stop()
+                isMicEnabled = false
+            } else {
+                // Enable PTT - register hotkey and subscribe
+                if let hotkey = audioSettings.pttHotkey {
+                    hotkeyManager.registerHotkey(hotkey)
                 }
+                pttCancellable = hotkeyManager.$isPTTActive
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak audioCapture] isActive in
+                        if isActive {
+                            audioCapture?.start { pcmData in
+                                Task {
+                                    try? await client.sendAudioDatagram(pcmData)
+                                }
+                            }
+                        } else {
+                            audioCapture?.stop()
+                        }
+                    }
+                isMicEnabled = true
             }
-            isMicEnabled = true
+            
+        case .alwaysOn:
+            // Always transmit when enabled
+            if isMicEnabled {
+                audioCapture.stop()
+                isMicEnabled = false
+            } else {
+                audioCapture.start { pcmData in
+                    Task {
+                        try? await client.sendAudioDatagram(pcmData)
+                    }
+                }
+                isMicEnabled = true
+            }
+            
+        case .voiceActivation:
+            // VAD mode - audio capture with voice detection
+            // For now, this works like always-on; full VAD integration would use Rust VAD
+            if isMicEnabled {
+                audioCapture.stop()
+                isMicEnabled = false
+            } else {
+                audioCapture.start { pcmData in
+                    Task {
+                        try? await client.sendAudioDatagram(pcmData)
+                    }
+                }
+                isMicEnabled = true
+            }
         }
     }
     
