@@ -88,7 +88,36 @@ public class QuicNetworkClient {
     /// Task for listening to QUIC datagrams (unreliable audio)
     private var datagramTask: Task<Void, Never>?
     
-    public init() {}
+    public init() {
+        // Listen for audio settings changes
+        NotificationCenter.default.addObserver(
+            forName: .audioSettingsChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.applyAudioSettings(notification.object as? [String: Any])
+        }
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    // MARK: - Audio Settings
+    
+    private func applyAudioSettings(_ settings: [String: Any]?) {
+        guard let settings = settings else { return }
+        
+        if let enabled = settings["noiseSuppression"] as? Bool {
+            audioSender?.setNoiseSuppressionEnabled(enabled: enabled)
+            print("[QuicClient] Noise suppression: \(enabled ? "enabled" : "disabled")")
+        }
+        
+        if let ms = settings["jitterBuffer"] as? Int {
+            audioReceiver?.setJitterBufferMs(latencyMs: UInt32(ms))
+            print("[QuicClient] Jitter buffer set to \(ms)ms")
+        }
+    }
     
     // MARK: - Connection
     
@@ -384,6 +413,14 @@ public class QuicNetworkClient {
                 
                 // Initialize audio receiver (for receiving others' voice)
                 audioReceiver = try AudioReceiverWrapper()
+                
+                // Apply saved audio settings
+                let noiseSuppressionEnabled = UserDefaults.standard.object(forKey: "noiseSuppressionEnabled") as? Bool ?? true
+                let jitterBufferMs = UserDefaults.standard.object(forKey: "jitterBufferMs") as? Int ?? 20
+                
+                audioSender?.setNoiseSuppressionEnabled(enabled: noiseSuppressionEnabled)
+                audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
+                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), Jitter=\(jitterBufferMs)ms")
                 
                 // Initialize text crypto with same DAVE key
                 textCrypto = try TextCryptoWrapper(key: keyData)
@@ -908,14 +945,15 @@ public class QuicNetworkClient {
             try receiver.onPacket(data: packetData)
             
             // Pop mixed audio from Rust core (handles PLC/DRED/talking detection internals)
-            if let mixed = receiver.popMixed() {
+            if let result = receiver.popMixed() {
                 print("[QuicClient] ✓ Playing mixed audio buffer")
-                audioPlayback.enqueue(pcm: mixed)
+                audioPlayback.enqueue(pcm: result.pcm)
                 
-                // Update talking indicators
-                // TODO: Get session IDs from the mixed frame metadata
+                // Update talking indicators using speaker metadata
                 let now = Date()
-                // For now, we'll mark all known senders as potentially active
+                for sessionId in result.activeSpeakers {
+                    lastSpeakerActivity[sessionId] = now
+                }
                 // This is a simplification - ideally we'd track which senders contributed to this mix
             }
         } catch {

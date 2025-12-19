@@ -16,7 +16,6 @@ struct ContentView: View {
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @State private var isMicEnabled = false
     @State private var isDeafened = false
-    @StateObject private var appSettings = AppSettings.shared
     @State private var showingSettings = false
     @State private var pttCancellable: AnyCancellable?
     

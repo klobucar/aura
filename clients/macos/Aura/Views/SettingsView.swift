@@ -10,6 +10,10 @@ struct SettingsView: View {
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @StateObject private var deviceManager = AudioDeviceManager()
     
+    // Audio Quality Settings
+    @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
+    @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
+    
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -81,6 +85,76 @@ struct SettingsView: View {
                                 pttSettings.padding(.top, 8)
                             } else if settings.transmissionMode == .voiceActivation {
                                 vadSettings.padding(.top, 8)
+                            }
+                        }
+                    }
+                    
+                    // Audio Quality Section
+                    settingsSection("Audio Quality", icon: "waveform") {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Toggle(isOn: $noiseSuppressionEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Noise Suppression (RNNoise)")
+                                        .font(.system(size: 14, weight: .medium))
+                                    Text("Neural network-based background noise removal")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .onChange(of: noiseSuppressionEnabled) { _, newValue in
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["noiseSuppression": newValue]
+                                )
+                            }
+                            
+                            Divider().opacity(0.2)
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("JITTER BUFFER")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text("\(jitterBufferMs)ms")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(AuraTheme.Colors.primary)
+                                }
+                                
+                                Picker("", selection: $jitterBufferMs) {
+                                    Text("0ms (Instant)").tag(0)
+                                    Text("10ms (Minimal)").tag(10)
+                                    Text("20ms (Ultra Low)").tag(20)
+                                    Text("40ms (Low)").tag(40)
+                                    Text("60ms (Balanced)").tag(60)
+                                    Text("80ms (Stable)").tag(80)
+                                    Text("100ms (Maximum)").tag(100)
+                                }
+                                .labelsHidden()
+                                .onChange(of: jitterBufferMs) { _, newValue in
+                                    NotificationCenter.default.post(
+                                        name: .audioSettingsChanged,
+                                        object: ["jitterBuffer": newValue]
+                                    )
+                                }
+                                
+                                if jitterBufferMs == 0 {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundColor(.orange)
+                                            .font(.system(size: 10))
+                                        Text("0ms is only for LAN/localhost")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding(.top, 4)
+                                } else {
+                                    Text("Lower = less delay, higher = more stable")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 4)
+                                }
                             }
                         }
                     }

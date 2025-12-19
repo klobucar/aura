@@ -4,7 +4,7 @@
 //! for the send/receive hot paths.
 
 use bytes::Bytes;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
@@ -12,7 +12,18 @@ use crate::opus::{OpusCodec, OpusError};
 use crate::crypto::{DaveCrypto, CryptoError, NONCE_SIZE};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
 use crate::noise_suppression::NoiseSuppressor;
+#[cfg(feature = "webrtc-audio")]
+use crate::webrtc_processor::WebRtcProcessor;
 use aura_protocol::FastAudioPacket;
+
+/// Mixed audio output with speaker metadata
+#[derive(Debug, Clone)]
+pub struct MixedAudio {
+    /// Mixed PCM samples (960 samples, 20ms at 48kHz)
+    pub pcm: Vec<i16>,
+    /// Session IDs that contributed to this mix
+    pub active_speakers: Vec<u32>,
+}
 
 /// Audio sender for transmitting encrypted Opus audio
 pub struct AudioSender {
@@ -22,6 +33,19 @@ pub struct AudioSender {
     crypto: RwLock<DaveCrypto>,
     /// Noise suppressor (RNNoise)
     noise_suppressor: std::sync::Mutex<NoiseSuppressor>,
+    /// Enable/disable RNNoise at runtime
+    enable_rnnoise: AtomicBool,
+    
+    /// WebRTC processor (AEC/NS/AGC) - optional feature
+    #[cfg(feature = "webrtc-audio")]
+    webrtc_processor: Option<std::sync::Mutex<WebRtcProcessor>>,
+    #[cfg(feature = "webrtc-audio")]
+    enable_webrtc_aec: AtomicBool,
+    #[cfg(feature = "webrtc-audio")]
+    enable_webrtc_ns: AtomicBool,
+    #[cfg(feature = "webrtc-audio")]
+    enable_webrtc_agc: AtomicBool,
+    
     /// Our session ID
     session_id: u32,
     /// Current MLS epoch hint
@@ -36,10 +60,26 @@ impl AudioSender {
         let codec = OpusCodec::new().map_err(AudioPipelineError::Opus)?;
         let crypto = DaveCrypto::new(key);
         
+        #[cfg(feature = "webrtc-audio")]
+        let webrtc_processor = WebRtcProcessor::new(false, false, false)
+            .ok()
+            .map(|p| std::sync::Mutex::new(p));
+        
         Ok(Self {
             codec,
             crypto: RwLock::new(crypto),
             noise_suppressor: std::sync::Mutex::new(NoiseSuppressor::new()),
+            enable_rnnoise: AtomicBool::new(true), // Enabled by default
+            
+            #[cfg(feature = "webrtc-audio")]
+            webrtc_processor,
+            #[cfg(feature = "webrtc-audio")]
+            enable_webrtc_aec: AtomicBool::new(false),
+            #[cfg(feature = "webrtc-audio")]
+            enable_webrtc_ns: AtomicBool::new(false),
+            #[cfg(feature = "webrtc-audio")]
+            enable_webrtc_agc: AtomicBool::new(false),
+            
             session_id,
             epoch_hint: AtomicU16::new(0),
             sequence: AtomicU16::new(0),
@@ -49,6 +89,49 @@ impl AudioSender {
     /// Set the current MLS epoch hint
     pub fn set_epoch(&self, epoch: u64) {
         self.epoch_hint.store((epoch & 0xFFFF) as u16, Ordering::SeqCst);
+    }
+    
+    /// Enable or disable RNNoise at runtime
+    pub fn set_rnnoise_enabled(&self, enabled: bool) {
+        self.enable_rnnoise.store(enabled, Ordering::SeqCst);
+    }
+    
+    /// Enable or disable WebRTC AEC at runtime
+    #[cfg(feature = "webrtc-audio")]
+    pub fn set_webrtc_aec_enabled(&self, enabled: bool) {
+        self.enable_webrtc_aec.store(enabled, Ordering::SeqCst);
+        if let Some(proc) = &self.webrtc_processor {
+            let mut p = proc.lock().unwrap();
+            p.reconfigure(enabled, 
+                self.enable_webrtc_ns.load(Ordering::SeqCst),
+                self.enable_webrtc_agc.load(Ordering::SeqCst));
+        }
+    }
+    
+    /// Enable or disable WebRTC NS at runtime
+    #[cfg(feature = "webrtc-audio")]
+    pub fn set_webrtc_ns_enabled(&self, enabled: bool) {
+        self.enable_webrtc_ns.store(enabled, Ordering::SeqCst);
+        if let Some(proc) = &self.webrtc_processor {
+            let mut p = proc.lock().unwrap();
+            p.reconfigure(
+                self.enable_webrtc_aec.load(Ordering::SeqCst),
+                enabled,
+                self.enable_webrtc_agc.load(Ordering::SeqCst));
+        }
+    }
+    
+    /// Enable or disable WebRTC AGC at runtime
+    #[cfg(feature = "webrtc-audio")]
+    pub fn set_webrtc_agc_enabled(&self, enabled: bool) {
+        self.enable_webrtc_agc.store(enabled, Ordering::SeqCst);
+        if let Some(proc) = &self.webrtc_processor {
+            let mut p = proc.lock().unwrap();
+            p.reconfigure(
+                self.enable_webrtc_aec.load(Ordering::SeqCst),
+                self.enable_webrtc_ns.load(Ordering::SeqCst),
+                enabled);
+        }
     }
     
     /// Update the encryption key (called when MLS epoch advances)
@@ -101,17 +184,35 @@ impl AudioSender {
     }
     
     /// Encode and encrypt f32 PCM audio
-    pub fn process_float(&self, pcm: &[f32]) -> Result<Bytes, AudioPipelineError> {
-        // 1. Apply noise suppression (RNNoise)
-        let denoised = {
+    /// 
+    /// `reference`: Optional playback audio for AEC (only needed if WebRTC AEC is enabled)
+    pub fn process_float_with_reference(&self, pcm: &[f32], reference: Option<&[f32]>) -> Result<Bytes, AudioPipelineError> {
+        let mut processed = pcm.to_vec();
+        
+        // 1. WebRTC processing (AEC/NS/AGC)
+        #[cfg(feature = "webrtc-audio")]
+        if let Some(proc) = &self.webrtc_processor {
+            let mut p = proc.lock().unwrap();
+            processed = p.process(&processed, reference);
+        }
+        
+        // 2. RNNoise (if enabled and WebRTC NS is disabled)
+        #[cfg(feature = "webrtc-audio")]
+        let use_rnnoise = self.enable_rnnoise.load(Ordering::SeqCst) 
+            && !self.enable_webrtc_ns.load(Ordering::SeqCst);
+        
+        #[cfg(not(feature = "webrtc-audio"))]
+        let use_rnnoise = self.enable_rnnoise.load(Ordering::SeqCst);
+        
+        if use_rnnoise {
             let mut suppressor = self.noise_suppressor.lock().unwrap();
-            suppressor.process(pcm)
-        };
+            processed = suppressor.process(&processed);
+        }
         
-        // 2. Encode to Opus using native float API
-        let opus_data = self.codec.encode_float(&denoised).map_err(AudioPipelineError::Opus)?;
+        // 3. Encode to Opus using native float API
+        let opus_data = self.codec.encode_float(&processed).map_err(AudioPipelineError::Opus)?;
         
-        // 3. Generate nonce and encrypt
+        // 4. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
@@ -119,7 +220,7 @@ impl AudioSender {
                 .map_err(AudioPipelineError::Crypto)?
         };
         
-        // 4. Build packet
+        // 5. Build packet
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
         
@@ -176,6 +277,14 @@ impl AudioReceiver {
         Self {
             senders: RwLock::new(HashMap::new()),
             jitter_config,
+        }
+    }
+    
+    /// Set jitter buffer target latency for all senders
+    pub fn set_jitter_buffer_ms(&self, latency_ms: u32) {
+        let mut senders = self.senders.write().unwrap();
+        for state in senders.values_mut() {
+            state.jitter.set_target_latency(latency_ms);
         }
     }
     
@@ -321,8 +430,8 @@ impl AudioReceiver {
         results
     }
     
-    /// Mix all decoded frames into a single output
-    pub fn pop_mixed(&self) -> Option<Vec<i16>> {
+    /// Mix all decoded frames into a single output with speaker metadata
+    pub fn pop_mixed(&self) -> Option<MixedAudio> {
         let frames = self.pop_decoded();
         if frames.is_empty() {
             return None;
@@ -330,17 +439,27 @@ impl AudioReceiver {
         
         let frame_size = 960; // 20ms at 48kHz
         let mut mixed = vec![0i32; frame_size];
+        let mut active_speakers = Vec::new();
         
-        for (_, pcm) in &frames {
+        for (session_id, pcm) in &frames {
+            // Track this session as an active speaker
+            active_speakers.push(*session_id);
+            
+            // Mix the audio
             for (i, &sample) in pcm.iter().enumerate().take(frame_size) {
                 mixed[i] += sample as i32;
             }
         }
         
         // Clip to i16 range
-        Some(mixed.iter()
+        let pcm = mixed.iter()
             .map(|&s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
-            .collect())
+            .collect();
+        
+        Some(MixedAudio {
+            pcm,
+            active_speakers,
+        })
     }
 }
 
@@ -431,9 +550,13 @@ mod tests {
         receiver.on_packet(pkt1).expect("Receive 1");
         receiver.on_packet(pkt2).expect("Receive 2");
         
-        // Should get mixed output
+        // Should get mixed output with both speakers
         let mixed = receiver.pop_mixed();
         assert!(mixed.is_some());
+        let mixed = mixed.unwrap();
+        assert_eq!(mixed.active_speakers.len(), 2);
+        assert!(mixed.active_speakers.contains(&1));
+        assert!(mixed.active_speakers.contains(&2));
     }
     
     #[test]

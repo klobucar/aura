@@ -6,4 +6,4 @@ description = "Raw FFI bindings to libopus 1.6"
 links = "opus"
 
 [build-dependencies]
-pkg-config = "0.3"
+cc = "1.0"
