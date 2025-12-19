@@ -26,6 +26,7 @@ openmls_rust_crypto = "0.4"
 hex = "0.4.3"
 openmls_basic_credential = "0.4.1"
 uuid = { version = "1.19.0", features = ["v4"] }
+nnnoiseless = "0.5.2"
 
 [features]
 default = ["native-audio"]

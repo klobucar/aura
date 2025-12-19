@@ -23,9 +23,9 @@ pub struct JitterBufferConfig {
 impl Default for JitterBufferConfig {
     fn default() -> Self {
         Self {
-            target_latency_ms: 60,   // 3 frames at 20ms = 60ms buffer
+            target_latency_ms: 20,   // Ultra-low latency (1 frame)
             max_packets: 100,        // ~2 seconds of audio
-            max_age_ms: 200,         // Drop packets older than 200ms
+            max_age_ms: 100,         // Drop packets older than 100ms
             frame_duration_ms: 20,   // Standard Opus frame
         }
     }

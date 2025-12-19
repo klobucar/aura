@@ -80,6 +80,20 @@ impl AudioSenderWrapper {
         Ok(bytes.to_vec())
     }
     
+    /// Encode and encrypt f32 PCM audio
+    pub fn process_float(&self, pcm: Vec<f32>) -> Result<Vec<u8>, AudioError> {
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        let bytes = inner.process_float(&pcm).map_err(convert_error)?;
+        Ok(bytes.to_vec())
+    }
+    
+    /// Set DRED duration in 10ms frames (0 to 100)
+    pub fn set_dred_duration(&self, duration: i32) {
+        if let Ok(inner) = self.inner.read() {
+            let _ = inner.set_dred_duration(duration);
+        }
+    }
+
     /// Get current sequence number
     pub fn sequence(&self) -> u16 {
         self.inner.read().map(|i| i.sequence()).unwrap_or(0)
