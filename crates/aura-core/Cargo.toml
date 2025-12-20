@@ -9,7 +9,7 @@ name = "aura_core"
 
 [dependencies]
 aura-protocol = { path = "../aura-protocol" }
-uniffi = { version = "0.30", features = ["cli"] }
+uniffi = { version = "0.29", features = ["cli"] }
 lazy_static = "1.4"
 regex = "1.11"
 prost = "0.14"
@@ -35,4 +35,4 @@ native-audio = ["dep:cpal"]
 webrtc-audio = ["dep:webrtc-audio-processing"]
 
 [build-dependencies]
-uniffi = { version = "0.30", features = ["build"] }
+uniffi = { version = "0.29", features = ["build"] }
