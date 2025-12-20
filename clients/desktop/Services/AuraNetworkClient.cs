@@ -25,8 +25,10 @@ public class AuraNetworkClient : IAsyncDisposable
     private ushort _sequenceNumber;
     private TextCryptoService? _textCrypto;
     private RustAudioEngine? _audioEngine;
+    private AudioManager? _audioManager;
     
     public void SetAudioEngine(RustAudioEngine engine) => _audioEngine = engine;
+    public void SetAudioManager(AudioManager manager) => _audioManager = manager;
     
     public uint UserId => _userId;
     public string? SessionToken => _sessionToken;
@@ -133,6 +135,9 @@ public class AuraNetworkClient : IAsyncDisposable
         for (int i = 0; i < 32; i++) daveKey[i] = 0x42;  // TODO: Derive from MLS
         _textCrypto = new TextCryptoService(daveKey);
         
+        // Initialize audio crypto with same DAVE key
+        _audioManager?.Initialize(userId, daveKey);
+        
         OnStatusChanged?.Invoke($"Authenticated as user {userId}" + (verified ? " (verified)" : ""));
         
         // Start listening for server messages (presence, chat, etc.)
@@ -141,27 +146,31 @@ public class AuraNetworkClient : IAsyncDisposable
     
     private QuicStream? _audioStream;
 
-    public async Task SendAudioFrameAsync(byte[] pcmData, CancellationToken ct = default)
+    public async Task SendAudioFrameAsync(short[] pcmData, CancellationToken ct = default)
     {
         if (_controlStream == null) return;
         
-        // Build FastAudioPacket header (32 bytes) + payload
-        // session_id(4) + epoch_hint(2) + sequence(2) + nonce(24) + payload
-        var packet = new byte[32 + pcmData.Length];
+        // Use AudioManager for Opus encoding + encryption (Opus 1.6 + DRED + DAVE)
+        byte[]? encodedPacket = null;
+        if (_audioManager != null)
+        {
+            encodedPacket = _audioManager.ProcessCapture(pcmData);
+        }
         
-        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0, 4), UserId);
-        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(4, 2), 0); // epoch
-        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(6, 2), _sequenceNumber++);
-        // nonce (8..32) is zeros
+        if (encodedPacket == null)
+        {
+            // Fallback: Send raw PCM if AudioManager not available
+            var rawPacket = new byte[pcmData.Length * 2];
+            Buffer.BlockCopy(pcmData, 0, rawPacket, 0, rawPacket.Length);
+            encodedPacket = rawPacket;
+        }
         
-        pcmData.CopyTo(packet, 32);
-        
-        // Send as 0x20 Control Message
+        // Send as 0x20 Audio Message
         // [type 0x20][len 4][packet]
-        var frame = new byte[1 + 4 + packet.Length];
+        var frame = new byte[1 + 4 + encodedPacket.Length];
         frame[0] = 0x20;
-        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), packet.Length);
-        packet.CopyTo(frame, 5);
+        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), encodedPacket.Length);
+        encodedPacket.CopyTo(frame, 5);
         
         try 
         {
@@ -171,6 +180,17 @@ public class AuraNetworkClient : IAsyncDisposable
         {
             OnError?.Invoke($"Audio send error: {ex.Message}");
         }
+    }
+    
+    /// <summary>
+    /// Legacy method for backward compatibility with RustAudioEngine
+    /// </summary>
+    public async Task SendAudioFrameAsync(byte[] rawPcmBytes, CancellationToken ct = default)
+    {
+        // Convert bytes back to shorts
+        var pcmData = new short[rawPcmBytes.Length / 2];
+        Buffer.BlockCopy(rawPcmBytes, 0, pcmData, 0, rawPcmBytes.Length);
+        await SendAudioFrameAsync(pcmData, ct);
     }
     
     /// <summary>
@@ -377,25 +397,31 @@ public class AuraNetworkClient : IAsyncDisposable
         var packet = new byte[len];
         await ReadExactAsync(packet, ct);
         
-        // 3. Process Header (FastAudioPacket)
-        // Header size = 32 bytes.
-        if (len <= 32) return; // Header only or invalid?
-        
-        // Extract Payload (skip 32 bytes)
-        var payloadDesc = packet.AsSpan(32);
-        
-        // In POC, payload is Raw PCM?
-        // Swift sends EncryptedOpus.
-        // Server sends EncryptedOpus.
-        // If we receive EncryptedOpus and treat as PCM, it will be static noise.
-        // BUT, for unencrypted usage (if any), this works.
-        // For now, we queue it. Ideally we would decrypt/decode.
-        // Since we lack bindings, we just output it.
-        // If the server sends raw PCM (some debug modes?), it works.
-        // Otherwise, this completes the transport pipe at least.
-        
-        var payload = payloadDesc.ToArray();
-        _audioEngine?.PlayAudio(payload);
+        // 3. Decrypt and decode using AudioManager
+        if (_audioManager != null)
+        {
+            // Feed packet to Rust core for decryption + Opus decoding
+            _audioManager.OnPacket(packet);
+            
+            // Pop mixed audio for playback
+            var mixedPcm = _audioManager.PopMixed();
+            if (mixedPcm != null)
+            {
+                // Convert shorts to bytes for RustAudioEngine
+                var pcmBytes = new byte[mixedPcm.Length * 2];
+                Buffer.BlockCopy(mixedPcm, 0, pcmBytes, 0, pcmBytes.Length);
+                _audioEngine?.PlayAudio(pcmBytes);
+            }
+        }
+        else
+        {
+            // Fallback: Play raw payload (legacy behavior)
+            if (len > 32)
+            {
+                var payload = packet.AsSpan(32).ToArray();
+                _audioEngine?.PlayAudio(payload);
+            }
+        }
     }
 
     private async Task HandleUserJoinedAsync(CancellationToken ct)
@@ -413,6 +439,12 @@ public class AuraNetworkClient : IAsyncDisposable
         string name = System.Text.Encoding.UTF8.GetString(nameBuf);
 
         Console.WriteLine($"[AuraClient] UserJoined: {name} (ID: {sessionId}) in Channel {channelId}");
+        
+        // Register remote sender for audio decryption (using same DAVE key for POC)
+        var daveKey = new byte[32];
+        for (int i = 0; i < 32; i++) daveKey[i] = 0x42;  // TODO: Derive from MLS per-sender
+        _audioManager?.AddRemoteSender(sessionId, daveKey);
+        
         OnUserJoined?.Invoke(channelId, sessionId, name);
     }
 
@@ -426,6 +458,10 @@ public class AuraNetworkClient : IAsyncDisposable
         uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(4, 4));
 
         Console.WriteLine($"[AuraClient] UserLeft: ID {sessionId} from Channel {channelId}");
+        
+        // Remove remote sender from audio decryption
+        _audioManager?.RemoveRemoteSender(sessionId);
+        
         OnUserLeft?.Invoke(channelId, sessionId);
     }
 

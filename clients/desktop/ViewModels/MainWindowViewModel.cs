@@ -21,6 +21,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private AuraNetworkClient? _client;
     private UserIdentity? _identity;
     private RustAudioEngine? _audioEngine;
+    private AudioManager? _audioManager;
     private CancellationTokenSource? _audioCts;
     
     // ==========================================================================
@@ -68,6 +69,43 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     
     [ObservableProperty]
     private string _messageInput = "";
+    
+    // ==========================================================================
+    // Audio Settings
+    // ==========================================================================
+    
+    [ObservableProperty]
+    private bool _rnnoiseEnabled = true;
+    
+    [ObservableProperty]
+    private bool _aecEnabled = true;
+    
+    [ObservableProperty]
+    private bool _webrtcNsEnabled = false;
+    
+    [ObservableProperty]
+    private bool _agcEnabled = true;
+    
+    [ObservableProperty]
+    private int _dredDuration = 10;  // 100ms
+    
+    [ObservableProperty]
+    private int _jitterBufferMs = 40;
+    
+    [ObservableProperty]
+    private bool _showAudioSettings = false;
+    
+    partial void OnRnnoiseEnabledChanged(bool value) => _audioManager?.SetNoiseSuppressionEnabled(value);
+    partial void OnAecEnabledChanged(bool value) => _audioManager?.SetWebrtcAecEnabled(value);
+    partial void OnWebrtcNsEnabledChanged(bool value)
+    {
+        _audioManager?.SetWebrtcNsEnabled(value);
+        // Auto-disable RNNoise when WebRTC NS is enabled
+        if (value) RnnoiseEnabled = false;
+    }
+    partial void OnAgcEnabledChanged(bool value) => _audioManager?.SetWebrtcAgcEnabled(value);
+    partial void OnDredDurationChanged(int value) => _audioManager?.SetDredDuration(value);
+    partial void OnJitterBufferMsChanged(int value) => _audioManager?.SetJitterBufferMs((uint)value);
     
     // ==========================================================================
     // Initialization
@@ -130,15 +168,28 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         
         try
         {
+            Console.WriteLine("[ViewModel] Starting connection...");
+            
             // 1. Generate or load identity
             _identity ??= UserIdentity.LoadOrCreate(DisplayName);
             _identity.DisplayName = DisplayName;
             PublicKeyDisplay = _identity.PublicKeyHex[..16] + "...";
+            Console.WriteLine($"[ViewModel] Identity loaded: {_identity.PublicKeyHex[..16]}...");
             
             // 2. Create client and connect
             _client = new AuraNetworkClient();
             _audioEngine ??= new RustAudioEngine();
+            Console.WriteLine("[ViewModel] Creating AudioManager...");
+            NativeLibraryLoader.Initialize();
+            _audioManager ??= new AudioManager();
+            Console.WriteLine("[ViewModel] AudioManager created");
             _client.SetAudioEngine(_audioEngine);
+            _client.SetAudioManager(_audioManager);
+            Console.WriteLine("[ViewModel] Audio components wired");
+            
+            // Listen for active speaker changes
+            _audioManager.OnActiveSpeakersChanged += speakers =>
+                Dispatcher.UIThread.Post(() => UpdateSpeakingIndicators(speakers));
             _client.OnStatusChanged += status => 
                 Dispatcher.UIThread.Post(() => ConnectionStatus = status);
             _client.OnError += error => 
@@ -155,30 +206,47 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 Dispatcher.UIThread.Post(() => HandleTextMessage(mid, sid, cid, content, reply));
             
             ConnectionStatus = "Connecting...";
+            Console.WriteLine($"[ViewModel] Connecting to {ServerAddress}:{ServerPort}...");
             await _client.ConnectAsync(ServerAddress, ServerPort);
             IsConnected = true;
+            Console.WriteLine($"[ViewModel] IsConnected = {IsConnected}");
             
             // 3. Authenticate with TOFU
             ConnectionStatus = "Authenticating...";
+            Console.WriteLine("[ViewModel] Starting authentication...");
             var password = string.IsNullOrWhiteSpace(ServerPassword) ? null : ServerPassword;
             await _client.AuthenticateAsync(_identity, password);
+            Console.WriteLine("[ViewModel] Authentication completed!");
             IsAuthenticated = true;
+            Console.WriteLine($"[ViewModel] IsAuthenticated = {IsAuthenticated}, UserId = {_client.UserId}");
             
             ConnectionStatus = $"Connected as {DisplayName} (ID: {_client.UserId})";
+            Console.WriteLine($"[ViewModel] ConnectionStatus = {ConnectionStatus}");
             
             Messages.Add(new ChatMessage 
             { 
                 Content = $"Connected to {ServerAddress}:{ServerPort}",
                 System = true 
             });
+            
+            Console.WriteLine("[ViewModel] Connection complete!");
         }
         catch (AuthenticationException ex)
         {
+            Console.WriteLine($"[ViewModel] AUTH EXCEPTION: {ex.Message}");
+            Console.WriteLine($"[ViewModel] Stack trace: {ex.StackTrace}");
             ConnectionStatus = $"Auth failed: {ex.Message}";
             await DisconnectInternalAsync();
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"[ViewModel] CONNECTION EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[ViewModel] Stack trace: {ex.StackTrace}");
+            if (ex.InnerException != null)
+            {
+                Console.WriteLine($"[ViewModel] INNER EXCEPTION: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+                Console.WriteLine($"[ViewModel] Inner stack trace: {ex.InnerException.StackTrace}");
+            }
             ConnectionStatus = $"Connection failed: {ex.Message}";
             await DisconnectInternalAsync();
         }
@@ -403,6 +471,23 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Channels.Add(channel);
         }
         return channel;
+    }
+    
+    private void UpdateSpeakingIndicators(HashSet<uint> speakers)
+    {
+        foreach (var channel in Channels)
+        {
+            foreach (var user in channel.Users)
+            {
+                user.IsSpeaking = speakers.Contains(user.Id);
+            }
+        }
+    }
+    
+    [RelayCommand]
+    private void ToggleAudioSettings()
+    {
+        ShowAudioSettings = !ShowAudioSettings;
     }
 }
 
