@@ -5,6 +5,7 @@
 
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var isConnected = false
@@ -17,6 +18,9 @@ struct ContentView: View {
     @State private var isMicEnabled = false
     @State private var isDeafened = false
     @State private var showingSettings = false
+    @State private var showingProfileEditor = false
+    @State private var showingChannelEditor = false
+    @State private var editingChannel: ChannelModel?
     @State private var pttCancellable: AnyCancellable?
     
     // Chat state
@@ -25,13 +29,6 @@ struct ContentView: View {
     @State private var showingChat = true
     @State private var replyingTo: ChatMessage?
     
-    // Channel definitions
-    private let channels: [Channel] = [
-        Channel(id: 1, name: "General", icon: "speaker.wave.2"),
-        Channel(id: 2, name: "Gaming", icon: "gamecontroller"),
-        Channel(id: 3, name: "Music", icon: "music.note"),
-        Channel(id: 4, name: "AFK", icon: "moon.zzz")
-    ]
     
     var body: some View {
         Group {
@@ -117,6 +114,12 @@ struct ContentView: View {
         .navigationTitle("")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AuraTheme.Colors.background)
+        .sheet(isPresented: $showingProfileEditor) {
+            ProfileEditView(client: client)
+        }
+        .sheet(isPresented: $showingChannelEditor) {
+            ChannelEditView(client: client, channel: editingChannel)
+        }
     }
     
     // MARK: - User Header
@@ -146,6 +149,14 @@ struct ContentView: View {
             
             Spacer()
             
+            // Edit Profile button
+            Button(action: { showingProfileEditor = true }) {
+                Image(systemName: "pencil.circle")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Edit Profile")
+            
             // Disconnect button
             Button(action: disconnect) {
                 Image(systemName: "rectangle.portrait.and.arrow.right")
@@ -164,24 +175,52 @@ struct ContentView: View {
     
     @ViewBuilder
     private func channelList(client: QuicNetworkClient) -> some View {
-        let currentId = client.currentChannelId ?? 1
+        let currentId = client.currentChannelId ?? client.channels.first?.id ?? 0
         
         VStack(spacing: 0) {
             List {
-                Section("Voice Channels") {
-                    ForEach(channels) { channel in
+                Section(header: HStack {
+                    Text("Voice Channels")
+                    Spacer()
+                    if client.isAdmin {
+                        Button(action: { 
+                            editingChannel = nil
+                            showingChannelEditor = true 
+                        }) {
+                            Image(systemName: "plus.circle.fill")
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }) {
+                    ForEach(client.channels) { channel in
                         VStack(alignment: .leading, spacing: 4) {
                             // Channel header
                             Button(action: {
                                 switchChannel(to: channel.id, client: client)
                             }) {
                                 HStack {
-                                    Image(systemName: channel.icon)
-                                        .foregroundColor(channel.id == currentId ? .blue : .secondary)
-                                        .frame(width: 20)
-                                    Text(channel.name)
-                                        .foregroundColor(channel.id == currentId ? .primary : .secondary)
-                                        .fontWeight(channel.id == currentId ? .semibold : .regular)
+                                    if let emoji = channel.iconEmoji {
+                                        Text(emoji)
+                                            .frame(width: 20)
+                                    } else {
+                                        Image(systemName: channel.iconPresetId ?? "speaker.wave.2")
+                                            .foregroundColor(channel.id == currentId ? .blue : .secondary)
+                                            .frame(width: 20)
+                                    }
+                                    
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        Text(channel.name)
+                                            .foregroundColor(channel.id == currentId ? .primary : .secondary)
+                                            .fontWeight(channel.id == currentId ? .semibold : .regular)
+                                        
+                                        if !channel.comment.isEmpty {
+                                            Text(channel.comment)
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
                                     
                                     Spacer()
                                     
@@ -213,54 +252,95 @@ struct ContentView: View {
                                 .background(channel.id == currentId ? AuraTheme.Colors.primary.opacity(0.15) : Color.clear)
                                 .cornerRadius(8)
                                 .auraFluidHover()
+                                .contextMenu {
+                                    if client.isAdmin {
+                                        Button(action: {
+                                            editingChannel = channel
+                                            showingChannelEditor = true
+                                        }) {
+                                            Label("Edit Channel", systemImage: "pencil")
+                                        }
+                                        
+                                        Divider()
+                                        
+                                        Button(role: .destructive, action: {
+                                            // TODO: Implement delete
+                                        }) {
+                                            Label("Delete Channel", systemImage: "trash")
+                                        }
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             
                             // Users in this channel
-                            if let users = client.usersByChannel[channel.id], !users.isEmpty {
-                                VStack(alignment: .leading, spacing: 2) {
+                            if let users = client.usersByChannel[channel.id] {
+                                VStack(alignment: .leading, spacing: 4) {
                                     // Show current user if in this channel
                                     if channel.id == currentId {
-                                        HStack(spacing: 6) {
+                                        HStack(spacing: 8) {
                                             Circle()
                                                 .fill(isMicEnabled ? Color.green : Color.secondary)
-                                                .frame(width: 6, height: 6)
+                                                .frame(width: 18, height: 18)
+                                                .overlay(
+                                                    Text("ME")
+                                                        .font(.system(size: 7, weight: .bold))
+                                                        .foregroundColor(.white)
+                                                )
+                                            
                                             Text("You")
-                                                .font(.caption)
+                                                .font(.system(size: 13))
                                                 .foregroundColor(.secondary)
                                         }
-                                        .padding(.leading, 26)
+                                        .padding(.leading, 24)
                                     }
                                     
                                     // Show other users
                                     ForEach(users) { user in
-                                        HStack(spacing: 6) {
-                                            // Speaking indicator: microphone icon that's green+pulsing if speaking, grey if silent
-                                            let isSpeaking = client.activeSpeakers.contains(user.id)
-                                            Image(systemName: isSpeaking ? "mic.fill" : "mic.slash.fill")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(isSpeaking ? .green : .secondary.opacity(0.5))
-                                                .scaleEffect(isSpeaking ? 1.2 : 1.0)
-                                                .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: isSpeaking)
-                                            Text(user.displayName)
-                                                .font(.caption)
-                                                .foregroundColor(isSpeaking ? .primary : .secondary)
+                                        HStack(spacing: 8) {
+                                            // Avatar
+                                            if let avatarData = user.avatarData, let image = NSImage(data: avatarData) {
+                                                Image(nsImage: image)
+                                                    .resizable()
+                                                    .aspectRatio(contentMode: .fill)
+                                                    .frame(width: 18, height: 18)
+                                                    .clipShape(Circle())
+                                            } else {
+                                                Circle()
+                                                    .fill(AuraTheme.Gradients.primary)
+                                                    .frame(width: 18, height: 18)
+                                                    .overlay(
+                                                        Text(user.displayName.prefix(1).uppercased())
+                                                            .font(.system(size: 8, weight: .bold))
+                                                            .foregroundColor(.white)
+                                                    )
+                                            }
+                                            
+                                            VStack(alignment: .leading, spacing: 0) {
+                                                Text(user.displayName)
+                                                    .font(.system(size: 13))
+                                                    .foregroundColor(client.activeSpeakers.contains(user.id) ? AuraTheme.Colors.accent : .secondary)
+                                                
+                                                if !user.bio.isEmpty {
+                                                    Text(user.bio)
+                                                        .font(.system(size: 9))
+                                                        .foregroundColor(.secondary.opacity(0.7))
+                                                        .lineLimit(1)
+                                                }
+                                            }
+                                            
+                                            if client.activeSpeakers.contains(user.id) {
+                                                Image(systemName: "waves.at.tail")
+                                                    .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                                                    .font(.system(size: 10))
+                                                    .transition(.scale.combined(with: .opacity))
+                                            }
                                         }
-                                        .padding(.leading, 26)
+                                        .padding(.leading, 24)
+                                        .padding(.vertical, 2)
+                                        .help(user.bio.isEmpty ? user.displayName : "\(user.displayName): \(user.bio)")
                                     }
                                 }
-                                .padding(.top, 2)
-                            } else if channel.id == currentId {
-                                // Just show "You" if alone in channel
-                                HStack(spacing: 6) {
-                                    Circle()
-                                        .fill(isMicEnabled ? Color.green : Color.secondary)
-                                        .frame(width: 6, height: 6)
-                                    Text("You")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.leading, 26)
                                 .padding(.top, 2)
                             }
                         }
@@ -318,13 +398,19 @@ struct ContentView: View {
     @ViewBuilder
     private func channelHeader(client: QuicNetworkClient) -> some View {
         let channel = currentChannel(for: client)
-        let userCount = (client.usersByChannel[client.currentChannelId ?? 1]?.count ?? 0) + 1
+        let currentId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let userCount = (client.usersByChannel[currentId]?.count ?? 0) + 1
         
         HStack {
-            Image(systemName: channel?.icon ?? "speaker.wave.2")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundColor(AuraTheme.Colors.primary)
-                .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+            if let emoji = channel?.iconEmoji {
+                Text(emoji)
+                    .font(.system(size: 18))
+            } else {
+                Image(systemName: channel?.iconPresetId ?? "speaker.wave.2")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(AuraTheme.Colors.primary)
+                    .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+            }
             
             Text(channel?.name ?? "Channel")
                 .font(.system(size: 18, weight: .bold))
@@ -674,18 +760,18 @@ struct ContentView: View {
     
     // MARK: - Helpers
     
-    private func currentChannel(for client: QuicNetworkClient) -> Channel? {
-        let channelId = client.currentChannelId ?? 1
-        return channels.first { $0.id == channelId }
+    private func currentChannel(for client: QuicNetworkClient) -> ChannelModel? {
+        let channelId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        return client.channels.first { $0.id == channelId }
     }
     
     private func switchChannel(to channelId: UInt32, client: QuicNetworkClient) {
         guard channelId != client.currentChannelId else { return }
         
         // Capture old/new names for divider
-        let oldChannelId = client.currentChannelId ?? 1
-        let oldChannelName = channels.first(where: { $0.id == oldChannelId })?.name ?? "Unknown"
-        let newChannelName = channels.first(where: { $0.id == channelId })?.name ?? "Unknown"
+        let oldChannelId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let oldChannelName = client.channels.first(where: { $0.id == oldChannelId })?.name ?? "Unknown"
+        let newChannelName = client.channels.first(where: { $0.id == channelId })?.name ?? "Unknown"
         
         // Add divider if we have chat history
         if !chatMessages.isEmpty {
@@ -850,6 +936,170 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Profile Edit View
+
+struct ProfileEditView: View {
+    @Environment(\.dismiss) var dismiss
+    let client: QuicNetworkClient
+    
+    @State private var bio: String = ""
+    @State private var avatarData: Data = Data()
+    @State private var showingImagePicker = false
+    
+    init(client: QuicNetworkClient) {
+        self.client = client
+        // Initialize with current profile if available
+        if let myProfile = client.profiles[client.sessionId ?? 0] {
+            _bio = State(initialValue: myProfile.bio)
+            _avatarData = State(initialValue: Data(myProfile.avatarData))
+        }
+    }
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Edit Profile")
+                .font(.title2.bold())
+            
+            VStack(spacing: 12) {
+                // Avatar Preview
+                ZStack(alignment: .bottomTrailing) {
+                    if let image = NSImage(data: avatarData) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 80, height: 80)
+                            .clipShape(Circle())
+                    } else {
+                        Circle()
+                            .fill(AuraTheme.Gradients.primary)
+                            .frame(width: 80, height: 80)
+                    }
+                    
+                    Button(action: { selectImage() }) {
+                        Image(systemName: "camera.fill")
+                            .padding(6)
+                            .background(Circle().fill(Color.blue))
+                            .foregroundColor(.white)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Bio")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextEditor(text: $bio)
+                        .frame(height: 100)
+                        .padding(4)
+                        .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+                }
+            }
+            .padding()
+            .auraGlass()
+            
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                Button("Save") {
+                    Task {
+                        await client.updateProfile(bio: bio, avatarData: avatarData)
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(30)
+        .frame(width: 400)
+    }
+    
+    private func selectImage() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+        
+        if panel.runModal() == .OK {
+            if let url = panel.url, let data = try? Data(contentsOf: url) {
+                // Resize if needed (limit 128KB in proto)
+                self.avatarData = data
+            }
+        }
+    }
+}
+
+// MARK: - Channel Edit View
+
+struct ChannelEditView: View {
+    @Environment(\.dismiss) var dismiss
+    let client: QuicNetworkClient
+    let channel: ChannelModel?
+    
+    @State private var name: String = ""
+    @State private var comment: String = ""
+    @State private var emoji: String = "📁"
+    
+    init(client: QuicNetworkClient, channel: ChannelModel? = nil) {
+        self.client = client
+        self.channel = channel
+        if let ch = channel {
+            _name = State(initialValue: ch.name)
+            _comment = State(initialValue: ch.comment)
+            _emoji = State(initialValue: ch.iconEmoji ?? "📁")
+        }
+    }
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(channel == nil ? "Create Channel" : "Edit Channel")
+                .font(.title2.bold())
+            
+            VStack(spacing: 12) {
+                HStack {
+                    Text("Icon")
+                    TextField("Emoji", text: $emoji)
+                        .frame(width: 50)
+                    Spacer()
+                }
+                
+                TextField("Channel Name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                
+                TextField("Comment", text: $comment)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .padding()
+            .auraGlass()
+            
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                Button("Save") {
+                    Task {
+                        if let ch = channel {
+                            await client.updateChannel(id: ch.id, name: name, comment: comment, emoji: emoji)
+                        } else {
+                            await client.createChannel(name: name, comment: comment, emoji: emoji)
+                        }
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(name.isEmpty)
+            }
+        }
+        .padding(30)
+        .frame(width: 350)
+    }
+}
+
 // MARK: - Shadow Provider Helper
 
 struct ShadowProvider: ViewModifier {
@@ -864,13 +1114,6 @@ struct ShadowProvider: ViewModifier {
     }
 }
 
-// MARK: - Channel Model
-
-struct Channel: Identifiable, Hashable {
-    let id: UInt32
-    let name: String
-    let icon: String
-}
 
 // MARK: - Chat Message Model
 

@@ -10,6 +10,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Aura.V1Alpha1;
+
 namespace Aura.Desktop.Services;
 
 /// <summary>
@@ -330,7 +332,7 @@ public class AuraNetworkClient : IAsyncDisposable
 
     public event Action<uint, uint, string>? OnUserJoined; // channelId, sessionId, name
     public event Action<uint, uint>? OnUserLeft;           // channelId, sessionId
-    public event Action<uint, List<(uint, string)>>? OnChannelState; // channelId, users
+    public event Action<ServerState>? OnServerSnapshot;
 
     private CancellationTokenSource? _listenCts;
 
@@ -467,31 +469,27 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleChannelStateAsync(CancellationToken ct)
     {
-        // Format: channel_id(4) + user_count(1) + [session_id(4) + name_len(1) + name(...)]...
-        var header = new byte[5];
-        await ReadExactAsync(header, ct);
+        // 1. Read Length (4 bytes)
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
+        
+        // 2. Read Packet
+        var packet = new byte[len];
+        await ReadExactAsync(packet, ct);
 
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(0, 4));
-        int userCount = header[4];
-
-        var users = new List<(uint, string)>();
-        for (int i = 0; i < userCount; i++)
+        try
         {
-            var userHeader = new byte[5];
-            await ReadExactAsync(userHeader, ct);
-
-            uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(userHeader.AsSpan(0, 4));
-            int nameLen = userHeader[4];
-
-            var nameBuf = new byte[nameLen];
-            await ReadExactAsync(nameBuf, ct);
-            string name = System.Text.Encoding.UTF8.GetString(nameBuf);
-
-            users.Add((sessionId, name));
+            // 3. Parse Protobuf ServerState
+            var snapshot = ServerState.Parser.ParseFrom(packet);
+            Console.WriteLine($"[AuraClient] ServerSnapshot: {snapshot.Channels.Count} channels, {snapshot.Profiles.Count} profiles");
+            
+            OnServerSnapshot?.Invoke(snapshot);
         }
-
-        Console.WriteLine($"[AuraClient] ChannelState: {users.Count} users in Channel {channelId}");
-        OnChannelState?.Invoke(channelId, users);
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to parse ServerSnapshot: {ex.Message}");
+        }
     }
 
     public async Task SendTextMessageAsync(uint channelId, string content, string messageId, string? replyToId = null)

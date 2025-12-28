@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +22,9 @@ const MSG_AUTH_RESPONSE: u8 = 0x04;
 const MSG_JOIN_CHANNEL: u8 = 0x10;
 const MSG_AUDIO_STREAM: u8 = 0x20;
 const MSG_TEXT_PACKET: u8 = 0x30;
+const MSG_CREATE_CHANNEL: u8 = 0x40;
+const MSG_UPDATE_CHANNEL: u8 = 0x41;
+const MSG_UPDATE_PROFILE: u8 = 0x42;
 
 // Security limits
 const MAX_PACKET_SIZE: usize = 64 * 1024; // 64KB
@@ -148,7 +151,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         info!("[{}] Session {} authenticated for user {}", remote, session_id, user_uuid);
         
         // Send initial state of all channels to the new user
-        state.send_all_channel_states(session_id).await;
+        state.send_server_snapshot(session_id).await;
 
         // Keepalive interval
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -355,6 +358,7 @@ async fn authenticate_client(
             let user_uuid = result.user_uuid.clone();
             let session_token = result.session_token.clone();
             let verified = result.verified;
+            let is_admin = result.is_admin;
 
             // Register session BEFORE sending auth response so we have a real session_id
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -367,13 +371,14 @@ async fn authenticate_client(
             response.put_u8(if success { 1 } else { 0 }); // success
             response.put_u32_le(session_id); // REAL session ID
 
-            debug!("[Auth] Sending AuthResponse: session_id={}, success={}, verified={}", session_id, success, verified);
+            debug!("[Auth] Sending AuthResponse: session_id={}, success={}, verified={}, is_admin={}", session_id, success, verified, is_admin);
 
             let token_bytes = session_token.as_bytes();
             response.put_u8(token_bytes.len() as u8);
             response.put_slice(token_bytes);
 
             response.put_u8(if verified { 1 } else { 0 });
+            response.put_u8(if is_admin { 1 } else { 0 }); // New field: is_admin
             response.put_u8(0); // no error message
 
             send.write_all(&response).await?;
@@ -414,6 +419,9 @@ struct ConnectionContext {
 impl ConnectionContext {
     async fn handle_client_message(&mut self, msg_type: u8) -> Result<bool> {
         match msg_type {
+            0x00 => {
+                // Keepalive ping, ignore
+            }
             MSG_JOIN_CHANNEL => {
                 // [0x10] [channel_id u32]
                 let mut buf = [0u8; 4];
@@ -439,47 +447,8 @@ impl ConnectionContext {
                     self.state.broadcast_user_joined(channel_id, self.session_id, profile.display_name).await;
                 }
                 
-                // Send channel state for ALL active channels so client sees everyone
-                // Iterate over all text groups that have members
-                for r in self.state.text_groups.iter() {
-                    let pid = *r.key();
-                    let tg = r.value();
-                    
-                    let members = tg.read().await.members.clone();
-                    if members.is_empty() {
-                        continue;
-                    }
-
-                    // Iterate DashSet by cloning keys
-                    let member_ids: Vec<u32> = members.iter().map(|k| *k.key()).collect();
-                    
-                    // Collect profiles
-                    let mut users = Vec::new();
-                    for member_id in member_ids {
-                        if let Some(p) = self.state.get_profile(member_id) {
-                            users.push((member_id, p.display_name.clone()));
-                        }
-                    }
-                    
-                    if users.is_empty() {
-                         continue;
-                    }
-                    
-                    // Send state msg: [0x13] [channel_id u32] [count u8] [users...]
-                    let mut msg = vec![0x13u8];
-                    msg.extend_from_slice(&pid.to_le_bytes());
-                    msg.push(users.len().min(255) as u8);
-                    
-                    for (sid, name) in users.iter().take(255) {
-                        msg.extend_from_slice(&sid.to_le_bytes());
-                        let name_bytes = name.as_bytes();
-                        msg.push(name_bytes.len().min(255) as u8);
-                        msg.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
-                    }
-                    
-                    self.send.write_all(&msg).await?;
-                    self.send.flush().await?;
-                }
+                // Note: Full state was already sent at connect time.
+                // Clients receive incremental updates (UserJoined/UserLeft) thereafter.
             }
             0x20 => { // MSG_AUDIO (legacy reliable path)
                  // Format: [20] [Length u32] [Payload...]
@@ -530,6 +499,122 @@ impl ConnectionContext {
                     }
                 }
             }
+            MSG_CREATE_CHANNEL => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::CreateChannelRequest::decode(&buf[..])?;
+                
+                // Only admins can create channels
+                if !self.state.db.is_admin(&self.user_uuid)? {
+                    let resp = aura_protocol::CreateChannelResponse {
+                        success: false,
+                        channel_id: 0,
+                        error_message: "Admin required".into(),
+                    };
+                    self.send_proto_response(0x40, resp).await?;
+                    return Ok(true);
+                }
+
+                match self.state.create_channel_persistent(req.name, req.comment, req.icon).await {
+                    Ok(id) => {
+                        let resp = aura_protocol::CreateChannelResponse {
+                            success: true,
+                            channel_id: id,
+                            error_message: String::new(),
+                        };
+                        self.send_proto_response(0x40, resp).await?;
+                    }
+                    Err(e) => {
+                        let resp = aura_protocol::CreateChannelResponse {
+                            success: false,
+                            channel_id: 0,
+                            error_message: e.to_string(),
+                        };
+                        self.send_proto_response(0x40, resp).await?;
+                    }
+                }
+            }
+            MSG_UPDATE_CHANNEL => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::UpdateChannelRequest::decode(&buf[..])?;
+
+                // Only admins can update channels
+                if !self.state.db.is_admin(&self.user_uuid)? {
+                    let resp = aura_protocol::MetadataUpdateResponse {
+                        success: false,
+                        error_message: "Admin required".into(),
+                    };
+                    self.send_proto_response(0x41, resp).await?;
+                    return Ok(true);
+                }
+
+                match self.state.update_channel_persistent(req.channel_id, req.name, req.comment, req.icon, req.position).await {
+                    Ok(_) => {
+                        let resp = aura_protocol::MetadataUpdateResponse {
+                            success: true,
+                            error_message: String::new(),
+                        };
+                        self.send_proto_response(0x41, resp).await?;
+                    }
+                    Err(e) => {
+                        let resp = aura_protocol::MetadataUpdateResponse {
+                            success: false,
+                            error_message: e.to_string(),
+                        };
+                        self.send_proto_response(0x41, resp).await?;
+                    }
+                }
+            }
+            MSG_UPDATE_PROFILE => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::UpdateProfile::decode(&buf[..])?;
+                
+                // Ensure they are only updating their own user_id
+                if let Some(profile) = req.profile {
+                    if profile.user_id != self.session_id {
+                        let resp = aura_protocol::MetadataUpdateResponse {
+                            success: false,
+                            error_message: "Cannot update other profiles".into(),
+                        };
+                        self.send_proto_response(0x42, resp).await?;
+                        return Ok(true);
+                    }
+
+                    match self.state.update_profile_persistent(self.session_id, profile).await {
+                        Ok(_) => {
+                            let resp = aura_protocol::MetadataUpdateResponse {
+                                success: true,
+                                error_message: String::new(),
+                            };
+                            self.send_proto_response(0x42, resp).await?;
+                        }
+                        Err(e) => {
+                            let resp = aura_protocol::MetadataUpdateResponse {
+                                success: false,
+                                error_message: e.to_string(),
+                            };
+                            self.send_proto_response(0x42, resp).await?;
+                        }
+                    }
+                }
+            }
             _ => {
                 // Unknown message
                 warn!("[{}] Unknown message type: 0x{:02x}", self.remote, msg_type);
@@ -570,16 +655,14 @@ impl ConnectionContext {
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
             }
-            ServiceMessage::ChannelState { channel_id, users } => {
-                let mut msg = vec![0x13u8];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
-                msg.push(users.len().min(255) as u8);
-                for user in users.iter().take(255) {
-                    msg.extend_from_slice(&user.session_id.to_le_bytes());
-                    let name_bytes = user.display_name.as_bytes();
-                    msg.push(name_bytes.len().min(255) as u8);
-                    msg.extend_from_slice(&name_bytes[..name_bytes.len().min(255)]);
-                }
+            ServiceMessage::ServerSnapshot(snapshot) => {
+                let mut payload = Vec::new();
+                snapshot.encode(&mut payload)?;
+                
+                let mut msg = vec![0x13u8]; // MSG_CHANNEL_STATE
+                msg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                msg.extend_from_slice(&payload);
+                
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
             }
@@ -592,6 +675,19 @@ impl ConnectionContext {
                 self.send.flush().await?;
             }
         }
+        Ok(())
+    }
+
+    async fn send_proto_response<M: Message>(&mut self, msg_type: u8, msg: M) -> Result<()> {
+        let mut payload = Vec::new();
+        msg.encode(&mut payload)?;
+        
+        let mut header = vec![msg_type];
+        header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        
+        self.send.write_all(&header).await?;
+        self.send.write_all(&payload).await?;
+        self.send.flush().await?;
         Ok(())
     }
 }

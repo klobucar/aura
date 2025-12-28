@@ -75,11 +75,37 @@ message JoinChannelGroups {
     UserMode mode = 2;
 }
 
-// Response with both group welcomes
+// Response with both group welcomes and full server state
 message ChannelGroupsWelcome {
     uint64 channel_id = 1;
     bytes voice_welcome = 2;  // MLS Welcome for voice group
     bytes text_welcome = 3;   // MLS Welcome for text group
+    ServerState server_state = 4; // Snapshot of all channels and users
+}
+
+// Full snapshot of server state
+message ServerState {
+    repeated ChannelInfo channels = 1;
+    repeated UserProfile profiles = 2; // Active users' profiles
+}
+
+// Information about a channel
+message ChannelInfo {
+    uint32 channel_id = 1;
+    string name = 2;
+    string comment = 3;        // Supports Markdown
+    ChannelIcon icon = 4;
+    int32 position = 5;        // For custom ordering
+    repeated uint32 user_ids = 6; // Active users in this channel
+}
+
+// Channel icon options
+message ChannelIcon {
+    oneof icon {
+        string emoji = 1;      // Single emoji string
+        string preset_id = 2;  // e.g. "controller", "music"
+        bytes custom_data = 3; // Base64 or raw bytes (limit: 128KB)
+    }
 }
 
 // ============================================================================
@@ -91,8 +117,8 @@ message ChannelGroupsWelcome {
 message UserProfile {
     uint32 user_id = 1;
     string display_name = 2;
-    string bio = 3;
-    string avatar_url = 4;
+    string bio = 3;           // Supports Markdown (limit: 512KB)
+    bytes avatar_data = 4;    // Base64 or raw bytes (limit: 128KB)
     bytes signature = 5;      // Ed25519 signature over serialized fields 1-4
     bytes signing_key = 6;    // User's Ed25519 public key for verification
 }
@@ -220,4 +246,37 @@ message EncryptedTextPacket {
     bytes nonce = 6;               // XChaCha20 nonce (24 bytes)
     bytes tag = 7;                 // Poly1305 tag (16 bytes)
     string reply_to_id = 8;        // Optional: message ID being replied to (plaintext for now)
+}
+
+// ============================================================================
+// Channel & Profile Management
+// ============================================================================
+
+// Request to create a new channel (Admin only)
+message CreateChannelRequest {
+    string name = 1;
+    string comment = 2;
+    ChannelIcon icon = 3;
+}
+
+// Response for channel creation
+message CreateChannelResponse {
+    bool success = 1;
+    uint32 channel_id = 2;
+    string error_message = 3;
+}
+
+// Request to update channel metadata (Admin only)
+message UpdateChannelRequest {
+    uint32 channel_id = 1;
+    optional string name = 2;
+    optional string comment = 3;
+    optional ChannelIcon icon = 4;
+    optional int32 position = 5;
+}
+
+// Generic metadata update response
+message MetadataUpdateResponse {
+    bool success = 1;
+    string error_message = 2;
 }
