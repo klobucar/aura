@@ -6,6 +6,13 @@
 use std::sync::{Mutex, RwLock};
 use bytes::Bytes;
 
+use aura_protocol::{
+    FastAudioPacket, UserProfile as ProtoProfile, ChannelInfo as ProtoChannel, 
+    ServerState as ProtoState, ChannelIcon as ProtoIcon, channel_icon,
+    CreateChannelRequest as ProtoCreateChannel, UpdateChannelRequest as ProtoUpdateChannel,
+    UpdateProfile as ProtoUpdateProfile,
+};
+use prost::Message;
 use crate::audio_pipeline::{
     AudioSender as InternalSender,
     AudioReceiver as InternalReceiver,
@@ -460,6 +467,102 @@ pub fn create_text_message_record(
     msg.into()
 }
 
+// =============================================================================
+// Metadata & State - UniFFI-compatible records
+// =============================================================================
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChannelIconRecord {
+    pub emoji: Option<String>,
+    pub preset_id: Option<String>,
+    pub custom_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChannelInfoRecord {
+    pub channel_id: u32,
+    pub name: String,
+    pub comment: String,
+    pub icon: Option<ChannelIconRecord>,
+    pub position: i32,
+    pub user_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UserProfileRecord {
+    pub user_id: u32,
+    pub display_name: String,
+    pub bio: String,
+    pub avatar_data: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub signing_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ServerStateRecord {
+    pub channels: Vec<ChannelInfoRecord>,
+    pub profiles: Vec<UserProfileRecord>,
+}
+
+#[uniffi::export]
+pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioError> {
+    use prost::Message;
+    let proto = ProtoState::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    
+    let channels = proto.channels.into_iter().map(|c| {
+        let icon = c.icon.and_then(|i| i.icon).map(|icon| {
+            match icon {
+                channel_icon::Icon::Emoji(e) => ChannelIconRecord { emoji: Some(e), preset_id: None, custom_data: None },
+                channel_icon::Icon::PresetId(p) => ChannelIconRecord { emoji: None, preset_id: Some(p), custom_data: None },
+                channel_icon::Icon::CustomData(d) => ChannelIconRecord { emoji: None, preset_id: None, custom_data: Some(d.to_vec()) },
+            }
+        });
+
+        ChannelInfoRecord {
+            channel_id: c.channel_id,
+            name: c.name,
+            comment: c.comment,
+            icon,
+            position: c.position,
+            user_ids: c.user_ids,
+        }
+    }).collect();
+
+    let profiles = proto.profiles.into_iter().map(|p| {
+        UserProfileRecord {
+            user_id: p.user_id,
+            display_name: p.display_name,
+            bio: p.bio,
+            avatar_data: p.avatar_data.to_vec(),
+            signature: p.signature.to_vec(),
+            signing_key: p.signing_key.to_vec(),
+        }
+    }).collect();
+
+    Ok(ServerStateRecord { channels, profiles })
+}
+
+#[uniffi::export]
+pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
+    use prost::Message;
+    let proto_profile = ProtoProfile {
+        user_id: profile.user_id,
+        display_name: profile.display_name,
+        bio: profile.bio,
+        avatar_data: profile.avatar_data.into(),
+        signature: profile.signature.into(),
+        signing_key: profile.signing_key.into(),
+    };
+    
+    let req = ProtoUpdateProfile {
+        profile: Some(proto_profile),
+    };
+    
+    let mut buf = Vec::new();
+    req.encode(&mut buf).unwrap();
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,4 +586,43 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].session_id, session_id);
     }
+}
+#[uniffi::export]
+pub fn encode_create_channel(name: String, comment: String, icon: Option<ChannelIconRecord>) -> Vec<u8> {
+    let proto_icon = icon.map(|i| ProtoIcon {
+        icon: i.emoji.map(|e| channel_icon::Icon::Emoji(e))
+            .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
+            .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
+    });
+
+    let req = ProtoCreateChannel {
+        name,
+        comment,
+        icon: proto_icon,
+    };
+    req.encode_to_vec()
+}
+
+#[uniffi::export]
+pub fn encode_update_channel(
+    channel_id: u32,
+    name: Option<String>,
+    comment: Option<String>,
+    icon: Option<ChannelIconRecord>,
+    position: Option<i32>,
+) -> Vec<u8> {
+    let proto_icon = icon.map(|i| ProtoIcon {
+        icon: i.emoji.map(|e| channel_icon::Icon::Emoji(e))
+            .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
+            .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
+    });
+
+    let req = ProtoUpdateChannel {
+        channel_id,
+        name,
+        comment,
+        icon: proto_icon,
+        position,
+    };
+    req.encode_to_vec()
 }

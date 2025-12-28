@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using Aura.Desktop.Services;
+using Aura.V1Alpha1;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -199,8 +200,8 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 Dispatcher.UIThread.Post(() => HandleUserJoined(cid, sid, name));
             _client.OnUserLeft += (cid, sid) => 
                 Dispatcher.UIThread.Post(() => HandleUserLeft(cid, sid));
-            _client.OnChannelState += (cid, users) => 
-                Dispatcher.UIThread.Post(() => HandleChannelState(cid, users));
+            _client.OnServerSnapshot += snapshot => 
+                Dispatcher.UIThread.Post(() => HandleServerSnapshot(snapshot));
             
             _client.OnTextMessage += (mid, sid, cid, content, reply) => 
                 Dispatcher.UIThread.Post(() => HandleTextMessage(mid, sid, cid, content, reply));
@@ -444,15 +445,59 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
     
-    private void HandleChannelState(uint channelId, List<(uint, string)> users)
+    private void HandleServerSnapshot(ServerState snapshot)
     {
-        var channel = GetOrCreateChannel(channelId);
-        channel.Users.Clear();
+        Console.WriteLine($"[ViewModel] Handling ServerSnapshot: {snapshot.Channels.Count} channels");
         
-        foreach (var (sid, name) in users)
+        // 1. Build a map of user profiles for easy lookup
+        var profileMap = snapshot.Profiles.ToDictionary(p => p.UserId, p => p);
+        
+        // 2. Sync channels
+        // We want to preserve the selected channel if possible
+        var previousSelectedId = SelectedChannel?.Id;
+        
+        Channels.Clear();
+        foreach (var chanInfo in snapshot.Channels.OrderBy(c => c.Position))
         {
-            if (_client != null && sid == _client.UserId) continue; // Skip self
-            channel.Users.Add(new User { Id = sid, Name = name });
+            var channel = new Channel 
+            { 
+                Id = chanInfo.ChannelId.ToString(), 
+                Name = chanInfo.Name,
+                IsExpanded = true
+            };
+            
+            foreach (var userId in chanInfo.UserIds)
+            {
+                if (_client != null && userId == _client.UserId) continue; // Skip self
+                
+                string name = $"User {userId}";
+                string comment = "";
+                
+                if (profileMap.TryGetValue(userId, out var profile))
+                {
+                    name = profile.DisplayName;
+                    comment = profile.Bio;
+                }
+                
+                channel.Users.Add(new User 
+                { 
+                    Id = userId, 
+                    Name = name,
+                    Comment = comment
+                });
+            }
+            Channels.Add(channel);
+        }
+        
+        // 3. Restore selection or pick first
+        if (previousSelectedId != null)
+        {
+            SelectedChannel = Channels.FirstOrDefault(c => c.Id == previousSelectedId);
+        }
+        
+        if (SelectedChannel == null && Channels.Count > 0)
+        {
+            SelectedChannel = Channels[0];
         }
     }
     

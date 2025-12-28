@@ -12,6 +12,9 @@ struct SettingsView: View {
     
     // Audio Quality Settings
     @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
+    @AppStorage("aecEnabled") private var aecEnabled = true
+    @AppStorage("webrtcNsEnabled") private var webrtcNsEnabled = false
+    @AppStorage("webrtcAgcEnabled") private var webrtcAgcEnabled = true
     @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
     
     var body: some View {
@@ -103,9 +106,68 @@ struct SettingsView: View {
                             }
                             .toggleStyle(.switch)
                             .onChange(of: noiseSuppressionEnabled) { _, newValue in
+                                if newValue && webrtcNsEnabled {
+                                    webrtcNsEnabled = false
+                                }
                                 NotificationCenter.default.post(
                                     name: .audioSettingsChanged,
-                                    object: ["noiseSuppression": newValue]
+                                    object: ["noiseSuppression": newValue, "webrtcNsEnabled": webrtcNsEnabled]
+                                )
+                            }
+                            
+                            Toggle(isOn: $webrtcNsEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("WebRTC Noise Suppression")
+                                        .font(.system(size: 14, weight: .medium))
+                                    Text("Standard WebRTC NS (Lighter than RNNoise)")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .onChange(of: webrtcNsEnabled) { _, newValue in
+                                if newValue && noiseSuppressionEnabled {
+                                    noiseSuppressionEnabled = false
+                                }
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["webrtcNsEnabled": newValue, "noiseSuppression": noiseSuppressionEnabled]
+                                )
+                            }
+                            
+                            Divider().opacity(0.2)
+                            
+                            Toggle(isOn: $aecEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Echo Cancellation (AEC)")
+                                        .font(.system(size: 14, weight: .medium))
+                                    Text("Removes echo from speakers/feedback")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .onChange(of: aecEnabled) { _, newValue in
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["aecEnabled": newValue]
+                                )
+                            }
+                            
+                            Toggle(isOn: $webrtcAgcEnabled) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Auto Gain Control (AGC)")
+                                        .font(.system(size: 14, weight: .medium))
+                                    Text("Normalize microphone volume automatically")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .onChange(of: webrtcAgcEnabled) { _, newValue in
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["webrtcAgcEnabled": newValue]
                                 )
                             }
                             

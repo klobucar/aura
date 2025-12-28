@@ -4,9 +4,11 @@
 
 use crate::auth::AuthService;
 use crate::config::{Config, VerificationMode};
-use crate::db::{Database, User};
+use crate::db::Database;
 use aura_protocol::{
     FastAudioPacket, UserProfile, MlsEnvelope, MlsGroupType, mls_envelope, EncryptedTextPacket,
+    ServerState as ProtoServerState, ChannelInfo as ProtoChannelInfo, ChannelIcon as ProtoChannelIcon,
+    channel_icon,
 };
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -61,16 +63,24 @@ pub enum ServiceMessage {
         channel_id: u32,
         session_id: u32,
     },
-    /// Full channel state - sent to new joiners
-    ChannelState {
-        channel_id: u32,
-        users: Vec<ChannelUser>,
-    },
+    /// Full snapshot of server state - sent to new joiners
+    ServerSnapshot(ProtoServerState),
     /// Relay encrypted text message to channel members
     RelayText(EncryptedTextPacket),
 }
 
-/// Information about a user in a channel
+/// Static metadata for a channel (persisted in DB)
+#[derive(Debug, Clone)]
+pub struct ChannelMetadata {
+    pub id: u32,
+    pub name: String,
+    pub comment: String,
+    pub icon_type: i32,
+    pub icon_data: Vec<u8>,
+    pub position: i32,
+}
+
+/// Information about a user in a channel.
 #[derive(Debug, Clone)]
 pub struct ChannelUser {
     pub session_id: u32,
@@ -117,6 +127,9 @@ pub struct ServerState {
     pub voice_groups: Arc<DashMap<u32, Arc<RwLock<VoiceGroup>>>>,
     pub text_groups: Arc<DashMap<u32, Arc<RwLock<TextGroup>>>>,
 
+    // Channel metadata (synced from DB)
+    pub channel_metadata: Arc<DashMap<u32, ChannelMetadata>>,
+
     // User profiles (runtime, synced from DB)
     pub profiles: Arc<DashMap<u32, UserProfile>>,
 
@@ -137,16 +150,32 @@ impl ServerState {
     pub fn new(db: Arc<Database>, config: Config) -> Self {
         let auth = Arc::new(AuthService::new(Arc::clone(&db), config.clone()));
 
-        Self {
+        let state = Self {
             voice_groups: Arc::new(DashMap::new()),
             text_groups: Arc::new(DashMap::new()),
+            channel_metadata: Arc::new(DashMap::new()),
             profiles: Arc::new(DashMap::new()),
             sessions: Arc::new(DashMap::new()),
             session_counter: Arc::new(std::sync::atomic::AtomicU32::new(1)),
-            db,
-            config,
+            db: db.clone(),
+            config: config.clone(),
             auth,
+        };
+
+        // Load channels from DB
+        match db.get_all_channels() {
+            Ok(channels) => {
+                for (id, name, comment, i_type, i_data, pos) in channels {
+                    state.channel_metadata.insert(id, ChannelMetadata {
+                        id, name, comment, icon_type: i_type, icon_data: i_data, position: pos
+                    });
+                    state.create_channel(id);
+                }
+            }
+            Err(e) => warn!("Failed to load channels from DB: {}", e),
         }
+
+        state
     }
 
     /// Allocate a new session ID.
@@ -172,13 +201,25 @@ impl ServerState {
         // Populate profile cache immediately
         match self.db.find_user_by_uuid(&user_uuid) {
             Ok(Some(user)) => {
+                let mut bio = String::new();
+                let mut avatar_data = vec![];
+                let mut signature = vec![];
+                let mut signing_key = user.ed25519_public_key.to_vec();
+
+                if let Ok(Some((b, a, s, sk))) = self.db.get_user_profile(&user_uuid) {
+                    bio = b;
+                    avatar_data = a;
+                    signature = s;
+                    signing_key = sk;
+                }
+
                 let profile = UserProfile {
                     user_id: session_id,
                     display_name: user.display_name.clone(),
-                    bio: String::new(), // TODO: Store bio in DB
-                    avatar_url: String::new(), // TODO: Store in DB
-                    signature: vec![], // TODO: Store in DB
-                    signing_key: user.ed25519_public_key.to_vec(),
+                    bio,
+                    avatar_data,
+                    signature,
+                    signing_key,
                 };
                 self.profiles.insert(session_id, profile);
                 info!("Registered session {} for user {} (Profile cached)", session_id, user.display_name);
@@ -259,49 +300,65 @@ impl ServerState {
 
     /// Broadcast that a user joined a channel to ALL connected users.
     /// Also sends the full channel state to the new joiner.
+    /// Generate a full snapshot of the server state for a new connection.
+    pub async fn get_server_snapshot(&self) -> ProtoServerState {
+        let mut channels = Vec::new();
+        for meta_entry in self.channel_metadata.iter() {
+            let meta = meta_entry.value();
+            let mut user_ids = Vec::new();
+            
+            if let Some(group_lock) = self.voice_groups.get(&meta.id) {
+                let group = group_lock.read().await;
+                user_ids = group.members.iter().map(|id| *id).collect();
+            }
+
+            let icon = match meta.icon_type {
+                1 => Some(ProtoChannelIcon {
+                    icon: Some(channel_icon::Icon::Emoji(String::from_utf8_lossy(&meta.icon_data).into())),
+                }),
+                2 => Some(ProtoChannelIcon {
+                    icon: Some(channel_icon::Icon::PresetId(String::from_utf8_lossy(&meta.icon_data).into())),
+                }),
+                3 => Some(ProtoChannelIcon {
+                    icon: Some(channel_icon::Icon::CustomData(meta.icon_data.clone().into())),
+                }),
+                _ => None,
+            };
+
+            channels.push(ProtoChannelInfo {
+                channel_id: meta.id,
+                name: meta.name.clone(),
+                comment: meta.comment.clone(),
+                icon,
+                position: meta.position,
+                user_ids,
+            });
+        }
+
+        let profiles: Vec<UserProfile> = self.profiles.iter().map(|p| p.value().clone()).collect();
+        
+        info!("[Snapshot] Sending {} channels and {} profiles", channels.len(), profiles.len());
+
+        ProtoServerState { channels, profiles }
+    }
+
+    /// Broadcast that a user joined a channel to ALL connected users.
     pub async fn broadcast_user_joined(&self, channel_id: u32, session_id: u32, display_name: String) {
-        // Get all members of the voice group
-        if let Some(group_lock) = self.voice_groups.get(&channel_id) {
-            let group = group_lock.read().await;
-            
-            // Collect current users for the new joiner (excluding themselves)
-            let mut users = Vec::new();
-            for member_id in group.members.iter() {
-                if *member_id != session_id {  // Exclude the joiner
-                    if let Some(sess) = self.sessions.get(&*member_id) {
-                        // Look up display name from DB
-                        let name = self.db.find_user_by_uuid(&sess.user_uuid)
-                            .ok()
-                            .flatten()
-                            .map(|u| u.display_name)
-                            .unwrap_or_else(|| format!("User {}", *member_id));
-                        
-                        users.push(ChannelUser {
-                            session_id: *member_id,
-                            display_name: name,
-                        });
-                    }
-                }
-            }
-            
-            // Broadcast UserJoined to ALL connected users (not just in this channel)
-            for sess in self.sessions.iter() {
-                if *sess.key() != session_id {
-                    let _ = sess.sender.send(ServiceMessage::UserJoined {
-                        channel_id,
-                        session_id,
-                        display_name: display_name.clone(),
-                    });
-                }
-            }
-            
-            // Send full channel state to the new joiner
-            if let Some(new_sess) = self.sessions.get(&session_id) {
-                let _ = new_sess.sender.send(ServiceMessage::ChannelState {
+        // Broadcast UserJoined to ALL connected users
+        for sess in self.sessions.iter() {
+            if *sess.key() != session_id {
+                let _ = sess.sender.send(ServiceMessage::UserJoined {
                     channel_id,
-                    users,
+                    session_id,
+                    display_name: display_name.clone(),
                 });
             }
+        }
+        
+        // Send full server snapshot to the new joiner
+        if let Some(new_sess) = self.sessions.get(&session_id) {
+            let snapshot = self.get_server_snapshot().await;
+            let _ = new_sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
         }
     }
 
@@ -318,39 +375,11 @@ impl ServerState {
         }
     }
 
-    /// Send the state of all channels to a newly connected user
-    pub async fn send_all_channel_states(&self, session_id: u32) {
+    /// Send the full server state snapshot to a newly connected user
+    pub async fn send_server_snapshot(&self, session_id: u32) {
         if let Some(sess) = self.sessions.get(&session_id) {
-            // Iterate through all voice groups
-            for group_entry in self.voice_groups.iter() {
-                let channel_id = *group_entry.key();
-                let group = group_entry.value().read().await;
-                
-                // Collect users in this channel
-                let mut users = Vec::new();
-                for member_id in group.members.iter() {
-                    if let Some(member_sess) = self.sessions.get(&*member_id) {
-                        let name = self.db.find_user_by_uuid(&member_sess.user_uuid)
-                            .ok()
-                            .flatten()
-                            .map(|u| u.display_name)
-                            .unwrap_or_else(|| format!("User {}", *member_id));
-                        
-                        users.push(ChannelUser {
-                            session_id: *member_id,
-                            display_name: name,
-                        });
-                    }
-                }
-                
-                // Send channel state if there are users
-                if !users.is_empty() {
-                    let _ = sess.sender.send(ServiceMessage::ChannelState {
-                        channel_id,
-                        users,
-                    });
-                }
-            }
+            let snapshot = self.get_server_snapshot().await;
+            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
         }
     }
 
@@ -572,6 +601,98 @@ impl ServerState {
     /// Get a user profile by ID.
     pub fn get_profile(&self, user_id: u32) -> Option<UserProfile> {
         self.profiles.get(&user_id).map(|p| p.clone())
+    }
+
+    // --- Channel & Profile Management ---
+
+    /// Create a new channel persistently.
+    pub async fn create_channel_persistent(&self, name: String, comment: String, icon: Option<ProtoChannelIcon>) -> Result<u32> {
+        let (icon_type, icon_data) = self.convert_proto_icon(icon);
+        
+        let channel_id = self.db.upsert_channel(None, &name, &comment, icon_type, &icon_data, 0)?;
+        
+        // Update in-memory metadata
+        self.channel_metadata.insert(channel_id, ChannelMetadata {
+            id: channel_id,
+            name,
+            comment,
+            icon_type,
+            icon_data,
+            position: 0,
+        });
+
+        // Initialize MLS groups
+        self.create_channel(channel_id);
+
+        // Broadcast full state update to everyone
+        let snapshot = self.get_server_snapshot().await;
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+        }
+
+        Ok(channel_id)
+    }
+
+    /// Update channel metadata persistently.
+    pub async fn update_channel_persistent(&self, channel_id: u32, name: Option<String>, comment: Option<String>, icon: Option<ProtoChannelIcon>, position: Option<i32>) -> Result<()> {
+        let mut meta = self.channel_metadata.get_mut(&channel_id).ok_or_else(|| anyhow!("Channel not found"))?;
+        
+        if let Some(n) = name { meta.name = n; }
+        if let Some(c) = comment { meta.comment = c; }
+        if let Some(i) = icon {
+            let (t, d) = self.convert_proto_icon(Some(i));
+            meta.icon_type = t;
+            meta.icon_data = d;
+        }
+        if let Some(p) = position { meta.position = p; }
+
+        // Persist to DB
+        self.db.upsert_channel(Some(channel_id), &meta.name, &meta.comment, meta.icon_type, &meta.icon_data, meta.position)?;
+        
+        drop(meta); // Release lock
+
+        // Broadcast full state update
+        let snapshot = self.get_server_snapshot().await;
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+        }
+
+        Ok(())
+    }
+
+    /// Update user profile persistently.
+    pub async fn update_profile_persistent(&self, session_id: u32, profile: UserProfile) -> Result<()> {
+        let session = self.sessions.get(&session_id).ok_or_else(|| anyhow!("Session not found"))?;
+        
+        // Update DB
+        self.db.upsert_user_profile(
+            &session.user_uuid, 
+            &profile.bio, 
+            &profile.avatar_data, 
+            &profile.signature, 
+            &profile.signing_key
+        )?;
+
+        // Update in-memory cache
+        self.profiles.insert(session_id, profile);
+
+        // Broadcast full state update
+        let snapshot = self.get_server_snapshot().await;
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+        }
+
+        Ok(())
+    }
+
+    /// Helper to convert ProtoChannelIcon to (type, data)
+    fn convert_proto_icon(&self, icon: Option<ProtoChannelIcon>) -> (i32, Vec<u8>) {
+        match icon.and_then(|i| i.icon) {
+            Some(channel_icon::Icon::Emoji(e)) => (1, e.into_bytes()),
+            Some(channel_icon::Icon::PresetId(p)) => (2, p.into_bytes()),
+            Some(channel_icon::Icon::CustomData(d)) => (3, d.to_vec()),
+            None => (0, vec![]),
+        }
     }
 
     // --- Hot Path Media Relay ---

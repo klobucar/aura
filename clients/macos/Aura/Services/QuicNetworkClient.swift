@@ -13,6 +13,7 @@ public class QuicNetworkClient {
     
     public var isConnected = false
     public var isAuthenticated = false
+    public var isAdmin = false
     public var connectionStatus = "Disconnected"
     public var userId: UInt32 = 0
     public var sessionToken: String?
@@ -21,6 +22,12 @@ public class QuicNetworkClient {
     
     /// Users by channel ID (tracks all channels, not just current)
     public var usersByChannel: [UInt32: [ChannelUser]] = [:]
+    
+    /// All channels on the server
+    public var channels: [ChannelModel] = []
+    
+    /// All user profiles by session ID
+    public var profiles: [UInt32: UserProfileRecord] = [:]
     
     /// Received chat messages (populated by incoming text packets)
     public var receivedMessages: [ReceivedTextMessage] = []
@@ -71,7 +78,11 @@ public class QuicNetworkClient {
     private static let MSG_USER_JOINED: UInt8 = 0x11
     private static let MSG_USER_LEFT: UInt8 = 0x12
     private static let MSG_CHANNEL_STATE: UInt8 = 0x13
+    private static let MSG_AUDIO_STREAM: UInt8 = 0x20
     private static let MSG_TEXT_PACKET: UInt8 = 0x30
+    private static let MSG_CREATE_CHANNEL: UInt8 = 0x40
+    private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
+    private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
@@ -111,6 +122,21 @@ public class QuicNetworkClient {
         if let enabled = settings["noiseSuppression"] as? Bool {
             audioSender?.setNoiseSuppressionEnabled(enabled: enabled)
             print("[QuicClient] Noise suppression: \(enabled ? "enabled" : "disabled")")
+        }
+        
+        if let enabled = settings["aecEnabled"] as? Bool {
+            audioSender?.setWebrtcAecEnabled(enabled: enabled)
+            print("[QuicClient] AEC: \(enabled ? "enabled" : "disabled")")
+        }
+        
+        if let enabled = settings["webrtcNsEnabled"] as? Bool {
+            audioSender?.setWebrtcNsEnabled(enabled: enabled)
+            print("[QuicClient] WebRTC NS: \(enabled ? "enabled" : "disabled")")
+        }
+        
+        if let enabled = settings["webrtcAgcEnabled"] as? Bool {
+            audioSender?.setWebrtcAgcEnabled(enabled: enabled)
+            print("[QuicClient] AGC: \(enabled ? "enabled" : "disabled")")
         }
         
         if let ms = settings["jitterBuffer"] as? Int {
@@ -352,39 +378,48 @@ public class QuicNetworkClient {
         print("[QuicClient] Sending auth request (\(authReq.count) bytes)...")
         try await send(data: authReq, on: stream)
         
-        // Step 4: Receive auth response
-        print("[QuicClient] Waiting for auth response...")
-        let authResp = try await receive(on: stream, minimumLength: 7, maximumLength: 256)
+        // Step 4: Receive auth response header (7 bytes)
+        print("[QuicClient] Waiting for auth response header...")
+        let header = try await receive(on: stream, minimumLength: 7, maximumLength: 7)
         
-        guard authResp.count >= 7, authResp[0] == Self.MSG_AUTH_RESPONSE else {
-            throw QuicClientError.protocolError("Invalid auth response")
+        guard header[0] == Self.MSG_AUTH_RESPONSE else {
+            throw QuicClientError.protocolError("Invalid auth response header: expected 0x04, got 0x\(String(format: "%02X", header[0]))")
         }
         
-        let success = authResp[1] != 0
-        let responseUserId = authResp.subdata(in: 2..<6).withUnsafeBytes { $0.load(as: UInt32.self) }
+        let success = header[1] != 0
+        let responseUserId = header.subdata(in: 2..<6).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        let tokenLen = Int(header[6])
         
-        var pos = 6
-        let tokenLen = Int(authResp[pos])
-        pos += 1
-        let token = String(data: authResp.subdata(in: pos..<(pos + tokenLen)), encoding: .utf8) ?? ""
-        pos += tokenLen
+        // Read token
+        var finalToken = ""
+        if tokenLen > 0 {
+            let tokenData = try await receive(on: stream, minimumLength: tokenLen, maximumLength: tokenLen)
+            finalToken = String(data: tokenData, encoding: .utf8) ?? ""
+        }
         
-        let verified = authResp[pos] != 0
-        pos += 1
+        // Read the rest of fixed fields: verified (1) + isAdmin (1) + errorLen (1)
+        let restFixed = try await receive(on: stream, minimumLength: 3, maximumLength: 3)
+        let verified = restFixed[0] != 0
+        let isAdmin = restFixed[1] != 0
+        let errorLen = Int(restFixed[2])
         
-        let errorLen = Int(authResp[pos])
-        pos += 1
-        let errorMsg = errorLen > 0 ? String(data: authResp.subdata(in: pos..<(pos + errorLen)), encoding: .utf8) : nil
+        // Read error message
+        var errorMsg: String? = nil
+        if errorLen > 0 {
+            let errorData = try await receive(on: stream, minimumLength: errorLen, maximumLength: errorLen)
+            errorMsg = String(data: errorData, encoding: .utf8)
+        }
         
-        print("[QuicClient] Auth response: success=\(success), userId=\(responseUserId), token=\(token.prefix(8))..., verified=\(verified)")
+        print("[QuicClient] Auth response: success=\(success), userId=\(responseUserId), token=\(finalToken.prefix(8))..., verified=\(verified), isAdmin=\(isAdmin)")
         
         guard success else {
             throw QuicClientError.authenticationFailed(errorMsg ?? "Unknown error")
         }
         
         self.userId = responseUserId
-        self.sessionToken = token
+        self.sessionToken = finalToken
         self.isAuthenticated = true
+        self.isAdmin = isAdmin
         
         // Use userId as sessionId immediately (server sends the real session ID now)
         self.sessionId = responseUserId
@@ -395,7 +430,7 @@ public class QuicNetworkClient {
         
         // Initialize audio pipeline with session token as key (temporary POC)
         // In production, this would use MLS derived key
-        if let tokenData = token.data(using: .utf8) {
+        if let tokenData = finalToken.data(using: .utf8) {
             // Pad/truncate to 32 bytes for ChaCha20 key
             var keyData = Data(count: 32)
             let copyCount = min(tokenData.count, 32)
@@ -416,11 +451,19 @@ public class QuicNetworkClient {
                 
                 // Apply saved audio settings
                 let noiseSuppressionEnabled = UserDefaults.standard.object(forKey: "noiseSuppressionEnabled") as? Bool ?? true
+                let aecEnabled = UserDefaults.standard.bool(forKey: "aecEnabled")
+                let webrtcNsEnabled = UserDefaults.standard.bool(forKey: "webrtcNsEnabled")
+                let webrtcAgcEnabled = UserDefaults.standard.object(forKey: "webrtcAgcEnabled") as? Bool ?? true
                 let jitterBufferMs = UserDefaults.standard.object(forKey: "jitterBufferMs") as? Int ?? 20
                 
                 audioSender?.setNoiseSuppressionEnabled(enabled: noiseSuppressionEnabled)
+                audioSender?.setWebrtcAecEnabled(enabled: aecEnabled)
+                audioSender?.setWebrtcNsEnabled(enabled: webrtcNsEnabled)
+                audioSender?.setWebrtcAgcEnabled(enabled: webrtcAgcEnabled)
+                
                 audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
-                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), Jitter=\(jitterBufferMs)ms")
+                
+                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms")
                 
                 // Initialize text crypto with same DAVE key
                 textCrypto = try TextCryptoWrapper(key: keyData)
@@ -446,6 +489,84 @@ public class QuicNetworkClient {
             
             // Start listening for server messages (presence updates)
             startListening()
+        }
+    }
+    
+    /// Update user profile
+    public func updateProfile(bio: String, avatarData: Data) async {
+        guard let sessionId = self.sessionId else { return }
+        
+        let record = UserProfileRecord(
+            userId: sessionId,
+            displayName: profiles[sessionId]?.displayName ?? "Unknown",
+            bio: bio,
+            avatarData: avatarData,
+            signature: Data(), // Server handles signature for now or we do it in Rust
+            signingKey: Data()
+        )
+        
+        let payload = encodeUpdateProfile(profile: record)
+        
+        // Send MSG_UPDATE_PROFILE (0x42)
+        let mutStream: NWConnection? = await MainActor.run { self.controlStream }
+        guard let stream = mutStream else { return }
+        
+        var msg = Data([Self.MSG_UPDATE_PROFILE])
+        let len = UInt32(payload.count).littleEndian
+        msg.append(Data(withUnsafeBytes(of: len) { Array($0) }))
+        msg.append(Data(payload))
+        
+        do {
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Profile update sent")
+        } catch {
+            print("[QuicClient] Failed to send profile update: \(error)")
+        }
+    }
+    
+    /// Create a new channel (Admin only)
+    public func createChannel(name: String, comment: String, emoji: String? = nil, presetId: String? = nil) async {
+        guard isAdmin else { return }
+        
+        let icon = ChannelIconRecord(emoji: emoji, presetId: presetId, customData: nil)
+        let payload = encodeCreateChannel(name: name, comment: comment, icon: icon)
+        
+        let mutStream: NWConnection? = await MainActor.run { self.controlStream }
+        guard let stream = mutStream else { return }
+        
+        var msg = Data([Self.MSG_CREATE_CHANNEL]) // MSG_CREATE_CHANNEL
+        let len = UInt32(payload.count).littleEndian
+        msg.append(Data(withUnsafeBytes(of: len) { Array($0) }))
+        msg.append(Data(payload))
+        
+        do {
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Create channel request sent")
+        } catch {
+            print("[QuicClient] Failed to send create channel request: \(error)")
+        }
+    }
+    
+    /// Update channel metadata (Admin only)
+    public func updateChannel(id: UInt32, name: String? = nil, comment: String? = nil, emoji: String? = nil, presetId: String? = nil, position: Int32? = nil) async {
+        guard isAdmin else { return }
+        
+        let icon = (emoji != nil || presetId != nil) ? ChannelIconRecord(emoji: emoji, presetId: presetId, customData: nil) : nil
+        let payload = encodeUpdateChannel(channelId: id, name: name, comment: comment, icon: icon, position: position)
+        
+        let mutStream: NWConnection? = await MainActor.run { self.controlStream }
+        guard let stream = mutStream else { return }
+        
+        var msg = Data([Self.MSG_UPDATE_CHANNEL]) // MSG_UPDATE_CHANNEL
+        let len = UInt32(payload.count).littleEndian
+        msg.append(Data(withUnsafeBytes(of: len) { Array($0) }))
+        msg.append(Data(payload))
+        
+        do {
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Update channel request sent")
+        } catch {
+            print("[QuicClient] Failed to send update channel request: \(error)")
         }
     }
     
@@ -548,7 +669,7 @@ public class QuicNetworkClient {
             await handleUserLeft(stream: stream)
             
         case Self.MSG_CHANNEL_STATE: // 0x13
-            await handleChannelState(stream: stream)
+            await handleServerState(stream: stream)
             
         case 0x20: // MSG_AUDIO - audio packet from server
             await handleAudioPacket(stream: stream)
@@ -660,67 +781,54 @@ public class QuicNetworkClient {
         }
     }
     
-    /// Handle ChannelState message
-    private func handleChannelState(stream: NWConnection) async {
+    /// Handle ServerState snapshot (Protobuf via UniFFI)
+    private func handleServerState(stream: NWConnection) async {
         do {
-            // Read channel_id (4 bytes) + user_count (1 byte)
-            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let headerHex = header.map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("[QuicClient] ChannelState header bytes: \(headerHex)")
+            // Read length (4 bytes)
+            let lengthData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let length = lengthData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             
-            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let userCount = Int(header[4])
+            print("[QuicClient] Receiving ServerState: \(length) bytes")
             
-            print("[QuicClient] ChannelState for channel \(channelId): \(userCount) users")
+            // Read payload
+            let payload = try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
             
-            var users: [ChannelUser] = []
+            // Decode via Rust core
+            let snapshot = try decodeServerState(data: payload)
             
-            for i in 0..<userCount {
-                // Read session_id (4 bytes) + name_len (1 byte)
-                let userHeader = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-                let userHeaderHex = userHeader.map { String(format: "%02X", $0) }.joined(separator: " ")
-                print("[QuicClient]   User \(i+1) header: \(userHeaderHex)")
+            // Update models
+            await MainActor.run {
+                self.channels = snapshot.channels.map { ChannelModel(record: $0) }
                 
-                let sessionId = userHeader.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-                let nameLen = Int(userHeader[4])
+                var newProfiles: [UInt32: UserProfileRecord] = [:]
+                for p in snapshot.profiles {
+                    newProfiles[p.userId] = p
+                }
+                self.profiles = newProfiles
                 
-                print("[QuicClient]   Session ID: \(sessionId), Name length: \(nameLen)")
-                
-                // Read display name
-                let nameData = try await receive(on: stream, minimumLength: nameLen, maximumLength: nameLen)
-                let nameHex = nameData.map { String(format: "%02X", $0) }.joined(separator: " ")
-                print("[QuicClient]   Name bytes: \(nameHex)")
-                
-                let displayName = String(data: nameData, encoding: .utf8) ?? "Unknown"
-                
-                // Don't add ourselves to the list
-                if sessionId != self.sessionId {
-                    users.append(ChannelUser(sessionId: sessionId, displayName: displayName))
-                    print("[QuicClient]   User \(i+1): \(displayName) (session \(sessionId))")
+                // Re-map usersByChannel
+                var newUserMapping: [UInt32: [ChannelUser]] = [:]
+                for c in snapshot.channels {
+                    let users = c.userIds.compactMap { sid -> ChannelUser? in
+                        guard let p = self.profiles[sid] else { return nil }
+                        return ChannelUser(sessionId: sid, displayName: p.displayName, bio: p.bio, avatarData: Data(p.avatarData))
+                    }
+                    newUserMapping[c.channelId] = users
                     
-                    // Add to audio receiver for decryption
+                    // Add listeners for decryption
                     if let receiver = self.audioReceiver {
-                        let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
-                        do {
-                            try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: 0)
-                            print("[QuicClient]   Added audio sender \(sessionId)")
-                        } catch {
-                            print("[QuicClient]   Failed to add audio sender: \(error)")
+                        for sid in c.userIds where sid != self.sessionId {
+                            let keyData = Data(repeating: 0x42, count: 32) // TODO: Derive from MLS
+                            try? receiver.addSender(sessionId: sid, key: keyData, epochHint: 0)
                         }
                     }
-                } else {
-                    print("[QuicClient]   Skipping self in ChannelState: \(displayName) (session \(sessionId))")
                 }
-            }
-            
-            // Replace channel's user list (@Observable tracks this automatically)
-            await MainActor.run {
-                usersByChannel[channelId] = users
-                print("[QuicClient] Updated usersByChannel[\(channelId)] with \(users.count) users")
-                print("[QuicClient] Total channels tracked: \(usersByChannel.keys.sorted())")
+                self.usersByChannel = newUserMapping
+                
+                print("[QuicClient] ServerState sync complete: \(self.channels.count) channels, \(self.profiles.count) profiles")
             }
         } catch {
-            print("[QuicClient] Failed to parse ChannelState: \(error)")
+            print("[QuicClient] Failed to parse ServerState: \(error)")
         }
     }
     
@@ -946,15 +1054,26 @@ public class QuicNetworkClient {
             
             // Pop mixed audio from Rust core (handles PLC/DRED/talking detection internals)
             if let result = receiver.popMixed() {
-                print("[QuicClient] ✓ Playing mixed audio buffer")
-                audioPlayback.enqueue(pcm: result.pcm)
-                
-                // Update talking indicators using speaker metadata
-                let now = Date()
-                for sessionId in result.activeSpeakers {
-                    lastSpeakerActivity[sessionId] = now
+                if !result.activeSpeakers.isEmpty {
+                    // Update talking indicators using speaker metadata
+                    for sessionId in result.activeSpeakers {
+                        activeSpeakers.insert(sessionId)
+                        
+                        // Cancel existing timer for this speaker
+                        speakerTimers[sessionId]?.cancel()
+                        
+                        // Set a new timer to clear the indicator after 500ms of silence
+                        speakerTimers[sessionId] = Task { [weak self] in
+                            try? await Task.sleep(nanoseconds: 500 * 1_000_000)
+                            if !Task.isCancelled {
+                                self?.activeSpeakers.remove(sessionId)
+                                self?.speakerTimers.removeValue(forKey: sessionId)
+                            }
+                        }
+                    }
                 }
-                // This is a simplification - ideally we'd track which senders contributed to this mix
+                
+                audioPlayback.enqueue(pcm: result.pcm)
             }
         } catch {
             print("[QuicClient] Audio processing error: \(error)")
@@ -1125,6 +1244,31 @@ public class QuicNetworkClient {
             }
         }
     }
+    
+    private func handleAudioSettingsChanged(_ notification: Notification) {
+        guard let settings = notification.object as? [String: Any] else { return }
+        
+        if let ns = settings["noiseSuppression"] as? Bool {
+            audioSender?.setNoiseSuppressionEnabled(enabled: ns)
+            print("[QuicClient] Runtime: RNNoise=\(ns)")
+        }
+        if let aec = settings["aecEnabled"] as? Bool {
+            audioSender?.setWebrtcAecEnabled(enabled: aec)
+            print("[QuicClient] Runtime: AEC=\(aec)")
+        }
+        if let wns = settings["webrtcNsEnabled"] as? Bool {
+            audioSender?.setWebrtcNsEnabled(enabled: wns)
+            print("[QuicClient] Runtime: WebRTC-NS=\(wns)")
+        }
+        if let agc = settings["webrtcAgcEnabled"] as? Bool {
+            audioSender?.setWebrtcAgcEnabled(enabled: agc)
+            print("[QuicClient] Runtime: AGC=\(agc)")
+        }
+        if let jitter = settings["jitterBuffer"] as? Int {
+            audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitter))
+            print("[QuicClient] Runtime: Jitter=\(jitter)ms")
+        }
+    }
 }
 
 // MARK: - Errors
@@ -1155,10 +1299,46 @@ public enum QuicClientError: Error, LocalizedError {
 public struct ChannelUser: Identifiable, Hashable {
     public let id: UInt32  // session_id
     public let displayName: String
+    public let bio: String
+    public let avatarData: Data?
     
-    public init(sessionId: UInt32, displayName: String) {
+    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil) {
         self.id = sessionId
         self.displayName = displayName
+        self.bio = bio
+        self.avatarData = avatarData
+    }
+}
+
+// MARK: - Channel Model
+
+public struct ChannelModel: Identifiable, Hashable {
+    public let id: UInt32
+    public let name: String
+    public let comment: String
+    public let iconEmoji: String?
+    public let iconPresetId: String?
+    public let iconCustomData: Data?
+    public let position: Int32
+    
+    public init(id: UInt32, name: String, comment: String = "", iconEmoji: String? = nil, iconPresetId: String? = nil, iconCustomData: Data? = nil, position: Int32 = 0) {
+        self.id = id
+        self.name = name
+        self.comment = comment
+        self.iconEmoji = iconEmoji
+        self.iconPresetId = iconPresetId
+        self.iconCustomData = iconCustomData
+        self.position = position
+    }
+    
+    public init(record: ChannelInfoRecord) {
+        self.id = record.channelId
+        self.name = record.name
+        self.comment = record.comment
+        self.iconEmoji = record.icon?.emoji
+        self.iconPresetId = record.icon?.presetId
+        self.iconCustomData = record.icon?.customData
+        self.position = record.position
     }
 }
 

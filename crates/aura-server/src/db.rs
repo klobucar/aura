@@ -2,7 +2,7 @@
 //!
 //! Handles user identities, admins, TOFU key pinning, and session tracking.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Current database schema version.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Thread-safe database handle.
 pub type DbHandle = Arc<Mutex<Connection>>;
@@ -33,6 +33,7 @@ pub struct AdminPermissions {
     pub verify_users: bool,
     pub ban_users: bool,
     pub grant_admin: bool,
+    pub manage_channels: bool,
 }
 
 impl AdminPermissions {
@@ -42,6 +43,7 @@ impl AdminPermissions {
             verify_users: true,
             ban_users: true,
             grant_admin: true,
+            manage_channels: true,
         }
     }
 }
@@ -121,7 +123,27 @@ impl Database {
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
-            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (3);
+
+            -- Channels table
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                comment TEXT,
+                icon_type INTEGER DEFAULT 0, -- 0=none, 1=emoji, 2=preset, 3=custom
+                icon_data BLOB,
+                position INTEGER DEFAULT 0
+            );
+
+            -- User profiles table
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_uuid TEXT PRIMARY KEY,
+                bio TEXT,
+                avatar_data BLOB,
+                signature BLOB,
+                signing_key BLOB,
+                FOREIGN KEY (user_uuid) REFERENCES users(user_uuid)
+            );
 
             -- Users table with UUID primary key and TOFU key pinning
             CREATE TABLE IF NOT EXISTS users (
@@ -208,9 +230,28 @@ impl Database {
 
         // Add migration steps here as schema evolves
         // Example:
-        // if from_version < 2 {
-        //     conn.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT", [])?;
-        // }
+        if from_version < 3 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS channels (
+                    channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    comment TEXT,
+                    icon_type INTEGER DEFAULT 0,
+                    icon_data BLOB,
+                    position INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_uuid TEXT PRIMARY KEY,
+                    bio TEXT,
+                    avatar_data BLOB,
+                    signature BLOB,
+                    signing_key BLOB,
+                    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid)
+                );
+                "#,
+            )?;
+        }
 
         conn.execute(
             "UPDATE schema_version SET version = ?",
@@ -473,6 +514,73 @@ impl Database {
         self.set_user_verified(&user_uuid, true)?;
         tracing::info!("Created bootstrap admin: uuid={}, name={}", user_uuid, display_name);
         Ok(user_uuid)
+    }
+
+    /// Get all channels from the database.
+    pub fn get_all_channels(&self) -> Result<Vec<(u32, String, String, i32, Vec<u8>, i32)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, name, comment, icon_type, icon_data, position 
+             FROM channels ORDER BY position, channel_id",
+        )?;
+
+        let channels = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get(3)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(channels)
+    }
+
+    /// Upsert a channel.
+    pub fn upsert_channel(&self, id: Option<u32>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(id) = id {
+            conn.execute(
+                "INSERT OR REPLACE INTO channels (channel_id, name, comment, icon_type, icon_data, position)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![id, name, comment, icon_type, icon_data, position],
+            )?;
+            Ok(id)
+        } else {
+            conn.execute(
+                "INSERT INTO channels (name, comment, icon_type, icon_data, position)
+                 VALUES (?, ?, ?, ?, ?)",
+                params![name, comment, icon_type, icon_data, position],
+            )?;
+            Ok(conn.last_insert_rowid() as u32)
+        }
+    }
+
+    /// Get a user profile.
+    pub fn get_user_profile(&self, user_uuid: &str) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT bio, avatar_data, signature, signing_key FROM user_profiles WHERE user_uuid = ?",
+            params![user_uuid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Update a user profile.
+    pub fn upsert_user_profile(&self, user_uuid: &str, bio: &str, avatar_data: &[u8], signature: &[u8], signing_key: &[u8]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO user_profiles (user_uuid, bio, avatar_data, signature, signing_key)
+             VALUES (?, ?, ?, ?, ?)",
+            params![user_uuid, bio, avatar_data, signature, signing_key],
+        )?;
+        Ok(())
     }
 }
 

@@ -102,10 +102,30 @@ async fn main() -> Result<()> {
     // Create server state with persistence
     let state = Arc::new(ServerState::new(Arc::clone(&db), config.clone()));
 
-    // Create initial channel for testing
-    let channel_id = 1u32;
-    state.create_channel(channel_id);
-    info!("Created default channel {}", channel_id);
+    // Create initial channel for testing if none exist in DB
+    if db.get_all_channels()?.is_empty() {
+        let channel_id = 1u32;
+        let name = "Lounge";
+        let comment = "Default voice lounge";
+        let icon_type = 1; // Emoji
+        let icon_data = "🛋️".as_bytes();
+        
+        // Persist to DB
+        db.upsert_channel(Some(channel_id), name, comment, icon_type, icon_data, 0)?;
+        
+        // Initialize in memory
+        state.create_channel(channel_id);
+        state.channel_metadata.insert(channel_id, state::ChannelMetadata {
+            id: channel_id,
+            name: name.to_string(),
+            comment: comment.to_string(),
+            icon_type,
+            icon_data: icon_data.to_vec(),
+            position: 0,
+        });
+        
+        info!("Created default channel '{}' (ID {})", name, channel_id);
+    }
 
     // Log user count
     let user_count = db.user_count()?;

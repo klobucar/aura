@@ -62,6 +62,7 @@ pub struct AuthResult {
     pub session_token: String,
     pub verified: bool,
     pub display_name: String,
+    pub is_admin: bool,
 }
 
 /// Authentication service handling TOFU identity verification.
@@ -189,6 +190,7 @@ impl AuthService {
             session_token,
             verified: user.verified,
             display_name: user.display_name,
+            is_admin,
         })
     }
 
