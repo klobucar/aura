@@ -26,6 +26,10 @@ const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
 const MSG_UPDATE_PROFILE: u8 = 0x42;
 
+// MLS Protocol messages
+const MSG_MLS_JOIN: u8 = 0x50;           // Client sends key package on channel join
+const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after adding member
+
 // Security limits
 const MAX_PACKET_SIZE: usize = 64 * 1024; // 64KB
 
@@ -615,6 +619,76 @@ impl ConnectionContext {
                     }
                 }
             }
+            MSG_MLS_JOIN => {
+                // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
+                let mut buf = [0u8; 4];
+                self.recv.read_exact(&mut buf).await?;
+                let channel_id = u32::from_le_bytes(buf);
+                
+                let is_voice = self.recv.read_u8().await? != 0;
+                
+                self.recv.read_exact(&mut buf).await?;
+                let kp_len = u32::from_le_bytes(buf) as usize;
+                
+                if kp_len > MAX_PACKET_SIZE {
+                    warn!("[{}] MLS key package too large: {}", self.remote, kp_len);
+                    return Ok(false);
+                }
+                
+                let mut key_package = vec![0u8; kp_len];
+                self.recv.read_exact(&mut key_package).await?;
+                
+                info!("[{}] MLS join for {} channel {} ({} bytes KP)",
+                      self.remote, if is_voice { "voice" } else { "text" }, channel_id, kp_len);
+                
+                self.state.handle_mls_join(
+                    channel_id,
+                    is_voice,
+                    self.session_id,
+                    self.user_uuid.clone(),
+                    key_package,
+                ).await;
+            }
+            MSG_MLS_COMMIT_WELCOME => {
+                // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
+                //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
+                let mut buf = [0u8; 4];
+                self.recv.read_exact(&mut buf).await?;
+                let channel_id = u32::from_le_bytes(buf);
+                
+                let is_voice = self.recv.read_u8().await? != 0;
+                
+                self.recv.read_exact(&mut buf).await?;
+                let new_member_session_id = u32::from_le_bytes(buf);
+                
+                self.recv.read_exact(&mut buf).await?;
+                let commit_len = u32::from_le_bytes(buf) as usize;
+                if commit_len > MAX_PACKET_SIZE {
+                    return Ok(false);
+                }
+                let mut commit = vec![0u8; commit_len];
+                self.recv.read_exact(&mut commit).await?;
+                
+                self.recv.read_exact(&mut buf).await?;
+                let welcome_len = u32::from_le_bytes(buf) as usize;
+                if welcome_len > MAX_PACKET_SIZE {
+                    return Ok(false);
+                }
+                let mut welcome = vec![0u8; welcome_len];
+                self.recv.read_exact(&mut welcome).await?;
+                
+                info!("[{}] MLS commit/welcome for {} channel {} (new member: {})",
+                      self.remote, if is_voice { "voice" } else { "text" }, channel_id, new_member_session_id);
+                
+                self.state.handle_mls_commit_welcome(
+                    channel_id,
+                    is_voice,
+                    self.session_id,
+                    new_member_session_id,
+                    commit,
+                    welcome,
+                ).await;
+            }
             _ => {
                 // Unknown message
                 warn!("[{}] Unknown message type: 0x{:02x}", self.remote, msg_type);
@@ -671,6 +745,53 @@ impl ConnectionContext {
                 let mut msg = vec![MSG_TEXT_PACKET];
                 msg.extend_from_slice(&(packet_bytes.len() as u32).to_le_bytes());
                 msg.extend_from_slice(&packet_bytes);
+                self.send.write_all(&msg).await?;
+                self.send.flush().await?;
+            }
+            
+            // --- MLS Protocol Messages ---
+            
+            ServiceMessage::MlsCreateGroup { channel_id, is_voice } => {
+                // [0x52] [channel_id: u32] [is_voice: u8]
+                let mut msg = vec![0x52];
+                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(if is_voice { 1 } else { 0 });
+                self.send.write_all(&msg).await?;
+                self.send.flush().await?;
+                info!("[{}] Sent MlsCreateGroup for channel {}", self.remote, channel_id);
+            }
+            ServiceMessage::MlsAddMemberRequest { channel_id, is_voice, joiner_session_id, joiner_uuid, key_package } => {
+                // [0x53] [channel_id: u32] [is_voice: u8] [joiner_session_id: u32]
+                //        [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
+                let uuid_bytes = joiner_uuid.as_bytes();
+                let mut msg = vec![0x53];
+                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(if is_voice { 1 } else { 0 });
+                msg.extend_from_slice(&joiner_session_id.to_le_bytes());
+                msg.push(uuid_bytes.len() as u8);
+                msg.extend_from_slice(uuid_bytes);
+                msg.extend_from_slice(&(key_package.len() as u32).to_le_bytes());
+                msg.extend_from_slice(&key_package);
+                self.send.write_all(&msg).await?;
+                self.send.flush().await?;
+            }
+            ServiceMessage::MlsCommit { channel_id, is_voice, commit } => {
+                // [0x54] [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
+                let mut msg = vec![0x54];
+                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(if is_voice { 1 } else { 0 });
+                msg.extend_from_slice(&(commit.len() as u32).to_le_bytes());
+                msg.extend_from_slice(&commit);
+                self.send.write_all(&msg).await?;
+                self.send.flush().await?;
+            }
+            ServiceMessage::MlsWelcome { channel_id, is_voice, welcome } => {
+                // [0x55] [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
+                let mut msg = vec![0x55];
+                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(if is_voice { 1 } else { 0 });
+                msg.extend_from_slice(&(welcome.len() as u32).to_le_bytes());
+                msg.extend_from_slice(&welcome);
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
             }

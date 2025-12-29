@@ -20,6 +20,14 @@ namespace Aura.Desktop.Services;
 /// </summary>
 public class AuraNetworkClient : IAsyncDisposable
 {
+    // Protocol message types
+    private const byte MSG_MLS_JOIN = 0x50;           // Client sends key package
+    private const byte MSG_MLS_COMMIT_WELCOME = 0x51; // Client sends commit + welcome
+    private const byte MSG_MLS_CREATE_GROUP = 0x52;   // Server tells client to create group
+    private const byte MSG_MLS_ADD_MEMBER_REQ = 0x53; // Server forwards key package
+    private const byte MSG_MLS_COMMIT = 0x54;         // Server broadcasts commit
+    private const byte MSG_MLS_WELCOME = 0x55;        // Server sends welcome to new member
+    
     private QuicConnection? _connection;
     private QuicStream? _controlStream;
     private uint _userId;
@@ -28,6 +36,8 @@ public class AuraNetworkClient : IAsyncDisposable
     private TextCryptoService? _textCrypto;
     private RustAudioEngine? _audioEngine;
     private AudioManager? _audioManager;
+    private MlsWrapper? _mlsWrapper;
+    private uint _currentChannelId;
     
     public void SetAudioEngine(RustAudioEngine engine) => _audioEngine = engine;
     public void SetAudioManager(AudioManager manager) => _audioManager = manager;
@@ -132,13 +142,24 @@ public class AuraNetworkClient : IAsyncDisposable
         _userId = userId;
         _sessionToken = sessionToken;
         
-        // Initialize text crypto with DAVE key (using hardcoded key for POC)
-        var daveKey = new byte[32];
-        for (int i = 0; i < 32; i++) daveKey[i] = 0x42;  // TODO: Derive from MLS
-        _textCrypto = new TextCryptoService(daveKey);
+        // Initialize MLS wrapper for E2EE
+        try
+        {
+            _mlsWrapper = new MlsWrapper(sessionToken ?? userId.ToString());
+            Console.WriteLine("[AuraClient] MLS wrapper initialized for E2EE");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to initialize MLS: {ex.Message} - E2EE will not be available");
+        }
         
-        // Initialize audio crypto with same DAVE key
-        _audioManager?.Initialize(userId, daveKey);
+        // Initialize text crypto with temporary DAVE key (will be updated with MLS-derived key on channel join)
+        var tempDaveKey = new byte[32];
+        for (int i = 0; i < 32; i++) tempDaveKey[i] = 0x42;
+        _textCrypto = new TextCryptoService(tempDaveKey);
+        
+        // Initialize audio crypto with temporary DAVE key
+        _audioManager?.Initialize(userId, tempDaveKey);
         
         OnStatusChanged?.Invoke($"Authenticated as user {userId}" + (verified ? " (verified)" : ""));
         
@@ -205,14 +226,54 @@ public class AuraNetworkClient : IAsyncDisposable
         
         Console.WriteLine($"[AuraClient] Joining channel {channelId}...");
         
-        // Send join channel message (simplified for POC)
+        // Send join channel message
         var buffer = new byte[5];
         buffer[0] = 0x10; // JoinChannel message type
         BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(1, 4), channelId);
         
         await _controlStream.WriteAsync(buffer, ct);
+        _currentChannelId = channelId;
         
         OnStatusChanged?.Invoke($"Joined channel {channelId}");
+        
+        // Send MLS join with key package for E2EE (both voice and text groups)
+        await SendMlsJoinAsync(channelId, isVoice: true, ct);
+        await SendMlsJoinAsync(channelId, isVoice: false, ct);
+    }
+    
+    /// <summary>
+    /// Send MLS join with key package when joining a channel.
+    /// </summary>
+    private async Task SendMlsJoinAsync(uint channelId, bool isVoice, CancellationToken ct = default)
+    {
+        if (_controlStream == null || _mlsWrapper == null)
+        {
+            Console.WriteLine("[AuraClient] MLS not initialized, cannot join with E2EE");
+            return;
+        }
+        
+        try
+        {
+            var keyPackage = _mlsWrapper.CreateKeyPackage();
+            
+            // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
+            using var ms = new MemoryStream();
+            ms.WriteByte(MSG_MLS_JOIN);
+            var buf = new byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
+            ms.Write(buf);
+            ms.WriteByte((byte)(isVoice ? 1 : 0));
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)keyPackage.Length);
+            ms.Write(buf);
+            ms.Write(keyPackage);
+            
+            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            Console.WriteLine($"[AuraClient] Sent MLS join for {(isVoice ? "voice" : "text")} channel {channelId} ({keyPackage.Length} bytes)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to send MLS join: {ex.Message}");
+        }
     }
     
     // ========================================================================
@@ -376,6 +437,21 @@ public class AuraNetworkClient : IAsyncDisposable
                     case 0x30: // TextPacket
                         await HandleTextPacketAsync(ct);
                         break;
+                    
+                    // MLS Protocol handlers
+                    case MSG_MLS_CREATE_GROUP: // 0x52 - Server tells us to create group
+                        await HandleMlsCreateGroupAsync(ct);
+                        break;
+                    case MSG_MLS_ADD_MEMBER_REQ: // 0x53 - Server forwards key package for us to add
+                        await HandleMlsAddMemberRequestAsync(ct);
+                        break;
+                    case MSG_MLS_COMMIT: // 0x54 - Commit from another member
+                        await HandleMlsCommitAsync(ct);
+                        break;
+                    case MSG_MLS_WELCOME: // 0x55 - Welcome message from founder
+                        await HandleMlsWelcomeAsync(ct);
+                        break;
+                        
                     default:
                         Console.WriteLine($"[AuraClient] Unknown message type: 0x{msgType:X2}");
                         break;
@@ -665,6 +741,210 @@ public class AuraNetworkClient : IAsyncDisposable
             int read = await _controlStream!.ReadAsync(buf.AsMemory(offset), ct);
             if (read == 0) throw new EndOfStreamException();
             offset += read;
+        }
+    }
+    
+    // ========================================================================
+    // MLS Protocol Handlers
+    // ========================================================================
+    
+    /// <summary>
+    /// Handle server telling us to create a new MLS group (we're the first joiner).
+    /// </summary>
+    private async Task HandleMlsCreateGroupAsync(CancellationToken ct)
+    {
+        // [channel_id: u32] [is_voice: u8]
+        var buf = new byte[5];
+        await ReadExactAsync(buf, ct);
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
+        bool isVoice = buf[4] != 0;
+        
+        if (_mlsWrapper == null)
+        {
+            Console.WriteLine("[AuraClient] MLS not initialized");
+            return;
+        }
+        
+        try
+        {
+            _mlsWrapper.CreateGroup(channelId, isVoice);
+            Console.WriteLine($"[AuraClient] Created MLS {(isVoice ? "voice" : "text")} group for channel {channelId}");
+            
+            // Update audio keys if we're the founder of a voice group
+            if (isVoice)
+            {
+                UpdateAudioKeysFromMls(channelId);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to create MLS group: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Handle server forwarding a key package for us to add (we're a founder).
+    /// </summary>
+    private async Task HandleMlsAddMemberRequestAsync(CancellationToken ct)
+    {
+        // [channel_id: u32] [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
+        var headerBuf = new byte[9];
+        await ReadExactAsync(headerBuf, ct);
+        
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
+        bool isVoice = headerBuf[4] != 0;
+        uint joinerSessionId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(5, 4));
+        
+        var uuidLenBuf = new byte[1];
+        await ReadExactAsync(uuidLenBuf, ct);
+        var uuidBuf = new byte[uuidLenBuf[0]];
+        await ReadExactAsync(uuidBuf, ct);
+        
+        var kpLenBuf = new byte[4];
+        await ReadExactAsync(kpLenBuf, ct);
+        uint kpLen = BinaryPrimitives.ReadUInt32LittleEndian(kpLenBuf);
+        var keyPackage = new byte[kpLen];
+        await ReadExactAsync(keyPackage, ct);
+        
+        if (_mlsWrapper == null || _controlStream == null)
+        {
+            Console.WriteLine("[AuraClient] MLS not initialized");
+            return;
+        }
+        
+        try
+        {
+            // Add the member - returns commit and welcome
+            var result = _mlsWrapper.AddMember(channelId, isVoice, keyPackage);
+            Console.WriteLine($"[AuraClient] Added member {joinerSessionId} to MLS group, sending commit/welcome");
+            
+            // Send commit + welcome back to server
+            // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
+            //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
+            using var ms = new MemoryStream();
+            ms.WriteByte(MSG_MLS_COMMIT_WELCOME);
+            var buf = new byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
+            ms.Write(buf);
+            ms.WriteByte((byte)(isVoice ? 1 : 0));
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, joinerSessionId);
+            ms.Write(buf);
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)result.Commit.Length);
+            ms.Write(buf);
+            ms.Write(result.Commit);
+            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)result.Welcome.Length);
+            ms.Write(buf);
+            ms.Write(result.Welcome);
+            
+            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            Console.WriteLine($"[AuraClient] Sent commit/welcome for new member {joinerSessionId}");
+            
+            // Update audio keys after epoch advance
+            if (isVoice)
+            {
+                UpdateAudioKeysFromMls(channelId);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to handle MLS add member: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Handle commit message from another member.
+    /// </summary>
+    private async Task HandleMlsCommitAsync(CancellationToken ct)
+    {
+        // [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
+        var headerBuf = new byte[5];
+        await ReadExactAsync(headerBuf, ct);
+        
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
+        bool isVoice = headerBuf[4] != 0;
+        
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        uint commitLen = BinaryPrimitives.ReadUInt32LittleEndian(lenBuf);
+        var commit = new byte[commitLen];
+        await ReadExactAsync(commit, ct);
+        
+        if (_mlsWrapper == null) return;
+        
+        try
+        {
+            var newEpoch = _mlsWrapper.ProcessCommit(channelId, isVoice, commit);
+            Console.WriteLine($"[AuraClient] Processed MLS commit, now at epoch {newEpoch}");
+            
+            // Update audio keys after epoch advance
+            if (isVoice)
+            {
+                UpdateAudioKeysFromMls(channelId);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to process MLS commit: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Handle welcome message (we were just added to a group).
+    /// </summary>
+    private async Task HandleMlsWelcomeAsync(CancellationToken ct)
+    {
+        // [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
+        var headerBuf = new byte[5];
+        await ReadExactAsync(headerBuf, ct);
+        
+        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
+        bool isVoice = headerBuf[4] != 0;
+        
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        uint welcomeLen = BinaryPrimitives.ReadUInt32LittleEndian(lenBuf);
+        var welcome = new byte[welcomeLen];
+        await ReadExactAsync(welcome, ct);
+        
+        if (_mlsWrapper == null) return;
+        
+        try
+        {
+            _mlsWrapper.JoinGroup(welcome);
+            Console.WriteLine($"[AuraClient] Joined MLS {(isVoice ? "voice" : "text")} group via Welcome for channel {channelId}");
+            
+            // Update audio keys now that we're in the group
+            if (isVoice)
+            {
+                UpdateAudioKeysFromMls(channelId);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to process MLS welcome: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Update audio sender/receiver keys from MLS.
+    /// </summary>
+    private void UpdateAudioKeysFromMls(uint channelId)
+    {
+        if (_mlsWrapper == null) return;
+        
+        try
+        {
+            // Get our own key for sending
+            var myKey = _mlsWrapper.ExportAudioKey(channelId, _userId);
+            var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: true);
+            
+            // Reinitialize audio manager with new key
+            _audioManager?.Initialize(_userId, myKey);
+            Console.WriteLine($"[AuraClient] Updated audio keys from MLS, epoch={epoch}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to update audio keys: {ex.Message}");
         }
     }
 }
