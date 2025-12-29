@@ -644,6 +644,7 @@ mod tests {
             verify_users: true,
             ban_users: true,
             grant_admin: false,
+            manage_channels: true,
         };
         db.grant_admin(&user_uuid, &perms, None).unwrap();
 

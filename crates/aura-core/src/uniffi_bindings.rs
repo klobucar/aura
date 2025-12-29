@@ -558,9 +558,187 @@ pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
         profile: Some(proto_profile),
     };
     
-    let mut buf = Vec::new();
-    req.encode(&mut buf).unwrap();
-    buf
+    req.encode_to_vec()
+}
+
+// =============================================================================
+// MLS Encryption - UniFFI Wrapper
+// =============================================================================
+
+use crate::mls::{MlsClient, MlsError as InternalMlsError};
+
+/// Result of adding a member to an MLS group
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MlsCommitWelcome {
+    /// Serialized Commit message to broadcast to existing members
+    pub commit: Vec<u8>,
+    /// Serialized Welcome message to send to the new member
+    pub welcome: Vec<u8>,
+}
+
+/// MLS error type for UniFFI
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum MlsError {
+    #[error("MLS operation failed: {0}")]
+    OperationFailed(String),
+    #[error("Group not found")]
+    GroupNotFound,
+    #[error("Invalid key package")]
+    InvalidKeyPackage,
+}
+
+impl From<InternalMlsError> for MlsError {
+    fn from(e: InternalMlsError) -> Self {
+        match e {
+            InternalMlsError::GroupNotFound(_msg) => MlsError::GroupNotFound,
+            _ => MlsError::OperationFailed(e.to_string()),
+        }
+    }
+}
+
+/// MLS client wrapper for managing groups and deriving keys
+#[derive(uniffi::Object)]
+pub struct MlsWrapper {
+    inner: Mutex<MlsClient>,
+}
+
+#[uniffi::export]
+impl MlsWrapper {
+    /// Create a new MLS client with the given identity name
+    /// 
+    /// # Arguments
+    /// * `identity_name` - User's UUID or unique identifier
+    #[uniffi::constructor]
+    pub fn new(identity_name: String) -> Result<Self, MlsError> {
+        let client = MlsClient::new(&identity_name)?;
+        Ok(Self {
+            inner: Mutex::new(client),
+        })
+    }
+    
+    /// Generate a key package to send to the server
+    /// 
+    /// Returns serialized KeyPackage bytes that can be sent to server
+    pub fn create_key_package(&self) -> Result<Vec<u8>, MlsError> {
+        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        client.get_key_package_bytes().map_err(Into::into)
+    }
+    
+    /// Create a new MLS group (as the first member)
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `is_voice` - true for voice group, false for text group
+    pub fn create_group(&self, channel_id: u32, is_voice: bool) -> Result<(), MlsError> {
+        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, is_voice);
+        client.create_group(&group_id).map_err(Into::into)
+    }
+    
+    /// Join a group via a Welcome message from the server
+    /// 
+    /// # Arguments
+    /// * `welcome_bytes` - Serialized Welcome message
+    pub fn join_group(&self, welcome_bytes: Vec<u8>) -> Result<(), MlsError> {
+        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        client.process_welcome(&welcome_bytes)?;
+        Ok(())
+    }
+    
+    /// Add a member to a group (returns Commit and Welcome)
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `is_voice` - true for voice group, false for text group
+    /// * `key_package_bytes` - Serialized KeyPackage from new member
+    /// 
+    /// # Returns
+    /// MlsCommitWelcome containing commit and welcome bytes
+    pub fn add_member(
+        &self,
+        channel_id: u32,
+        is_voice: bool,
+        key_package_bytes: Vec<u8>,
+    ) -> Result<MlsCommitWelcome, MlsError> {
+        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, is_voice);
+        let (commit, welcome) = client.add_member(&group_id, &key_package_bytes)?;
+        Ok(MlsCommitWelcome { commit, welcome })
+    }
+    
+    /// Process a Commit message from another member
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `is_voice` - true for voice group, false for text group
+    /// * `commit_bytes` - Serialized Commit message
+    pub fn process_commit(
+        &self,
+        channel_id: u32,
+        is_voice: bool,
+        commit_bytes: Vec<u8>,
+    ) -> Result<u64, MlsError> {
+        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, is_voice);
+        client.process_commit(&group_id, &commit_bytes).map_err(Into::into)
+    }
+    
+    /// Export encryption key for audio (voice group)
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `sender_session_id` - Session ID of the audio sender
+    /// 
+    /// # Returns
+    /// 32-byte encryption key for this sender
+    pub fn export_audio_key(&self, channel_id: u32, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
+        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, true);
+        let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
+        Ok(key.to_vec())
+    }
+    
+    /// Export encryption key for text (text group)
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `sender_session_id` - Session ID of the text sender
+    /// 
+    /// # Returns
+    /// 32-byte encryption key for this sender
+    pub fn export_text_key(&self, channel_id: u32, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
+        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, false);
+        let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
+        Ok(key.to_vec())
+    }
+    
+    /// Get current epoch for a group
+    /// 
+    /// # Arguments
+    /// * `channel_id` - Numeric channel ID
+    /// * `is_voice` - true for voice group, false for text group
+    pub fn current_epoch(&self, channel_id: u32, is_voice: bool) -> Result<u64, MlsError> {
+        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = make_mls_group_id(channel_id, is_voice);
+        client.epoch(&group_id).map_err(Into::into)
+    }
+    
+    /// Check if we're a member of a group
+    pub fn is_member(&self, channel_id: u32, is_voice: bool) -> bool {
+        if let Ok(client) = self.inner.lock() {
+            let group_id = make_mls_group_id(channel_id, is_voice);
+            client.is_member(&group_id)
+        } else {
+            false
+        }
+    }
+}
+
+// Internal helper to generate group IDs (outside UniFFI export)
+fn make_mls_group_id(channel_id: u32, is_voice: bool) -> Vec<u8> {
+    let group_type = if is_voice { "voice" } else { "text" };
+    format!("aura-ch{}-{}", channel_id, group_type).into_bytes()
 }
 
 #[cfg(test)]

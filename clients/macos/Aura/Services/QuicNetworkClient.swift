@@ -55,6 +55,12 @@ public class QuicNetworkClient {
     /// Text crypto wrapper (Rust UniFFI wrapper for text encryption/decryption)
     private var textCrypto: TextCryptoWrapper?
     
+    /// MLS wrapper (Rust UniFFI wrapper for MLS group management and key derivation)
+    private var mlsWrapper: MlsWrapper?
+    
+    /// Track the current voice channel for MLS group ID generation
+    private var currentVoiceChannelId: UInt32?
+    
     /// Audio playback engine
     private let audioPlayback = AudioPlayback()
     
@@ -83,6 +89,14 @@ public class QuicNetworkClient {
     private static let MSG_CREATE_CHANNEL: UInt8 = 0x40
     private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
     private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
+    
+    // MLS Protocol message types
+    private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
+    private static let MSG_MLS_COMMIT_WELCOME: UInt8 = 0x51 // Client sends commit + welcome
+    private static let MSG_MLS_CREATE_GROUP: UInt8 = 0x52   // Server tells client to create group
+    private static let MSG_MLS_ADD_MEMBER_REQ: UInt8 = 0x53 // Server forwards key package
+    private static let MSG_MLS_COMMIT: UInt8 = 0x54         // Server broadcasts commit
+    private static let MSG_MLS_WELCOME: UInt8 = 0x55        // Server sends welcome to new member
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
@@ -428,8 +442,15 @@ public class QuicNetworkClient {
         
         print("[QuicClient] ✓ Authentication SUCCESS!")
         
-        // Initialize audio pipeline with session token as key (temporary POC)
-        // In production, this would use MLS derived key
+        // Initialize MLS wrapper with user identity
+        do {
+            mlsWrapper = try MlsWrapper(identityName: finalToken)
+            print("[QuicClient] MLS wrapper initialized for E2EE")
+        } catch {
+            print("[QuicClient] Failed to initialize MLS: \(error) - E2EE will not be available")
+        }
+        
+        // Initialize audio pipeline with temporary key (will be updated with MLS-derived key on channel join)
         if let tokenData = finalToken.data(using: .utf8) {
             // Pad/truncate to 32 bytes for ChaCha20 key
             var keyData = Data(count: 32)
@@ -437,9 +458,10 @@ public class QuicNetworkClient {
             keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
             
             do {
-                // Initialize audio sender/receiver with DAVE key
-                let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
-                audioSender = try AudioSenderWrapper(sessionId: responseUserId, key: keyData)
+                // Initialize audio sender/receiver with temporary DAVE key
+                // This will be replaced with MLS-derived key when joining a channel
+                let tempKeyData = Data(repeating: 0x42, count: 32)
+                audioSender = try AudioSenderWrapper(sessionId: responseUserId, key: tempKeyData)
                 audioSender?.setEpoch(epoch: 0)
                 
                 // Enable DRED (10 frames = 100ms of redundancy)
@@ -679,6 +701,19 @@ public class QuicNetworkClient {
             
         case Self.MSG_TEXT_PACKET: // 0x30
             await handleTextPacket(stream: stream)
+            
+        // MLS Protocol handlers
+        case Self.MSG_MLS_CREATE_GROUP: // 0x52 - Server tells us to create group
+            await handleMlsCreateGroup(stream: stream)
+            
+        case Self.MSG_MLS_ADD_MEMBER_REQ: // 0x53 - Server forwards key package for us to add
+            await handleMlsAddMemberRequest(stream: stream)
+            
+        case Self.MSG_MLS_COMMIT: // 0x54 - Commit from another member
+            await handleMlsCommit(stream: stream)
+            
+        case Self.MSG_MLS_WELCOME: // 0x55 - Welcome message from founder
+            await handleMlsWelcome(stream: stream)
             
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
@@ -969,6 +1004,193 @@ public class QuicNetworkClient {
         }
     }
     
+    // MARK: - MLS Protocol Handlers
+    
+    /// Send MLS join with key package when joining a channel
+    private func sendMlsJoin(channelId: UInt32, isVoice: Bool) async {
+        guard let stream = controlStream else { return }
+        guard let mls = mlsWrapper else {
+            print("[QuicClient] MLS not initialized, cannot join with E2EE")
+            return
+        }
+        
+        do {
+            let keyPackage = try mls.createKeyPackage()
+            
+            // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
+            var msg = Data([Self.MSG_MLS_JOIN])
+            msg.append(withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
+            msg.append(isVoice ? 1 : 0)
+            msg.append(withUnsafeBytes(of: UInt32(keyPackage.count).littleEndian) { Data($0) })
+            msg.append(Data(keyPackage))
+            
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Sent MLS join for \(isVoice ? "voice" : "text") channel \(channelId) (\(keyPackage.count) bytes)")
+        } catch {
+            print("[QuicClient] Failed to send MLS join: \(error)")
+        }
+    }
+    
+    /// Handle server telling us to create a new MLS group (we're the first joiner)
+    private func handleMlsCreateGroup(stream: NWConnection) async {
+        do {
+            // [channel_id: u32] [is_voice: u8]
+            let data = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let channelId = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let isVoice = data[4] != 0
+            
+            guard let mls = mlsWrapper else {
+                print("[QuicClient] MLS not initialized")
+                return
+            }
+            
+            try mls.createGroup(channelId: channelId, isVoice: isVoice)
+            print("[QuicClient] Created MLS \(isVoice ? "voice" : "text") group for channel \(channelId)")
+            
+            // Update our own audio sender key if we're the founder
+            if isVoice, let session = sessionId {
+                try updateAudioKeysFromMls(channelId: channelId)
+                print("[QuicClient] Updated audio keys from MLS as founder")
+            }
+        } catch {
+            print("[QuicClient] Failed to create MLS group: \(error)")
+        }
+    }
+    
+    /// Handle server forwarding a key package for us to add (we're a founder or authorized member)
+    private func handleMlsAddMemberRequest(stream: NWConnection) async {
+        do {
+            // [channel_id: u32] [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
+            var header = try await receive(on: stream, minimumLength: 9, maximumLength: 9)
+            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let isVoice = header[4] != 0
+            let joinerSessionId = header.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            let uuidLen = try await receive(on: stream, minimumLength: 1, maximumLength: 1)[0]
+            let uuidData = try await receive(on: stream, minimumLength: Int(uuidLen), maximumLength: Int(uuidLen))
+            let joinerUuid = String(data: uuidData, encoding: .utf8) ?? ""
+            
+            var kpLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let kpLen = kpLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let keyPackage = try await receive(on: stream, minimumLength: Int(kpLen), maximumLength: Int(kpLen))
+            
+            guard let mls = mlsWrapper else {
+                print("[QuicClient] MLS not initialized")
+                return
+            }
+            
+            // Add the member - returns commit and welcome
+            let result = try mls.addMember(channelId: channelId, isVoice: isVoice, keyPackageBytes: Data(keyPackage))
+            
+            print("[QuicClient] Added member \(joinerSessionId) to MLS group, sending commit/welcome")
+            
+            // Send commit + welcome back to server
+            guard let stream = controlStream else { return }
+            
+            // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
+            //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
+            var msg = Data([Self.MSG_MLS_COMMIT_WELCOME])
+            msg.append(withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
+            msg.append(isVoice ? 1 : 0)
+            msg.append(withUnsafeBytes(of: joinerSessionId.littleEndian) { Data($0) })
+            msg.append(withUnsafeBytes(of: UInt32(result.commit.count).littleEndian) { Data($0) })
+            msg.append(Data(result.commit))
+            msg.append(withUnsafeBytes(of: UInt32(result.welcome.count).littleEndian) { Data($0) })
+            msg.append(Data(result.welcome))
+            
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Sent commit/welcome for new member \(joinerSessionId)")
+            
+            // Update audio keys after epoch advance
+            if isVoice {
+                try updateAudioKeysFromMls(channelId: channelId)
+            }
+        } catch {
+            print("[QuicClient] Failed to handle MLS add member: \(error)")
+        }
+    }
+    
+    /// Handle commit message from another member
+    private func handleMlsCommit(stream: NWConnection) async {
+        do {
+            // [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
+            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let isVoice = header[4] != 0
+            
+            var lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let commitLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let commit = try await receive(on: stream, minimumLength: Int(commitLen), maximumLength: Int(commitLen))
+            
+            guard let mls = mlsWrapper else { return }
+            
+            let newEpoch = try mls.processCommit(channelId: channelId, isVoice: isVoice, commitBytes: Data(commit))
+            print("[QuicClient] Processed MLS commit, now at epoch \(newEpoch)")
+            
+            // Update audio keys after epoch advance
+            if isVoice {
+                try updateAudioKeysFromMls(channelId: channelId)
+            }
+        } catch {
+            print("[QuicClient] Failed to process MLS commit: \(error)")
+        }
+    }
+    
+    /// Handle welcome message (we were just added to a group)
+    private func handleMlsWelcome(stream: NWConnection) async {
+        do {
+            // [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
+            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let isVoice = header[4] != 0
+            
+            var lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let welcomeLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let welcome = try await receive(on: stream, minimumLength: Int(welcomeLen), maximumLength: Int(welcomeLen))
+            
+            guard let mls = mlsWrapper else { return }
+            
+            try mls.joinGroup(welcomeBytes: Data(welcome))
+            print("[QuicClient] Joined MLS \(isVoice ? "voice" : "text") group via Welcome for channel \(channelId)")
+            
+            // Update audio keys now that we're in the group
+            if isVoice {
+                try updateAudioKeysFromMls(channelId: channelId)
+            }
+        } catch {
+            print("[QuicClient] Failed to process MLS welcome: \(error)")
+        }
+    }
+    
+    /// Update audio sender/receiver keys from MLS
+    private func updateAudioKeysFromMls(channelId: UInt32) throws {
+        guard let mls = mlsWrapper, let session = sessionId else { return }
+        
+        // Get our own key for sending
+        let myKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: session)
+        let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
+        
+        // Update sender with new key
+        if let sender = audioSender {
+            // Recreate sender with new key
+            audioSender = try AudioSenderWrapper(sessionId: session, key: Data(myKey))
+            audioSender?.setEpoch(epoch: epoch)
+            audioSender?.setDredDuration(duration: 10)
+            print("[QuicClient] Updated audio sender with MLS key, epoch=\(epoch)")
+        }
+        
+        // Update receiver keys for all known users
+        if let receiver = audioReceiver {
+            for (chId, users) in usersByChannel where chId == channelId {
+                for user in users {
+                    let userKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: user.id)
+                    try receiver.updateSenderKey(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
+                    print("[QuicClient] Updated receiver key for user \(user.id)")
+                }
+            }
+        }
+    }
+    
     /// Handle incoming audio packet from server
     private func handleAudioPacket(stream: NWConnection) async {
         do {
@@ -1117,7 +1339,12 @@ public class QuicNetworkClient {
         
         try await send(data: data, on: stream)
         currentChannelId = channelId
+        currentVoiceChannelId = channelId
         connectionStatus = "In channel \(channelId)"
+        
+        // Send MLS join with key package for E2EE (both voice and text groups)
+        await sendMlsJoin(channelId: channelId, isVoice: true)
+        await sendMlsJoin(channelId: channelId, isVoice: false)
     }
     
     // MARK: - Text Messaging
