@@ -109,6 +109,29 @@ public class QuicNetworkClient {
     /// Task for listening to QUIC datagrams (unreliable audio)
     private var datagramTask: Task<Void, Never>?
     
+    // MARK: - Retry State
+    
+    /// Current retry attempt count
+    public var retryCount: Int = 0
+    
+    /// Maximum number of retry attempts
+    public var maxRetries: Int = 5
+    
+    /// Whether auto-reconnect is enabled
+    public var autoReconnectEnabled: Bool = true
+    
+    /// Whether we are currently retrying connection
+    public var isRetrying: Bool = false
+    
+    /// Task for scheduled reconnection
+    private var reconnectTask: Task<Void, Never>?
+    
+    /// Saved connection parameters for retry
+    private var savedHost: String?
+    private var savedPort: UInt16?
+    private var savedIdentity: UserIdentity?
+    private var savedPassword: String?
+    
     public init() {
         // Listen for audio settings changes
         NotificationCenter.default.addObserver(
@@ -160,6 +183,10 @@ public class QuicNetworkClient {
     /// Connect to the Aura server via QUIC using NWConnectionGroup.
     /// This allows accepting server-initiated streams.
     public func connect(host: String, port: UInt16 = 8443) async throws {
+        // Save connection parameters for retry
+        savedHost = host
+        savedPort = port
+        
         connectionStatus = "Connecting..."
         print("[QuicClient] Connecting to \(host):\(port) with ALPN '\(Self.ALPN)'...")
         
@@ -256,12 +283,24 @@ public class QuicNetworkClient {
                         print("[QuicClient] Group failed: \(error)")
                         self?.isConnected = false
                         resumed = true
+                        
+                        // Trigger reconnection if this was an unexpected disconnect
+                        if self?.isAuthenticated == true {
+                            self?.handleConnectionLoss()
+                        }
+                        
                         continuation.resume(throwing: error)
                     case .cancelled:
                         print("[QuicClient] Group cancelled")
                         self?.isConnected = false
                         if !resumed {
                             resumed = true
+                            
+                            // Trigger reconnection if this was an unexpected disconnect
+                            if self?.isAuthenticated == true {
+                                self?.handleConnectionLoss()
+                            }
+                            
                             continuation.resume(throwing: QuicClientError.connectionClosed)
                         }
                     @unknown default:
@@ -295,6 +334,11 @@ public class QuicNetworkClient {
                 Task { @MainActor in
                     self?.streamContinuation?.resume(throwing: error)
                     self?.streamContinuation = nil
+                    
+                    // Trigger reconnection if we were authenticated
+                    if self?.isAuthenticated == true {
+                        self?.handleConnectionLoss()
+                    }
                 }
             default:
                 break
@@ -336,6 +380,10 @@ public class QuicNetworkClient {
         guard let publicKey = identity.publicKey else {
             throw QuicClientError.noIdentity
         }
+        
+        // Save authentication parameters for retry
+        savedIdentity = identity
+        savedPassword = serverPassword
         
         connectionStatus = "Waiting for server..."
         print("[QuicClient] Waiting for server to open auth stream...")
@@ -1473,8 +1521,115 @@ public class QuicNetworkClient {
         isAuthenticated = false
         currentChannelId = nil
         usersByChannel = [:]
+        
+        // Cancel any pending retry
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        isRetrying = false
+        retryCount = 0
+        
         connectionStatus = "Disconnected"
         print("[QuicClient] Disconnected")
+    }
+    
+    // MARK: - Reconnection
+    
+    /// Schedule a reconnection attempt with exponential backoff
+    private func scheduleReconnect() {
+        guard autoReconnectEnabled else {
+            print("[QuicClient] Auto-reconnect disabled, not retrying")
+            return
+        }
+        
+        guard retryCount < maxRetries else {
+            print("[QuicClient] Max retry attempts (\(maxRetries)) reached, giving up")
+            connectionStatus = "Disconnected (max retries reached)"
+            isRetrying = false
+            return
+        }
+        
+        retryCount += 1
+        isRetrying = true
+        
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+        let baseDelay: TimeInterval = 1.0
+        let delay = min(baseDelay * pow(2.0, Double(retryCount - 1)), 30.0)
+        
+        connectionStatus = "Reconnecting... (attempt \(retryCount)/\(maxRetries))"
+        print("[QuicClient] Scheduling reconnect attempt \(retryCount)/\(maxRetries) in \(delay)s")
+        
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            
+            guard !Task.isCancelled else {
+                print("[QuicClient] Reconnect task cancelled")
+                return
+            }
+            
+            await self?.attemptReconnect()
+        }
+    }
+    
+    /// Attempt to reconnect using saved parameters
+    private func attemptReconnect() async {
+        guard let host = savedHost, let port = savedPort else {
+            print("[QuicClient] No saved connection parameters, cannot reconnect")
+            isRetrying = false
+            return
+        }
+        
+        print("[QuicClient] Attempting reconnect to \(host):\(port)...")
+        
+        do {
+            // Reconnect
+            try await connect(host: host, port: port)
+            
+            // Re-authenticate if we have saved identity
+            if let identity = savedIdentity {
+                try await authenticate(identity: identity, serverPassword: savedPassword)
+                
+                // Success! Reset retry count
+                retryCount = 0
+                isRetrying = false
+                connectionStatus = "Connected (reconnected)"
+                print("[QuicClient] ✓ Reconnection successful!")
+                
+                // Post notification for UI
+                NotificationCenter.default.post(name: .connectionRestored, object: nil)
+            } else {
+                print("[QuicClient] No saved identity, cannot re-authenticate")
+                isRetrying = false
+            }
+        } catch {
+            print("[QuicClient] Reconnect attempt failed: \(error)")
+            // Schedule next retry
+            scheduleReconnect()
+        }
+    }
+    
+    /// Handle connection loss and trigger reconnection
+    private func handleConnectionLoss() {
+        guard isConnected || isAuthenticated else {
+            // Already disconnected, don't trigger retry
+            return
+        }
+        
+        print("[QuicClient] Connection lost, cleaning up...")
+        
+        // Clean up connection state
+        stopKeepalive()
+        stopListening()
+        controlStream?.cancel()
+        quicGroup?.cancel()
+        controlStream = nil
+        quicGroup = nil
+        isConnected = false
+        isAuthenticated = false
+        
+        connectionStatus = "Disconnected"
+        
+        // Trigger reconnection
+        scheduleReconnect()
     }
     
     // MARK: - Network Helpers

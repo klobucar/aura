@@ -29,6 +29,12 @@ struct ContentView: View {
     @State private var showingChat = true
     @State private var replyingTo: ChatMessage?
     
+    // Management views
+    @State private var showingServerManagement = false
+    @State private var showingProfileManagement = false
+    @StateObject private var serverManager = ServerManager()
+    @StateObject private var profileManager = ProfileManager()
+    
     
     var body: some View {
         Group {
@@ -119,6 +125,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingChannelEditor) {
             ChannelEditView(client: client, channel: editingChannel)
+        }
+        .sheet(isPresented: $showingServerManagement) {
+            ServerListView()
+        }
+        .sheet(isPresented: $showingProfileManagement) {
+            ProfileListView()
         }
     }
     

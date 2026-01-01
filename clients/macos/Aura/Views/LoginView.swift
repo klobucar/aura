@@ -18,6 +18,12 @@ struct LoginView: View {
     @State private var isConnecting = false
     @State private var errorMessage: String?
     
+    // Management views
+    @State private var showingServerManagement = false
+    @State private var showingProfileManagement = false
+    @StateObject private var serverManager = ServerManager()
+    @StateObject private var profileManager = ProfileManager()
+    
     var onConnected: ((QuicNetworkClient, UserIdentity) -> Void)?
     
     var body: some View {
@@ -157,9 +163,33 @@ struct LoginView: View {
                     .foregroundColor(.secondary)
             }
             
+            // Management buttons
+            HStack(spacing: 12) {
+                Button(action: { showingServerManagement = true }) {
+                    Label("Servers", systemImage: "server.rack")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                
+                Button(action: { showingProfileManagement = true }) {
+                    Label("Profiles", systemImage: "person.2.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            .controlSize(.regular)
+            .padding(.horizontal, 32)
+            .padding(.top, 8)
+            
         }
         .padding(.bottom, 48)
         .auraGlass(material: .hudWindow)
+        .sheet(isPresented: $showingServerManagement) {
+            ServerListView()
+        }
+        .sheet(isPresented: $showingProfileManagement) {
+            ProfileListView()
+        }
         .onAppear {
             identity.loadOrGenerate()
         }
