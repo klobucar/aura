@@ -251,9 +251,9 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         }
 
         // Cleanup
-        if let Some(channel_id) = ctx.current_channel_id {
-            ctx.state.remove_from_voice_group(channel_id, session_id).await;
-            ctx.state.remove_from_text_group(channel_id, session_id).await;
+        if let Some(channel_id) = ctx.current_channel_id.clone() {
+            ctx.state.remove_from_voice_group(channel_id.clone(), session_id).await;
+            ctx.state.remove_from_text_group(channel_id.clone(), session_id).await;
             ctx.state.broadcast_user_left(channel_id, session_id).await;
         }
         
@@ -417,7 +417,7 @@ struct ConnectionContext {
     remote: SocketAddr,
     session_id: u32,
     user_uuid: String,
-    current_channel_id: Option<u32>,
+    current_channel_id: Option<String>,
 }
 
 impl ConnectionContext {
@@ -427,32 +427,30 @@ impl ConnectionContext {
                 // Keepalive ping, ignore
             }
             MSG_JOIN_CHANNEL => {
-                // [0x10] [channel_id u32]
-                let mut buf = [0u8; 4];
+                // [0x10] [len u8] [channel_id string]
+                let len = self.recv.read_u8().await? as usize;
+                let mut buf = vec![0u8; len];
                 self.recv.read_exact(&mut buf).await?;
-                let channel_id = u32::from_le_bytes(buf);
+                let channel_id = String::from_utf8(buf)?;
                 
                 info!("[{}] Joining channel {}", self.remote, channel_id);
                 
                 // Leave previous channel if any
-                if let Some(old_id) = self.current_channel_id {
-                    self.state.remove_from_voice_group(old_id, self.session_id).await;
-                    self.state.remove_from_text_group(old_id, self.session_id).await;
+                if let Some(old_id) = self.current_channel_id.clone() {
+                    self.state.remove_from_voice_group(old_id.clone(), self.session_id).await;
+                    self.state.remove_from_text_group(old_id.clone(), self.session_id).await;
                     self.state.broadcast_user_left(old_id, self.session_id).await;
                 }
                 
                 // Join new channel
-                self.current_channel_id = Some(channel_id);
-                self.state.add_to_voice_group(channel_id, self.session_id).await;
-                self.state.add_to_text_group(channel_id, self.session_id).await;
+                self.current_channel_id = Some(channel_id.clone());
+                self.state.add_to_voice_group(channel_id.clone(), self.session_id).await;
+                self.state.add_to_text_group(channel_id.clone(), self.session_id).await;
                 
                 // Broadcast join
-                if let Some(profile) = self.state.get_profile(self.session_id) {
+                if let Some(profile) = self.state.get_profile(&self.user_uuid) {
                     self.state.broadcast_user_joined(channel_id, self.session_id, profile.display_name).await;
                 }
-                
-                // Note: Full state was already sent at connect time.
-                // Clients receive incremental updates (UserJoined/UserLeft) thereafter.
             }
             0x20 => { // MSG_AUDIO (legacy reliable path)
                  // Format: [20] [Length u32] [Payload...]
@@ -517,7 +515,7 @@ impl ConnectionContext {
                 if !self.state.db.is_admin(&self.user_uuid)? {
                     let resp = aura_protocol::CreateChannelResponse {
                         success: false,
-                        channel_id: 0,
+                        channel_id: String::new(),
                         error_message: "Admin required".into(),
                     };
                     self.send_proto_response(0x40, resp).await?;
@@ -536,7 +534,7 @@ impl ConnectionContext {
                     Err(e) => {
                         let resp = aura_protocol::CreateChannelResponse {
                             success: false,
-                            channel_id: 0,
+                            channel_id: String::new(),
                             error_message: e.to_string(),
                         };
                         self.send_proto_response(0x40, resp).await?;
@@ -592,7 +590,7 @@ impl ConnectionContext {
                 
                 // Ensure they are only updating their own user_id
                 if let Some(profile) = req.profile {
-                    if profile.user_id != self.session_id {
+                    if profile.user_id != self.user_uuid {
                         let resp = aura_protocol::MetadataUpdateResponse {
                             success: false,
                             error_message: "Cannot update other profiles".into(),
@@ -620,15 +618,17 @@ impl ConnectionContext {
                 }
             }
             MSG_MLS_JOIN => {
-                // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
-                let mut buf = [0u8; 4];
-                self.recv.read_exact(&mut buf).await?;
-                let channel_id = u32::from_le_bytes(buf);
+                // [0x50] [channel_id_len: u8] [channel_id: string] [is_voice: u8] [kp_len: u32] [key_package]
+                let id_len = self.recv.read_u8().await? as usize;
+                let mut id_buf = vec![0u8; id_len];
+                self.recv.read_exact(&mut id_buf).await?;
+                let channel_id = String::from_utf8(id_buf)?;
                 
                 let is_voice = self.recv.read_u8().await? != 0;
                 
-                self.recv.read_exact(&mut buf).await?;
-                let kp_len = u32::from_le_bytes(buf) as usize;
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let kp_len = u32::from_le_bytes(len_buf) as usize;
                 
                 if kp_len > MAX_PACKET_SIZE {
                     warn!("[{}] MLS key package too large: {}", self.remote, kp_len);
@@ -650,27 +650,29 @@ impl ConnectionContext {
                 ).await;
             }
             MSG_MLS_COMMIT_WELCOME => {
-                // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
+                // [0x51] [channel_id_len: u8] [channel_id: string] [is_voice: u8] [new_member_session_id: u32]
                 //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
-                let mut buf = [0u8; 4];
-                self.recv.read_exact(&mut buf).await?;
-                let channel_id = u32::from_le_bytes(buf);
+                let id_len = self.recv.read_u8().await? as usize;
+                let mut id_buf = vec![0u8; id_len];
+                self.recv.read_exact(&mut id_buf).await?;
+                let channel_id = String::from_utf8(id_buf)?;
                 
                 let is_voice = self.recv.read_u8().await? != 0;
                 
-                self.recv.read_exact(&mut buf).await?;
-                let new_member_session_id = u32::from_le_bytes(buf);
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let new_member_session_id = u32::from_le_bytes(len_buf);
                 
-                self.recv.read_exact(&mut buf).await?;
-                let commit_len = u32::from_le_bytes(buf) as usize;
+                self.recv.read_exact(&mut len_buf).await?;
+                let commit_len = u32::from_le_bytes(len_buf) as usize;
                 if commit_len > MAX_PACKET_SIZE {
                     return Ok(false);
                 }
                 let mut commit = vec![0u8; commit_len];
                 self.recv.read_exact(&mut commit).await?;
                 
-                self.recv.read_exact(&mut buf).await?;
-                let welcome_len = u32::from_le_bytes(buf) as usize;
+                self.recv.read_exact(&mut len_buf).await?;
+                let welcome_len = u32::from_le_bytes(len_buf) as usize;
                 if welcome_len > MAX_PACKET_SIZE {
                     return Ok(false);
                 }
@@ -713,9 +715,11 @@ impl ConnectionContext {
                 }
             }
             ServiceMessage::UserJoined { channel_id, session_id: joined_id, display_name } => {
+                let id_bytes = channel_id.as_bytes();
                 let name_bytes = display_name.as_bytes();
                 let mut msg = vec![0x11u8];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.extend_from_slice(&joined_id.to_le_bytes());
                 msg.push(name_bytes.len() as u8);
                 msg.extend_from_slice(name_bytes);
@@ -723,8 +727,10 @@ impl ConnectionContext {
                 self.send.flush().await?;
             }
             ServiceMessage::UserLeft { channel_id, session_id: left_id } => {
+                let id_bytes = channel_id.as_bytes();
                 let mut msg = vec![0x12u8];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.extend_from_slice(&left_id.to_le_bytes());
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
@@ -752,20 +758,21 @@ impl ConnectionContext {
             // --- MLS Protocol Messages ---
             
             ServiceMessage::MlsCreateGroup { channel_id, is_voice } => {
-                // [0x52] [channel_id: u32] [is_voice: u8]
+                let id_bytes = channel_id.as_bytes();
                 let mut msg = vec![0x52];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.push(if is_voice { 1 } else { 0 });
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
                 info!("[{}] Sent MlsCreateGroup for channel {}", self.remote, channel_id);
             }
             ServiceMessage::MlsAddMemberRequest { channel_id, is_voice, joiner_session_id, joiner_uuid, key_package } => {
-                // [0x53] [channel_id: u32] [is_voice: u8] [joiner_session_id: u32]
-                //        [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
+                let id_bytes = channel_id.as_bytes();
                 let uuid_bytes = joiner_uuid.as_bytes();
                 let mut msg = vec![0x53];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.push(if is_voice { 1 } else { 0 });
                 msg.extend_from_slice(&joiner_session_id.to_le_bytes());
                 msg.push(uuid_bytes.len() as u8);
@@ -776,9 +783,10 @@ impl ConnectionContext {
                 self.send.flush().await?;
             }
             ServiceMessage::MlsCommit { channel_id, is_voice, commit } => {
-                // [0x54] [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
+                let id_bytes = channel_id.as_bytes();
                 let mut msg = vec![0x54];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.push(if is_voice { 1 } else { 0 });
                 msg.extend_from_slice(&(commit.len() as u32).to_le_bytes());
                 msg.extend_from_slice(&commit);
@@ -786,9 +794,10 @@ impl ConnectionContext {
                 self.send.flush().await?;
             }
             ServiceMessage::MlsWelcome { channel_id, is_voice, welcome } => {
-                // [0x55] [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
+                let id_bytes = channel_id.as_bytes();
                 let mut msg = vec![0x55];
-                msg.extend_from_slice(&channel_id.to_le_bytes());
+                msg.push(id_bytes.len() as u8);
+                msg.extend_from_slice(id_bytes);
                 msg.push(if is_voice { 1 } else { 0 });
                 msg.extend_from_slice(&(welcome.len() as u32).to_le_bytes());
                 msg.extend_from_slice(&welcome);
@@ -841,7 +850,16 @@ fn parse_text_packet(packet_buf: &[u8]) -> Result<aura_protocol::EncryptedTextPa
     }
     
     let sender_session_id = read_u32(packet_buf, &mut offset)?;
-    let channel_id = read_u32(packet_buf, &mut offset)?;
+    
+    // Channel ID
+    if offset + 1 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing channel_id_len")); }
+    let channel_id_len = packet_buf[offset] as usize;
+    offset += 1;
+    if offset + channel_id_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing channel_id")); }
+    let channel_id = String::from_utf8(packet_buf[offset..offset+channel_id_len].to_vec())
+        .map_err(|_| anyhow!("Invalid UTF-8 in channel_id"))?;
+    offset += channel_id_len;
+
     let epoch = read_u64(packet_buf, &mut offset)?;
     
     // Message ID
@@ -902,7 +920,11 @@ fn serialize_text_packet(packet: &aura_protocol::EncryptedTextPacket) -> Vec<u8>
     
     let mut buf = Vec::with_capacity(size);
     buf.extend_from_slice(&packet.sender_session_id.to_le_bytes());
-    buf.extend_from_slice(&packet.channel_id.to_le_bytes());
+    
+    let channel_id_bytes = packet.channel_id.as_bytes();
+    buf.push(channel_id_bytes.len().min(255) as u8);
+    buf.extend_from_slice(&channel_id_bytes[..channel_id_bytes.len().min(255)]);
+
     buf.extend_from_slice(&packet.epoch.to_le_bytes());
     
     let msg_id_bytes = packet.message_id.as_bytes();
@@ -934,13 +956,13 @@ mod tests {
     fn test_text_packet_roundtrip() {
         let packet = aura_protocol::EncryptedTextPacket {
             sender_session_id: 123,
-            channel_id: 456,
+            channel_id: "C_channel_123".to_string(),
             epoch: 789,
-            message_id: "msg_uuid_1234".to_string(),
+            message_id: "M_msg_uuid_1234".to_string(),
             ciphertext: vec![1, 2, 3, 4],
             nonce: vec![5; 24],
             tag: vec![6; 16],
-            reply_to_id: "msg_reply_5678".to_string(),
+            reply_to_id: "M_msg_reply_5678".to_string(),
         };
         
         let bytes = serialize_text_packet(&packet);
@@ -968,9 +990,9 @@ mod tests {
         assert_eq!(MAX_PACKET_SIZE, 65536);
         let packet = aura_protocol::EncryptedTextPacket {
             sender_session_id: 1,
-            channel_id: 1,
+            channel_id: "C_1".to_string(),
             epoch: 1,
-            message_id: "msg_1".to_string(),
+            message_id: "M_1".to_string(),
             ciphertext: vec![0u8; 70000],
             nonce: vec![0u8; 24],
             tag: vec![0u8; 16],
@@ -987,7 +1009,7 @@ mod tests {
     fn test_invalid_utf8_message_id() {
          let packet = aura_protocol::EncryptedTextPacket {
             sender_session_id: 1,
-            channel_id: 1,
+            channel_id: "C_1".to_string(),
             epoch: 1,
             message_id: "valid".to_string(),
             ciphertext: vec![],
