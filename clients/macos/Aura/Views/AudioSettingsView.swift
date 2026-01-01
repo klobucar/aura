@@ -58,10 +58,6 @@ struct AudioSettingsView: View {
     }
 }
 
-extension Notification.Name {
-    static let audioSettingsChanged = Notification.Name("audioSettingsChanged")
-}
-
 #Preview {
     NavigationStack {
         AudioSettingsView()
