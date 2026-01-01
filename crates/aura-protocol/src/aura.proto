@@ -10,7 +10,7 @@ package aura.v1alpha1;
 // MLS envelope for all MLS-related signaling
 message MlsEnvelope {
     uint32 sender_id = 1;  // Session ID of the sender
-    uint32 group_id = 2;
+    string group_id = 2;
     MlsGroupType group_type = 3;
     uint64 epoch = 4;
     
@@ -64,20 +64,20 @@ enum MlsGroupType {
 
 // Information about an MLS group (Voice or Text channel)
 message MlsGroupInfo {
-    uint64 group_id = 1;
+    string group_id = 1;
     MlsGroupType group_type = 2;
     uint64 current_epoch = 3;
 }
 
 // Request to join both Voice and Text groups for a channel
 message JoinChannelGroups {
-    uint64 channel_id = 1;
+    string channel_id = 1;
     UserMode mode = 2;
 }
 
 // Response with both group welcomes and full server state
 message ChannelGroupsWelcome {
-    uint64 channel_id = 1;
+    string channel_id = 1;
     bytes voice_welcome = 2;  // MLS Welcome for voice group
     bytes text_welcome = 3;   // MLS Welcome for text group
     ServerState server_state = 4; // Snapshot of all channels and users
@@ -91,7 +91,7 @@ message ServerState {
 
 // Information about a channel
 message ChannelInfo {
-    uint32 channel_id = 1;
+    string channel_id = 1;
     string name = 2;
     string comment = 3;        // Supports Markdown
     ChannelIcon icon = 4;
@@ -115,7 +115,7 @@ message ChannelIcon {
 
 // User profile - signed but intentionally plaintext for server searchability
 message UserProfile {
-    uint32 user_id = 1;
+    string user_id = 1;
     string display_name = 2;
     string bio = 3;           // Supports Markdown (limit: 512KB)
     bytes avatar_data = 4;    // Base64 or raw bytes (limit: 128KB)
@@ -130,7 +130,7 @@ message UpdateProfile {
 
 // Request to fetch a user's profile
 message GetProfile {
-    uint32 user_id = 1;
+    string user_uuid = 1;
 }
 
 // ============================================================================
@@ -149,10 +149,11 @@ message AuthRequest {
 // Authentication response from server
 message AuthResponse {
     bool success = 1;
-    uint32 user_id = 2;
+    string user_id = 2;
     string session_token = 3;
     bool verified = 4;              // Whether user is admin-verified
     string error_message = 5;       // Error reason: "username_taken", "invalid_password", etc.
+    string user_uuid = 6;
 }
 
 // Challenge request - client asks server for a random challenge to sign
@@ -172,13 +173,13 @@ message ChallengeResponse {
 // Request to verify a user (admin only)
 message VerifyUserRequest {
     string session_token = 1;       // Admin's session token
-    uint32 target_user_id = 2;      // User to verify
+    string target_user_uuid = 2;      // User to verify
 }
 
 // Request to ban/unban a user (admin only)
 message BanUserRequest {
     string session_token = 1;       // Admin's session token
-    uint32 target_user_id = 2;      // User to ban/unban
+    string target_user_uuid = 2;      // User to ban/unban
     bool banned = 3;                // true = ban, false = unban
     string reason = 4;              // Reason for ban
 }
@@ -186,7 +187,7 @@ message BanUserRequest {
 // Request to grant admin privileges (admin only)
 message GrantAdminRequest {
     string session_token = 1;       // Granting admin's session token
-    uint32 target_user_id = 2;      // User to promote
+    string target_user_uuid = 2;      // User to promote
     bool verify_users = 3;          // Permission to verify users
     bool ban_users = 4;             // Permission to ban users
     bool grant_admin = 5;           // Permission to grant admin to others
@@ -207,7 +208,7 @@ message ListUsersRequest {
 
 // User info in list response
 message UserInfo {
-    uint32 user_id = 1;
+    string user_uuid = 1;
     string display_name = 2;
     bool verified = 3;
     bool banned = 4;
@@ -239,7 +240,7 @@ message TextMessage {
 // Server routes this without decrypting - zero knowledge
 message EncryptedTextPacket {
     uint32 sender_session_id = 1;  // Session ID for routing
-    uint32 channel_id = 2;         // Target channel
+    string channel_id = 2;         // Target channel
     uint64 epoch = 3;              // MLS epoch for key selection
     string message_id = 4;         // Client-generated UUID
     bytes ciphertext = 5;          // Encrypted TextMessage (XChaCha20-Poly1305)
@@ -262,13 +263,13 @@ message CreateChannelRequest {
 // Response for channel creation
 message CreateChannelResponse {
     bool success = 1;
-    uint32 channel_id = 2;
+    string channel_id = 2;
     string error_message = 3;
 }
 
 // Request to update channel metadata (Admin only)
 message UpdateChannelRequest {
-    uint32 channel_id = 1;
+    string channel_id = 1;
     optional string name = 2;
     optional string comment = 3;
     optional ChannelIcon icon = 4;

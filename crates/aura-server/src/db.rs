@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Current database schema version.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 1;
 
 /// Thread-safe database handle.
 pub type DbHandle = Arc<Mutex<Connection>>;
@@ -123,11 +123,11 @@ impl Database {
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
-            INSERT OR REPLACE INTO schema_version (version) VALUES (3);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (1);
 
             -- Channels table
             CREATE TABLE IF NOT EXISTS channels (
-                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 comment TEXT,
                 icon_type INTEGER DEFAULT 0, -- 0=none, 1=emoji, 2=preset, 3=custom
@@ -221,43 +221,8 @@ impl Database {
     }
 
     /// Run database migrations from old version to current.
-    fn migrate(&self, conn: &Connection, from_version: i64) -> Result<()> {
-        tracing::info!(
-            "Migrating database from version {} to {}",
-            from_version,
-            SCHEMA_VERSION
-        );
-
-        // Add migration steps here as schema evolves
-        // Example:
-        if from_version < 3 {
-            conn.execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS channels (
-                    channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    comment TEXT,
-                    icon_type INTEGER DEFAULT 0,
-                    icon_data BLOB,
-                    position INTEGER DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS user_profiles (
-                    user_uuid TEXT PRIMARY KEY,
-                    bio TEXT,
-                    avatar_data BLOB,
-                    signature BLOB,
-                    signing_key BLOB,
-                    FOREIGN KEY (user_uuid) REFERENCES users(user_uuid)
-                );
-                "#,
-            )?;
-        }
-
-        conn.execute(
-            "UPDATE schema_version SET version = ?",
-            params![SCHEMA_VERSION],
-        )?;
-
+    fn migrate(&self, _conn: &Connection, _from_version: i64) -> Result<()> {
+        // No migrations yet for version 1
         Ok(())
     }
 
@@ -353,7 +318,7 @@ impl Database {
     pub fn create_user(&self, public_key: &[u8; 32], display_name: &str) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let now = Self::now();
-        let user_uuid = Uuid::new_v4().to_string();
+        let user_uuid = format!("U_{}", Uuid::new_v4());
 
         // Insert user
         conn.execute(
@@ -517,7 +482,7 @@ impl Database {
     }
 
     /// Get all channels from the database.
-    pub fn get_all_channels(&self) -> Result<Vec<(u32, String, String, i32, Vec<u8>, i32)>> {
+    pub fn get_all_channels(&self) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT channel_id, name, comment, icon_type, icon_data, position 
@@ -541,7 +506,7 @@ impl Database {
     }
 
     /// Upsert a channel.
-    pub fn upsert_channel(&self, id: Option<u32>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32) -> Result<u32> {
+    pub fn upsert_channel(&self, id: Option<String>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         if let Some(id) = id {
             conn.execute(
@@ -551,12 +516,13 @@ impl Database {
             )?;
             Ok(id)
         } else {
+            let channel_id = format!("C_{}", Uuid::new_v4());
             conn.execute(
-                "INSERT INTO channels (name, comment, icon_type, icon_data, position)
-                 VALUES (?, ?, ?, ?, ?)",
-                params![name, comment, icon_type, icon_data, position],
+                "INSERT INTO channels (channel_id, name, comment, icon_type, icon_data, position)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![channel_id, name, comment, icon_type, icon_data, position],
             )?;
-            Ok(conn.last_insert_rowid() as u32)
+            Ok(channel_id)
         }
     }
 

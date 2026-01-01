@@ -7,20 +7,20 @@
 //! - Admin system for user verification and moderation
 //! - QUIC transport for low-latency voice
 
-mod auth;
-mod config;
-mod connection;
-mod db;
-mod state;
+use aura_server::auth;
+use aura_server::config;
+use aura_server::connection;
+use aura_server::db;
+use aura_server::state;
+
+use aura_server::config::Config;
+use aura_server::connection::QuicServer;
+use aura_server::db::Database;
+use aura_server::state::ServerState;
 
 use anyhow::Result;
 use std::sync::Arc;
 use tracing::{info, error};
-
-use crate::config::Config;
-use crate::connection::QuicServer;
-use crate::db::Database;
-use crate::state::ServerState;
 
 /// Environment variable for bootstrap admin public key (hex encoded).
 const ENV_BOOTSTRAP_ADMIN_KEY: &str = "AURA_BOOTSTRAP_ADMIN_KEY";
@@ -104,19 +104,19 @@ async fn main() -> Result<()> {
 
     // Create initial channel for testing if none exist in DB
     if db.get_all_channels()?.is_empty() {
-        let channel_id = 1u32;
+        let channel_id = format!("C_{}", uuid::Uuid::new_v4());
         let name = "Lounge";
         let comment = "Default voice lounge";
         let icon_type = 1; // Emoji
         let icon_data = "🛋️".as_bytes();
         
         // Persist to DB
-        db.upsert_channel(Some(channel_id), name, comment, icon_type, icon_data, 0)?;
+        db.upsert_channel(Some(channel_id.clone()), name, comment, icon_type, icon_data, 0)?;
         
         // Initialize in memory
-        state.create_channel(channel_id);
-        state.channel_metadata.insert(channel_id, state::ChannelMetadata {
-            id: channel_id,
+        state.create_channel(channel_id.clone());
+        state.channel_metadata.insert(channel_id.clone(), state::ChannelMetadata {
+            id: channel_id.clone(),
             name: name.to_string(),
             comment: comment.to_string(),
             icon_type,
