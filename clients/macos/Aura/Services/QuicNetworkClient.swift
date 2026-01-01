@@ -52,8 +52,7 @@ public class QuicNetworkClient {
     /// Audio receiver (Rust UniFFI wrapper for decoding + decryption)
     private var audioReceiver: AudioReceiverWrapper?
     
-    /// Text crypto wrapper (Rust UniFFI wrapper for text encryption/decryption)
-    private var textCrypto: TextCryptoWrapper?
+    // Text crypto now uses MLS-derived per-sender keys (no shared instance)
     
     /// MLS wrapper (Rust UniFFI wrapper for MLS group management and key derivation)
     private var mlsWrapper: MlsWrapper?
@@ -67,11 +66,8 @@ public class QuicNetworkClient {
     /// Track which users are currently speaking (for UI indicators)
     public var activeSpeakers: Set<UInt32> = []
     
-    /// Track last activity time for each speaker (for debouncing)
-    private var lastSpeakerActivity: [UInt32: Date] = [:]
-
-    /// Timers for turning off speaking indicators after silence
-    private var speakerTimers: [UInt32: Task<Void, Never>] = [:]
+    /// Timeout tasks for clearing speakers who stop sending audio
+    private var speakerTimeouts: [UInt32: Task<Void, Never>] = [:]
     
     private var sequenceNumber: UInt16 = 0
     
@@ -487,8 +483,7 @@ public class QuicNetworkClient {
                 
                 print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms")
                 
-                // Initialize text crypto with same DAVE key
-                textCrypto = try TextCryptoWrapper(key: keyData)
+                // Text crypto will use MLS-derived keys per-sender (no initialization needed)
                 
                 // Start audio playback engine
                 audioPlayback.start()
@@ -841,10 +836,12 @@ public class QuicNetworkClient {
                 }
                 self.profiles = newProfiles
                 
-                // Re-map usersByChannel
+                // Re-map usersByChannel (exclude ourselves)
                 var newUserMapping: [UInt32: [ChannelUser]] = [:]
                 for c in snapshot.channels {
                     let users = c.userIds.compactMap { sid -> ChannelUser? in
+                        // Don't include ourselves in the user list
+                        guard sid != self.sessionId else { return nil }
                         guard let p = self.profiles[sid] else { return nil }
                         return ChannelUser(sessionId: sid, displayName: p.displayName, bio: p.bio, avatarData: Data(p.avatarData))
                     }
@@ -939,11 +936,24 @@ public class QuicNetworkClient {
                 }
             }
             
-            // Decrypt the message
-            guard let crypto = textCrypto else {
-                print("[QuicClient] Text crypto not initialized, cannot decrypt")
+            // Decrypt the message using MLS-derived key for the sender
+            guard let mls = mlsWrapper else {
+                print("[QuicClient] MLS not initialized, cannot decrypt text")
                 return
             }
+            
+            // Derive decryption key from MLS text group for this sender
+            let senderKey: Data
+            do {
+                let keyBytes = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
+                senderKey = Data(keyBytes)
+            } catch {
+                print("[QuicClient] Failed to derive text key for sender \(senderSessionId): \(error)")
+                return
+            }
+            
+            // Create crypto wrapper with sender's key
+            let crypto = try TextCryptoWrapper(key: senderKey)
             
             let encryptedPacket = EncryptedTextPacketRecord(
                 senderSessionId: senderSessionId,
@@ -1276,25 +1286,44 @@ public class QuicNetworkClient {
             
             // Pop mixed audio from Rust core (handles PLC/DRED/talking detection internals)
             if let result = receiver.popMixed() {
-                if !result.activeSpeakers.isEmpty {
-                    // Update talking indicators using speaker metadata
-                    for sessionId in result.activeSpeakers {
-                        activeSpeakers.insert(sessionId)
-                        
-                        // Cancel existing timer for this speaker
-                        speakerTimers[sessionId]?.cancel()
-                        
-                        // Set a new timer to clear the indicator after 500ms of silence
-                        speakerTimers[sessionId] = Task { [weak self] in
-                            try? await Task.sleep(nanoseconds: 500 * 1_000_000)
-                            if !Task.isCancelled {
-                                self?.activeSpeakers.remove(sessionId)
-                                self?.speakerTimers.removeValue(forKey: sessionId)
+                // Check if active speakers changed
+                let newSpeakers = Set(result.activeSpeakers)
+                if newSpeakers != activeSpeakers {
+                    print("[QuicClient] Active speakers changed: \(activeSpeakers) -> \(newSpeakers)")
+                    activeSpeakers = newSpeakers
+                    
+                    // Post notification for UI to update (non-blocking)
+                    NotificationCenter.default.post(
+                        name: .activeSpeakersChanged,
+                        object: newSpeakers
+                    )
+                }
+                
+                // WORKAROUND: Rust core doesn't have VAD yet - it reports anyone with packets as "active"
+                // Manually timeout speakers who stop sending packets (500ms silence detection)
+                for speakerId in result.activeSpeakers {
+                    // Reset timeout for this speaker
+                    speakerTimeouts[speakerId]?.cancel()
+                    speakerTimeouts[speakerId] = Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+                        if !Task.isCancelled {
+                            await MainActor.run {
+                                guard let self = self else { return }
+                                self.activeSpeakers.remove(speakerId)
+                                self.speakerTimeouts.removeValue(forKey: speakerId)
+                                print("[QuicClient] Speaker \(speakerId) timed out (silence detected)")
+                                
+                                // Post notification
+                                NotificationCenter.default.post(
+                                    name: .activeSpeakersChanged,
+                                    object: self.activeSpeakers
+                                )
                             }
                         }
                     }
                 }
                 
+                // Audio processing (immediate, not blocked by UI)
                 audioPlayback.enqueue(pcm: result.pcm)
             }
         } catch {
@@ -1357,8 +1386,8 @@ public class QuicNetworkClient {
         guard let channelId = currentChannelId else {
             throw QuicClientError.protocolError("Not in a channel")
         }
-        guard let crypto = textCrypto else {
-            throw QuicClientError.protocolError("Text crypto not initialized")
+        guard let mls = mlsWrapper else {
+            throw QuicClientError.protocolError("MLS not initialized")
         }
         
         // Use sessionId if available, otherwise fall back to userId
@@ -1366,6 +1395,13 @@ public class QuicNetworkClient {
         
         print("[QuicClient] Sending encrypted text message to channel \(channelId): \(content.prefix(30))...")
         print("[QuicClient] ID: \(messageId), Session: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
+        
+        // Derive encryption key from MLS text group for our session
+        let myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
+        let epoch = try mls.currentEpoch(channelId: channelId, isVoice: false)
+        
+        // Create crypto wrapper with our key
+        let crypto = try TextCryptoWrapper(key: Data(myKey))
         
         // Create plaintext message record
         let textMsg = TextMessageRecord(
@@ -1376,9 +1412,9 @@ public class QuicNetworkClient {
             messageId: messageId
         )
         
-        // Encrypt using DAVE
+        // Encrypt using DAVE with MLS-derived key
         let encryptedPacket = try crypto.encrypt(
-            epoch: 0,  // TODO: Use actual text epoch from MLS
+            epoch: epoch,
             channelId: channelId,
             senderSessionId: senderSessionId,
             message: textMsg
