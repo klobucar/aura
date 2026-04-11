@@ -13,7 +13,7 @@ pub use aura_protocol::{TextMessage, EncryptedTextPacket};
 pub fn encrypt_text(
     dave_key: &[u8; 32],
     epoch: u64,
-    channel_id: u32,
+    channel_id: String,
     sender_session_id: u32,
     message: &TextMessage,
 ) -> Result<EncryptedTextPacket, CryptoError> {
@@ -36,7 +36,7 @@ pub fn encrypt_text(
     
     Ok(EncryptedTextPacket {
         sender_session_id,
-        channel_id: channel_id.to_string(),
+        channel_id: channel_id.clone(),
         epoch,
         message_id: message.message_id.clone(),
         ciphertext: ciphertext_without_tag,
@@ -88,7 +88,9 @@ pub fn create_text_message(sender_uuid: &str, content: &str, reply_to: Option<&s
         content: content.to_string(),
         reply_to_id: reply_to.unwrap_or("").to_string(),
         message_id,
-        r#type: 0,
+        r#type: aura_protocol::MediaType::Text as i32,
+        file_size: 0,
+        sha256_hash: String::new(),
     }
 }
 
@@ -150,7 +152,7 @@ mod tests {
             .expect("Encryption should succeed");
         
         assert_eq!(packet.epoch, 5);
-        assert_eq!(packet.channel_id, 42);
+        assert_eq!(packet.channel_id, "42");
         assert_eq!(packet.sender_session_id, 7);
         assert_eq!(packet.nonce.len(), 24);
         assert_eq!(packet.tag.len(), 16);

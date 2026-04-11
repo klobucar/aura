@@ -7,7 +7,7 @@ use std::sync::{Mutex, RwLock};
 use bytes::Bytes;
 
 use aura_protocol::{
-    FastAudioPacket, UserProfile as ProtoProfile, ChannelInfo as ProtoChannel, 
+    UserProfile as ProtoProfile, 
     ServerState as ProtoState, ChannelIcon as ProtoIcon, channel_icon,
     CreateChannelRequest as ProtoCreateChannel, UpdateChannelRequest as ProtoUpdateChannel,
     UpdateProfile as ProtoUpdateProfile, UserStatusUpdate as ProtoUserStatusUpdate,
@@ -351,6 +351,9 @@ pub struct TextMessageRecord {
     pub content: String,
     pub reply_to_id: String,
     pub message_id: String,
+    pub media_type: i32,
+    pub file_size: u64,
+    pub sha256_hash: String,
 }
 
 impl From<TextMessage> for TextMessageRecord {
@@ -361,6 +364,9 @@ impl From<TextMessage> for TextMessageRecord {
             content: m.content,
             reply_to_id: m.reply_to_id,
             message_id: m.message_id,
+            media_type: m.r#type,
+            file_size: m.file_size,
+            sha256_hash: m.sha256_hash,
         }
     }
 }
@@ -373,7 +379,9 @@ impl From<TextMessageRecord> for TextMessage {
             content: r.content,
             reply_to_id: r.reply_to_id,
             message_id: r.message_id,
-            r#type: 0,
+            r#type: r.media_type,
+            file_size: r.file_size,
+            sha256_hash: r.sha256_hash,
         }
     }
 }
@@ -382,7 +390,7 @@ impl From<TextMessageRecord> for TextMessage {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct EncryptedTextPacketRecord {
     pub sender_session_id: u32,
-    pub channel_id: u32,
+    pub channel_id: String,
     pub epoch: u64,
     pub message_id: String,
     pub ciphertext: Vec<u8>,
@@ -395,7 +403,7 @@ impl From<EncryptedTextPacket> for EncryptedTextPacketRecord {
     fn from(p: EncryptedTextPacket) -> Self {
         Self {
             sender_session_id: p.sender_session_id,
-            channel_id: p.channel_id.parse().unwrap_or(0),
+            channel_id: p.channel_id,
             epoch: p.epoch,
             message_id: p.message_id,
             ciphertext: p.ciphertext,
@@ -410,7 +418,7 @@ impl From<EncryptedTextPacketRecord> for EncryptedTextPacket {
     fn from(r: EncryptedTextPacketRecord) -> Self {
         Self {
             sender_session_id: r.sender_session_id,
-            channel_id: r.channel_id.to_string(),
+            channel_id: r.channel_id,
             epoch: r.epoch,
             message_id: r.message_id,
             ciphertext: r.ciphertext,
@@ -455,7 +463,7 @@ impl TextCryptoWrapper {
     pub fn encrypt(
         &self,
         epoch: u64,
-        channel_id: u32,
+        channel_id: String,
         sender_session_id: u32,
         message: TextMessageRecord,
     ) -> Result<EncryptedTextPacketRecord, TextCryptoError> {
@@ -489,6 +497,12 @@ pub fn create_text_message_record(
 // Metadata & State - UniFFI-compatible records
 // =============================================================================
 
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum ChannelType {
+    Regular,
+    Lobby,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ChannelIconRecord {
     pub emoji: Option<String>,
@@ -498,12 +512,22 @@ pub struct ChannelIconRecord {
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ChannelInfoRecord {
-    pub channel_id: u32,
+    pub channel_id: String,
     pub name: String,
     pub comment: String,
     pub icon: Option<ChannelIconRecord>,
     pub position: i32,
     pub user_ids: Vec<u32>,
+    pub users: Vec<ChannelUserStatusRecord>,
+    pub channel_type: ChannelType,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChannelUserStatusRecord {
+    pub session_id: u32,
+    pub is_muted: bool,
+    pub is_deafened: bool,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -529,6 +553,51 @@ pub struct ServerStateRecord {
     pub profiles: Vec<UserProfileRecord>,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UserJoinedRecord {
+    pub channel_id: String,
+    pub session_id: u32,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UserLeftRecord {
+    pub channel_id: String,
+    pub session_id: u32,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct JoinChannelRequestRecord {
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum MlsGroupType {
+    Voice,
+    Text,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MlsCommitWelcomeDetailRecord {
+    pub commit: Vec<u8>,
+    pub welcome: Vec<u8>,
+    pub new_member_session_id: u32,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MlsEnvelopeRecord {
+    pub sender_id: u32,
+    pub channel_id: String,
+    pub group_type: MlsGroupType,
+    pub target_session_id: u32,
+    pub target_uuid: String,
+    pub epoch: u64,
+    pub key_package: Option<Vec<u8>>,
+    pub commit: Option<Vec<u8>>,
+    pub welcome: Option<Vec<u8>>,
+    pub commit_welcome: Option<MlsCommitWelcomeDetailRecord>,
+}
+
 #[uniffi::export]
 pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioError> {
     use prost::Message;
@@ -544,12 +613,22 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
         });
 
         ChannelInfoRecord {
-            channel_id: c.channel_id.parse().unwrap_or(0),
+            channel_id: c.channel_id,
             name: c.name,
             comment: c.comment,
             icon,
             position: c.position,
             user_ids: c.user_ids,
+            users: c.users.into_iter().map(|u| ChannelUserStatusRecord {
+                session_id: u.session_id,
+                is_muted: u.is_muted,
+                is_deafened: u.is_deafened,
+                display_name: u.display_name,
+            }).collect(),
+            channel_type: match c.r#type {
+                1 => ChannelType::Lobby,
+                _ => ChannelType::Regular,
+            },
         }
     }).collect();
 
@@ -606,6 +685,152 @@ pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, Audi
         is_muted: proto.is_muted,
         is_deafened: proto.is_deafened,
     })
+}
+
+#[uniffi::export]
+pub fn decode_user_joined(data: Vec<u8>) -> Result<UserJoinedRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::UserJoined::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    Ok(UserJoinedRecord {
+        channel_id: proto.channel_id,
+        session_id: proto.session_id,
+        display_name: proto.display_name,
+    })
+}
+
+#[uniffi::export]
+pub fn decode_user_left(data: Vec<u8>) -> Result<UserLeftRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::UserLeft::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    Ok(UserLeftRecord {
+        channel_id: proto.channel_id,
+        session_id: proto.session_id,
+    })
+}
+
+#[uniffi::export]
+pub fn encode_join_channel_request(req: JoinChannelRequestRecord) -> Vec<u8> {
+    use prost::Message;
+    let proto = aura_protocol::JoinChannelRequest {
+        channel_id: req.channel_id,
+    };
+    proto.encode_to_vec()
+}
+
+#[uniffi::export]
+pub fn decode_encrypted_text_packet(data: Vec<u8>) -> Result<EncryptedTextPacketRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::EncryptedTextPacket::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    Ok(EncryptedTextPacketRecord {
+        sender_session_id: proto.sender_session_id,
+        channel_id: proto.channel_id,
+        epoch: proto.epoch,
+        message_id: proto.message_id,
+        ciphertext: proto.ciphertext.to_vec(),
+        nonce: proto.nonce.to_vec(),
+        tag: proto.tag.to_vec(),
+        reply_to_id: proto.reply_to_id,
+    })
+}
+
+#[uniffi::export]
+pub fn encode_encrypted_text_packet(packet: EncryptedTextPacketRecord) -> Vec<u8> {
+    use prost::Message;
+    let proto = aura_protocol::EncryptedTextPacket {
+        sender_session_id: packet.sender_session_id,
+        channel_id: packet.channel_id,
+        epoch: packet.epoch,
+        message_id: packet.message_id,
+        ciphertext: packet.ciphertext.into(),
+        nonce: packet.nonce.into(),
+        tag: packet.tag.into(),
+        reply_to_id: packet.reply_to_id,
+    };
+    proto.encode_to_vec()
+}
+
+#[uniffi::export]
+pub fn decode_mls_envelope(data: Vec<u8>) -> Result<MlsEnvelopeRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::MlsEnvelope::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    
+    let group_type = if proto.group_type == aura_protocol::MlsGroupType::Voice as i32 {
+        MlsGroupType::Voice
+    } else {
+        MlsGroupType::Text
+    };
+
+    let mut key_package = None;
+    let mut commit = None;
+    let mut welcome = None;
+    let mut commit_welcome = None;
+
+    if let Some(content) = proto.content {
+        match content {
+            aura_protocol::mls_envelope::Content::KeyPackage(kp) => key_package = Some(kp),
+            aura_protocol::mls_envelope::Content::Commit(c) => commit = Some(c),
+            aura_protocol::mls_envelope::Content::Welcome(w) => welcome = Some(w),
+            aura_protocol::mls_envelope::Content::CommitWelcome(cw) => {
+                commit_welcome = Some(MlsCommitWelcomeDetailRecord {
+                    commit: cw.commit,
+                    welcome: cw.welcome,
+                    new_member_session_id: cw.new_member_session_id,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(MlsEnvelopeRecord {
+        sender_id: proto.sender_id,
+        channel_id: proto.channel_id,
+        group_type,
+        target_session_id: proto.target_session_id,
+        target_uuid: proto.target_uuid,
+        epoch: proto.epoch,
+        key_package,
+        commit,
+        welcome,
+        commit_welcome,
+    })
+}
+
+#[uniffi::export]
+pub fn encode_mls_envelope(envelope: MlsEnvelopeRecord) -> Vec<u8> {
+    use prost::Message;
+    
+    let group_type = match envelope.group_type {
+        MlsGroupType::Voice => aura_protocol::MlsGroupType::Voice as i32,
+        MlsGroupType::Text => aura_protocol::MlsGroupType::Text as i32,
+    };
+
+    let content = if let Some(kp) = envelope.key_package {
+        Some(aura_protocol::mls_envelope::Content::KeyPackage(kp))
+    } else if let Some(c) = envelope.commit {
+        Some(aura_protocol::mls_envelope::Content::Commit(c))
+    } else if let Some(w) = envelope.welcome {
+        Some(aura_protocol::mls_envelope::Content::Welcome(w))
+    } else if let Some(cw) = envelope.commit_welcome {
+        Some(aura_protocol::mls_envelope::Content::CommitWelcome(aura_protocol::MlsCommitWelcome {
+            commit: cw.commit,
+            welcome: cw.welcome,
+            new_member_session_id: cw.new_member_session_id,
+        }))
+    } else {
+        None
+    };
+
+    let proto = aura_protocol::MlsEnvelope {
+        sender_id: envelope.sender_id,
+        channel_id: envelope.channel_id,
+        group_type,
+        target_session_id: envelope.target_session_id,
+        target_uuid: envelope.target_uuid,
+        epoch: envelope.epoch,
+        content,
+    };
+    
+    proto.encode_to_vec()
 }
 
 // =============================================================================
@@ -676,9 +901,9 @@ impl MlsWrapper {
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
-    pub fn create_group(&self, channel_id: u32, is_voice: bool) -> Result<(), MlsError> {
+    pub fn create_group(&self, channel_id: String, is_voice: bool) -> Result<(), MlsError> {
         let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, is_voice);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.create_group(&group_id).map_err(Into::into)
     }
     
@@ -703,12 +928,12 @@ impl MlsWrapper {
     /// MlsCommitWelcome containing commit and welcome bytes
     pub fn add_member(
         &self,
-        channel_id: u32,
+        channel_id: String,
         is_voice: bool,
         key_package_bytes: Vec<u8>,
     ) -> Result<MlsCommitWelcome, MlsError> {
         let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, is_voice);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         let (commit, welcome) = client.add_member(&group_id, &key_package_bytes)?;
         Ok(MlsCommitWelcome { commit, welcome })
     }
@@ -721,12 +946,12 @@ impl MlsWrapper {
     /// * `commit_bytes` - Serialized Commit message
     pub fn process_commit(
         &self,
-        channel_id: u32,
+        channel_id: String,
         is_voice: bool,
         commit_bytes: Vec<u8>,
     ) -> Result<u64, MlsError> {
         let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, is_voice);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.process_commit(&group_id, &commit_bytes).map_err(Into::into)
     }
     
@@ -738,9 +963,9 @@ impl MlsWrapper {
     /// 
     /// # Returns
     /// 32-byte encryption key for this sender
-    pub fn export_audio_key(&self, channel_id: u32, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
+    pub fn export_audio_key(&self, channel_id: String, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
         let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, true);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, true).into_bytes();
         let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
         Ok(key.to_vec())
     }
@@ -753,9 +978,9 @@ impl MlsWrapper {
     /// 
     /// # Returns
     /// 32-byte encryption key for this sender
-    pub fn export_text_key(&self, channel_id: u32, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
+    pub fn export_text_key(&self, channel_id: String, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
         let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, false);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, false).into_bytes();
         let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
         Ok(key.to_vec())
     }
@@ -765,16 +990,16 @@ impl MlsWrapper {
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
-    pub fn current_epoch(&self, channel_id: u32, is_voice: bool) -> Result<u64, MlsError> {
+    pub fn current_epoch(&self, channel_id: String, is_voice: bool) -> Result<u64, MlsError> {
         let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
-        let group_id = make_mls_group_id(channel_id, is_voice);
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.epoch(&group_id).map_err(Into::into)
     }
     
     /// Check if we're a member of a group
-    pub fn is_member(&self, channel_id: u32, is_voice: bool) -> bool {
+    pub fn is_member(&self, channel_id: String, is_voice: bool) -> bool {
         if let Ok(client) = self.inner.lock() {
-            let group_id = make_mls_group_id(channel_id, is_voice);
+            let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
             client.is_member(&group_id)
         } else {
             false
@@ -783,10 +1008,6 @@ impl MlsWrapper {
 }
 
 // Internal helper to generate group IDs (outside UniFFI export)
-fn make_mls_group_id(channel_id: u32, is_voice: bool) -> Vec<u8> {
-    let group_type = if is_voice { "voice" } else { "text" };
-    format!("aura-ch{}-{}", channel_id, group_type).into_bytes()
-}
 
 #[cfg(test)]
 mod tests {
@@ -830,7 +1051,7 @@ pub fn encode_create_channel(name: String, comment: String, icon: Option<Channel
 
 #[uniffi::export]
 pub fn encode_update_channel(
-    channel_id: u32,
+    channel_id: String,
     name: Option<String>,
     comment: Option<String>,
     icon: Option<ChannelIconRecord>,
@@ -843,7 +1064,7 @@ pub fn encode_update_channel(
     });
 
     let req = ProtoUpdateChannel {
-        channel_id: channel_id.to_string(),
+        channel_id,
         name,
         comment,
         icon: proto_icon,
