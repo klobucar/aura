@@ -57,7 +57,7 @@ async fn test_replay_attack_detection() {
     state.add_to_text_group(channel_id.clone(), session_id).await;
     
     let packet = EncryptedTextPacket {
-        channel_id: channel_id.clone(),
+        channel_id: aura_protocol::make_mls_group_id(&channel_id, false),
         message_id: "unique-msg-123".to_string(),
         sender_session_id: session_id,
         ciphertext: vec![1, 2, 3],
@@ -111,7 +111,7 @@ async fn test_text_ratcheting_message_threshold() {
     // Send 49 messages - should not trigger ratchet
     for i in 0..49 {
         let packet = EncryptedTextPacket {
-            channel_id: channel_id.clone(),
+            channel_id: aura_protocol::make_mls_group_id(&channel_id, false),
             message_id: format!("msg-{}", i),
             sender_session_id: session_id,
             ciphertext: vec![1, 2, 3],
@@ -127,7 +127,7 @@ async fn test_text_ratcheting_message_threshold() {
     
     // 50th message should trigger ratchet
     let packet = EncryptedTextPacket {
-        channel_id: channel_id.clone(),
+        channel_id: aura_protocol::make_mls_group_id(&channel_id, false),
         message_id: "msg-50".to_string(),
         sender_session_id: session_id,
         ciphertext: vec![1, 2, 3],
@@ -149,7 +149,7 @@ async fn test_reset_text_ratchet_counters() {
     
     // Manually increment message count
     {
-        let group_ref = state.text_groups.get(&channel_id);
+        let group_ref = state.text_groups.get(&aura_protocol::make_mls_group_id(&channel_id, false));
         if let Some(group_lock) = group_ref {
             let group = group_lock.read().await;
             group.message_count.store(100, std::sync::atomic::Ordering::Relaxed);
@@ -162,7 +162,7 @@ async fn test_reset_text_ratchet_counters() {
     // Verify reset
     {
     {
-        let group_ref = state.text_groups.get(&channel_id);
+        let group_ref = state.text_groups.get(&aura_protocol::make_mls_group_id(&channel_id, false));
         if let Some(group_lock) = group_ref {
             let group = group_lock.read().await;
             assert_eq!(group.message_count.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -196,7 +196,7 @@ async fn test_mls_first_joiner_becomes_founder() {
     // Verify founder is set
     {
     {
-        let group_ref = state.voice_groups.get(&channel_id);
+        let group_ref = state.voice_groups.get(&aura_protocol::make_mls_group_id(&channel_id, true));
         if let Some(group_lock) = group_ref {
             let group = group_lock.read().await;
             assert_eq!(group.founder_session_id, Some(session_id));
@@ -335,11 +335,11 @@ async fn test_session_removal_cleans_groups() {
     
     // Verify membership
     {
-        let group_ref = state.voice_groups.get(&channel_id);
+        let group_ref = state.voice_groups.get(&aura_protocol::make_mls_group_id(&channel_id, true));
         let voice_group = group_ref.unwrap();
         assert!(voice_group.read().await.members.contains(&session_id));
         
-        let group_ref2 = state.text_groups.get(&channel_id);
+        let group_ref2 = state.text_groups.get(&aura_protocol::make_mls_group_id(&channel_id, false));
         let text_group = group_ref2.unwrap();
         assert!(text_group.read().await.members.contains(&session_id));
     }
@@ -349,11 +349,11 @@ async fn test_session_removal_cleans_groups() {
     
     // Verify removed from groups
     {
-        let group_ref = state.voice_groups.get(&channel_id);
+        let group_ref = state.voice_groups.get(&aura_protocol::make_mls_group_id(&channel_id, true));
         let voice_group = group_ref.unwrap();
         assert!(!voice_group.read().await.members.contains(&session_id));
         
-        let group_ref2 = state.text_groups.get(&channel_id);
+        let group_ref2 = state.text_groups.get(&aura_protocol::make_mls_group_id(&channel_id, false));
         let text_group = group_ref2.unwrap();
         assert!(!text_group.read().await.members.contains(&session_id));
     }
