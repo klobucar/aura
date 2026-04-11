@@ -37,7 +37,7 @@ impl DaveCrypto {
     
     /// Generate a random key for testing
     pub fn random_key() -> [u8; KEY_SIZE] {
-        use rand::Rng;
+        use rand::RngExt;
         rand::rng().random()
     }
     

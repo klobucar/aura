@@ -82,7 +82,7 @@ impl FastAudioPacket {
         sequence: u16,
         payload: Bytes,
     ) -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let nonce: [u8; NONCE_SIZE] = rand::rng().random();
         Self {
             session_id,
