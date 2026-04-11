@@ -155,6 +155,13 @@ impl AuthService {
                     return Err(AuthError::UsernameTaken(display_name.to_string()));
                 }
 
+                // Check for reserved or spoofing names
+                let display_name_lower = display_name.to_lowercase();
+                let reserved_names = ["admin", "system", "server", "aura", "root", "moderator"];
+                if reserved_names.contains(&display_name_lower.as_str()) {
+                    return Err(AuthError::UsernameTaken(display_name.to_string()));
+                }
+
                 // Create new user with TOFU identity
                 let user_uuid = self.db.create_user(public_key, display_name)?;
                 self.db.find_user_by_uuid(&user_uuid)?.unwrap()
@@ -391,7 +398,8 @@ mod tests {
         let auth = AuthService::new(db, config);
         
         let mut rng = rand::rng();
-        let signing_key = SigningKey::generate(&mut rng);
+        let bytes: [u8; 32] = rng.random();
+        let signing_key = SigningKey::from_bytes(&bytes);
         
         (auth, signing_key)
     }
@@ -444,7 +452,8 @@ mod tests {
     fn test_username_claiming() {
         let (auth, signing_key1) = create_test_auth_service();
         let mut rng = rand::rng();
-        let signing_key2 = SigningKey::generate(&mut rng);
+        let bytes2: [u8; 32] = rng.random();
+        let signing_key2 = SigningKey::from_bytes(&bytes2);
 
         let pk1: [u8; 32] = signing_key1.verifying_key().to_bytes();
         let pk2: [u8; 32] = signing_key2.verifying_key().to_bytes();
@@ -470,6 +479,25 @@ mod tests {
     }
 
     #[test]
+    fn test_reserved_usernames() {
+        let (auth, signing_key) = create_test_auth_service();
+        let pk: [u8; 32] = signing_key.verifying_key().to_bytes();
+        
+        let reserved_names = ["admin", "System", "SERVER", "aura"];
+        
+        for name in reserved_names {
+            let challenge = AuthService::generate_challenge();
+            let sig = sign_challenge(&signing_key, &challenge);
+            let result = auth.authenticate(&pk, name, &sig, &challenge, None);
+            
+            assert!(
+                matches!(result, Err(AuthError::UsernameTaken(_))),
+                "Name {} should have been rejected as reserved", name
+            );
+        }
+    }
+
+    #[test]
     fn test_server_password() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let mut config = Config::default();
@@ -477,7 +505,8 @@ mod tests {
         let auth = AuthService::new(db, config);
 
         let mut rng = rand::rng();
-        let signing_key = SigningKey::generate(&mut rng);
+        let bytes: [u8; 32] = rng.random();
+        let signing_key = SigningKey::from_bytes(&bytes);
         let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
         let challenge = AuthService::generate_challenge();
         let sig = sign_challenge(&signing_key, &challenge);
