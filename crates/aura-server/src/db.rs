@@ -526,6 +526,13 @@ impl Database {
         }
     }
 
+    /// Delete a channel.
+    pub fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM channels WHERE channel_id = ?", params![channel_id])?;
+        Ok(())
+    }
+
     /// Get a user profile.
     pub fn get_user_profile(&self, user_uuid: &str) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>)>> {
         let conn = self.conn.lock().unwrap();
@@ -546,6 +553,15 @@ impl Database {
              VALUES (?, ?, ?, ?, ?)",
             params![user_uuid, bio, avatar_data, signature, signing_key],
         )?;
+        Ok(())
+    }
+
+    /// Delete a user and their profile.
+    pub fn delete_user(&self, user_uuid: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM user_profiles WHERE user_uuid = ?", params![user_uuid])?;
+        conn.execute("DELETE FROM admins WHERE user_uuid = ?", params![user_uuid])?;
+        conn.execute("DELETE FROM users WHERE user_uuid = ?", params![user_uuid])?;
         Ok(())
     }
 }

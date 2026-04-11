@@ -7,6 +7,8 @@
 
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU16, AtomicBool, Ordering}};
 use aura_protocol::Position;
+use crate::audio_pipeline::AudioSender;
+use crate::crypto::DaveCrypto;
 
 pub mod opus;
 pub mod opus16;
@@ -115,6 +117,16 @@ pub struct AuraClient {
     
     // Audio packet sequence number (wraps at 65536)
     sequence: AtomicU16,
+    
+    // Real audio send pipeline: Opus encoder + DAVE encryptor.
+    // Initialized on first use so AuraClient construction is cheap.
+    // Wrapped in Option so we can detect first-init, Mutex for thread safety.
+    audio_sender: Mutex<Option<AudioSender>>,
+    
+    // The numeric session ID used in audio packet headers.
+    // Derived from a hash of the identity file path at construction time
+    // and overwritten by the server-assigned session ID on connect.
+    session_id: AtomicU16,
 }
 
 #[uniffi::export]
@@ -122,6 +134,13 @@ impl AuraClient {
     /// Create a new AuraClient
     #[uniffi::constructor]
     pub fn new(url: String, identity_file: String) -> Self {
+        // Derive a stable local session ID from the identity file path until the
+        // server assigns us a real one on authentication.
+        let local_id = identity_file
+            .bytes()
+            .fold(0u16, |acc, b| acc.wrapping_add(b as u16)
+                .wrapping_mul(31));
+        
         Self {
             url,
             identity_file,
@@ -131,6 +150,8 @@ impl AuraClient {
             voice_epoch: AtomicU64::new(0),
             text_epoch: AtomicU64::new(0),
             sequence: AtomicU16::new(0),
+            audio_sender: Mutex::new(None),
+            session_id: AtomicU16::new(local_id),
         }
     }
     
@@ -205,58 +226,52 @@ impl AuraClient {
     /// Send an audio frame with proper epoch hint and XChaCha20 nonce.
     /// 
     /// Pipeline:
-    /// 1. Opus encode PCM -> compressed audio
-    /// 2. Zero-pad (16 bytes) for DAVE commitment
-    /// 3. XChaCha20-Poly1305 encrypt with random nonce
-    /// 4. Build FastAudioPacket with epoch_hint
-    /// 5. Send via QUIC datagram
+    /// 1. Lazy-init AudioSender (Opus encoder + DAVE encryptor) on first call
+    /// 2. AudioSender.process() → Opus encode → zero-pad → XChaCha20-Poly1305 encrypt
+    /// 3. Build FastAudioPacket with real random nonce and epoch_hint
+    /// 4. TODO: Send via QUIC datagram (transport not yet wired)
     pub fn send_audio_frame(&self, pcm_data: Vec<f32>) {
         if !self.connected.load(Ordering::Relaxed) {
             return;
         }
         
-        // 1. Encode PCM -> Opus (Simulation)
-        let opus_data = vec![0u8; pcm_data.len()]; // TODO: Use audiopus
-
-        // 2. Generate random 192-bit nonce for XChaCha20-Poly1305
-        // TODO: use rand::thread_rng().gen()
-        let nonce: [u8; 24] = [0u8; 24];
+        // Convert f32 PCM → i16 for the encoder
+        let pcm_i16: Vec<i16> = pcm_data.iter()
+            .map(|&s| (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .collect();
         
-        // 3. Get epoch hint (low 16 bits of voice epoch)
-        let epoch_hint = (self.voice_epoch.load(Ordering::Relaxed) & 0xFFFF) as u16;
+        // Lazy-init the AudioSender (Opus + DAVE) on first call.
+        // We generate a random key here — in the real E2EE flow this will be
+        // replaced by the MLS-derived epoch key via set_voice_epoch.
+        let mut guard = self.audio_sender.lock().unwrap();
+        if guard.is_none() {
+            let key = DaveCrypto::random_key();
+            match AudioSender::new(self.session_id.load(Ordering::Relaxed) as u32, &key) {
+                Ok(sender) => *guard = Some(sender),
+                Err(e) => {
+                    tracing::error!("Failed to initialize AudioSender: {}", e);
+                    return;
+                }
+            }
+        }
         
-        // 4. Get and increment sequence number
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-
-        // 5. Encrypt with XChaCha20-Poly1305
-        // See security comment block above for zero-padding requirement
-        let ciphertext = opus_data; // TODO: Implement actual encryption
-
-        // 6. Build FastAudioPacket
-        let pos = self.position.lock().unwrap();
-        let user_id = 1; // TODO: From identity
-
-        let _fast_packet = aura_protocol::FastAudioPacket {
-            session_id: user_id,
-            epoch_hint,
-            sequence,
-            nonce,
-            payload: bytes::Bytes::from(ciphertext),
-        };
+        let sender = guard.as_ref().unwrap();
         
-        // 7. Serialize header packet for logging/debugging
-        let packet = aura_protocol::AudioPacket {
-            header: Some(aura_protocol::Header {
-                user_id,
-                sequence: sequence as u64,
-                position: Some(pos.clone()),
-            }),
-            ciphertext: vec![],
-        };
+        // Sync epoch hint so the packet carries the current voice MLS epoch
+        sender.set_epoch(self.voice_epoch.load(Ordering::Relaxed));
         
-        use prost::Message;
-        let _bytes = packet.encode_to_vec();
-        // TODO: self.quic_connection.send_datagram(fast_packet.to_bytes())
+        match sender.process(&pcm_i16) {
+            Ok(_packet_bytes) => {
+                // TODO: self.quic_connection.send_datagram(packet_bytes)
+                // packet_bytes is a fully-formed FastAudioPacket with:
+                //   - Real Opus-encoded audio (not zeros)
+                //   - Real 192-bit random XChaCha20 nonce
+                //   - DAVE zero-padding commitment (16 bytes of 0x00 prepended)
+                //   - Correct epoch_hint from voice MLS group
+                let _ = _packet_bytes; // suppress unused warning until transport is wired
+            }
+            Err(e) => tracing::warn!("Audio encode/encrypt failed: {}", e),
+        }
     }
     
     /// Send a text message to the current channel

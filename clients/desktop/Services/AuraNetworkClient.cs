@@ -27,11 +27,13 @@ public class AuraNetworkClient : IAsyncDisposable
     private const byte MSG_MLS_ADD_MEMBER_REQ = 0x53; // Server forwards key package
     private const byte MSG_MLS_COMMIT = 0x54;         // Server broadcasts commit
     private const byte MSG_MLS_WELCOME = 0x55;        // Server sends welcome to new member
+    private const byte MSG_UPDATE_STATUS = 0x45;      // User mute/deafen sync
     
     private QuicConnection? _connection;
     private QuicStream? _controlStream;
     private uint _userId;
     private string? _sessionToken;
+    private string? _userUuid;          // Stable user UUID derived from Ed25519 public key hex
     private ushort _sequenceNumber;
     private TextCryptoService? _textCrypto;
     private RustAudioEngine? _audioEngine;
@@ -49,6 +51,7 @@ public class AuraNetworkClient : IAsyncDisposable
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
     public event Action<uint, byte[]>? OnAudioReceived;
+    public event Action<uint, bool, bool>? OnUserStatusUpdated; // sessionId, isMuted, isDeafened
     
     /// <summary>
     /// Connect to the Aura server via QUIC.
@@ -141,6 +144,9 @@ public class AuraNetworkClient : IAsyncDisposable
         
         _userId = userId;
         _sessionToken = sessionToken;
+        // Store the public key hex as the stable user UUID — this is what the server
+        // stores in its database (derived from the Ed25519 public key on first TOFU auth).
+        _userUuid = identity.PublicKeyHex;
         
         // Initialize MLS wrapper for E2EE
         try
@@ -273,6 +279,40 @@ public class AuraNetworkClient : IAsyncDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[AuraClient] Failed to send MLS join: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Update own mute/deafen status.
+    /// </summary>
+    public async Task UpdateStatusAsync(bool isMuted, bool isDeafened, CancellationToken ct = default)
+    {
+        if (_controlStream == null) return;
+        
+        var update = new UserStatusUpdate
+        {
+            SessionId = _userId,
+            IsMuted = isMuted,
+            IsDeafened = isDeafened
+        };
+        
+        try
+        {
+            using var ms = new MemoryStream();
+            ms.WriteByte(MSG_UPDATE_STATUS);
+            
+            var payload = update.ToByteArray();
+            var lenBuf = new byte[4];
+            BinaryPrimitives.WriteUInt32LittleEndian(lenBuf, (uint)payload.Length);
+            ms.Write(lenBuf);
+            ms.Write(payload);
+            
+            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            Console.WriteLine($"[AuraClient] Sent status update: muted={isMuted}, deafened={isDeafened}");
+        }
+        catch (Exception ex)
+        {
+            OnError?.Invoke($"Status update send error: {ex.Message}");
         }
     }
     
@@ -452,6 +492,10 @@ public class AuraNetworkClient : IAsyncDisposable
                         await HandleMlsWelcomeAsync(ct);
                         break;
                         
+                    case MSG_UPDATE_STATUS: // 0x45 - User status update
+                        await HandleUserStatusUpdateAsync(ct);
+                        break;
+                        
                     default:
                         Console.WriteLine($"[AuraClient] Unknown message type: 0x{msgType:X2}");
                         break;
@@ -518,10 +562,22 @@ public class AuraNetworkClient : IAsyncDisposable
 
         Console.WriteLine($"[AuraClient] UserJoined: {name} (ID: {sessionId}) in Channel {channelId}");
         
-        // Register remote sender for audio decryption (using same DAVE key for POC)
-        var daveKey = new byte[32];
-        for (int i = 0; i < 32; i++) daveKey[i] = 0x42;  // TODO: Derive from MLS per-sender
-        _audioManager?.AddRemoteSender(sessionId, daveKey);
+        // Register remote sender for audio decryption
+        if (_audioManager != null && _mlsWrapper != null)
+        {
+            if (_mlsWrapper.IsMember(channelId, isVoice: true))
+            {
+                try {
+                    var userKey = _mlsWrapper.ExportAudioKey(channelId, sessionId);
+                    var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: true);
+                    _audioManager.AddRemoteSender(sessionId, userKey);
+                    _audioManager.UpdateRemoteSenderKey(sessionId, userKey, (ushort)(epoch & 0xFFFF));
+                    Console.WriteLine($"[AuraClient] Added audio sender {sessionId} with MLS key");
+                } catch (Exception ex) {
+                    Console.WriteLine($"[AuraClient] Failed to derive MLS key for new user {sessionId}: {ex.Message}");
+                }
+            }
+        }
         
         OnUserJoined?.Invoke(channelId, sessionId, name);
     }
@@ -568,6 +624,31 @@ public class AuraNetworkClient : IAsyncDisposable
         }
     }
 
+    private async Task HandleUserStatusUpdateAsync(CancellationToken ct)
+    {
+        // 1. Read Length (4 bytes)
+        var lenBuf = new byte[4];
+        await ReadExactAsync(lenBuf, ct);
+        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
+        
+        // 2. Read Packet
+        var packet = new byte[len];
+        await ReadExactAsync(packet, ct);
+
+        try
+        {
+            // 3. Parse Protobuf UserStatusUpdate
+            var update = UserStatusUpdate.Parser.ParseFrom(packet);
+            Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}");
+            
+            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to parse UserStatusUpdate: {ex.Message}");
+        }
+    }
+
     public async Task SendTextMessageAsync(uint channelId, string content, string messageId, string? replyToId = null)
     {
         if (_controlStream == null) return;
@@ -579,12 +660,20 @@ public class AuraNetworkClient : IAsyncDisposable
         
         Console.WriteLine($"[AuraClient] Sending encrypted text message to channel {channelId}: {content.Substring(0, Math.Min(30, content.Length))}...");
         
+        // Determine the current text group epoch from MLS, falling back to 0 if not in group.
+        ulong textEpoch = 0;
+        if (_mlsWrapper != null)
+        {
+            try { textEpoch = _mlsWrapper.CurrentEpoch(_currentChannelId, isVoice: false); }
+            catch { /* not in a text group yet — epoch stays 0 */ }
+        }
+        
         // Encrypt the message using DAVE
         var encryptedPacket = _textCrypto.Encrypt(
-            epoch: 0,  // TODO: Use actual text epoch from MLS
+            epoch: textEpoch,
             channelId: channelId,
             senderSessionId: UserId,
-            senderUuid: $"user-{UserId}",  // TODO: Use real UUID from identity
+            senderUuid: _userUuid ?? $"user-{UserId}",
             content: content,
             messageId: messageId,
             replyToId: replyToId ?? ""
@@ -938,9 +1027,15 @@ public class AuraNetworkClient : IAsyncDisposable
             var myKey = _mlsWrapper.ExportAudioKey(channelId, _userId);
             var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: true);
             
-            // Reinitialize audio manager with new key
-            _audioManager?.Initialize(_userId, myKey);
-            Console.WriteLine($"[AuraClient] Updated audio keys from MLS, epoch={epoch}");
+            // Update local sender key
+            _audioManager?.UpdateSenderKey(myKey, epoch);
+            Console.WriteLine($"[AuraClient] Rotated audio sender key from MLS, epoch={epoch}");
+
+            // Update receiver keys for all known users in this channel
+            // Note: AuraNetworkClient doesn't maintain a full user list itself, 
+            // but we can trigger it from wherever the user list is managed (e.g. MainWindowViewModel)
+            // Or we check if we have any active streams in AudioManager.
+            // For now, we rely on HandleUserJoined which is more common.
         }
         catch (Exception ex)
         {

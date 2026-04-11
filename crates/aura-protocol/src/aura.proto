@@ -96,7 +96,14 @@ message ChannelInfo {
     string comment = 3;        // Supports Markdown
     ChannelIcon icon = 4;
     int32 position = 5;        // For custom ordering
-    repeated uint32 user_ids = 6; // Active users in this channel
+    repeated uint32 user_ids = 6; // Active users in this channel (deprecated)
+    repeated ChannelUserStatus users = 7; // Active users with status
+}
+
+message ChannelUserStatus {
+    uint32 session_id = 1;
+    bool is_muted = 2;
+    bool is_deafened = 3;
 }
 
 // Channel icon options
@@ -234,6 +241,13 @@ message TextMessage {
     string content = 3;          // Message content (plaintext after decryption)
     string reply_to_id = 4;      // Optional: message ID being replied to
     string message_id = 5;       // UUID for this message (for replies)
+    MediaType type = 6;          // Type of message (text, image, etc.)
+}
+
+enum MediaType {
+    TEXT = 0;
+    IMAGE = 1;
+    FILE = 2;
 }
 
 // Encrypted text packet sent over wire
@@ -280,4 +294,21 @@ message UpdateChannelRequest {
 message MetadataUpdateResponse {
     bool success = 1;
     string error_message = 2;
+}
+
+// Request to delete a channel (Admin only)
+message DeleteChannelRequest {
+    string channel_id = 1;
+}
+
+// Request to delete a user/profile
+message DeleteUserRequest {
+    string user_uuid = 1;
+}
+
+// User status update (mute/deafen)
+message UserStatusUpdate {
+    uint32 session_id = 1;
+    bool is_muted = 2;
+    bool is_deafened = 3;
 }

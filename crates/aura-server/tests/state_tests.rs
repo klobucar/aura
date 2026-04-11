@@ -362,3 +362,100 @@ async fn test_session_removal_cleans_groups() {
     assert!(!state.sessions.contains_key(&session_id));
     assert!(!state.profiles.contains_key("test-uuid"));
 }
+
+#[tokio::test]
+async fn test_user_status_sync_and_enforcement() {
+    let state = Arc::new(create_test_state());
+    let id_a = "U_A".to_string();
+    let id_b = "U_B".to_string();
+    let channel_id = "C_1".to_string();
+    
+    state.create_channel(channel_id.clone());
+    
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel();
+    
+    let sess_a = state.register_session(id_a.clone(), "127.0.0.1:1001".parse().unwrap(), tx_a);
+    let sess_b = state.register_session(id_b.clone(), "127.0.0.1:1002".parse().unwrap(), tx_b);
+    
+    // Join channel
+    state.handle_mls_join(channel_id.clone(), true, sess_a, id_a.clone(), vec![1]).await;
+    state.handle_mls_join(channel_id.clone(), true, sess_b, id_b.clone(), vec![2]).await;
+    
+    // Drain join notifications
+    while rx_a.try_recv().is_ok() {}
+    while rx_b.try_recv().is_ok() {}
+    
+    // 1. Test Status Broadcasting
+    state.broadcast_user_status(sess_a, true, false).await; // Muted
+    
+    let msg = rx_b.recv().await.unwrap();
+    if let ServiceMessage::UserStatusUpdate { session_id, is_muted, is_deafened } = msg {
+        assert_eq!(session_id, sess_a);
+        assert!(is_muted);
+        assert!(!is_deafened);
+    } else {
+        panic!("Expected UserStatusUpdate");
+    }
+
+    // 2. Test 'Deafen implies Mute' logic
+    state.broadcast_user_status(sess_a, false, true).await; // Deafened (should force mute)
+    
+    let msg = rx_b.recv().await.unwrap();
+    if let ServiceMessage::UserStatusUpdate { session_id, is_muted, is_deafened } = msg {
+        assert_eq!(session_id, sess_a);
+        assert!(is_muted); // Forced
+        assert!(is_deafened);
+    } else {
+        panic!("Expected UserStatusUpdate");
+    }
+
+    // 3. Test Audio Relay Enforcement (Sender Muted)
+    let audio_data = vec![0u8; 100];
+    let packet = aura_protocol::FastAudioPacket {
+        session_id: sess_a,
+        sequence: 1,
+        epoch_hint: 1,
+        nonce: [0u8; 24],
+        payload: audio_data.clone().into(),
+    };
+    
+    state.route_audio_packet(packet.to_bytes()).await;
+    
+    // B should NOT receive anything because A is muted
+    tokio::select! {
+        _ = rx_b.recv() => panic!("B should not have received audio from muted A"),
+        _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+    }
+
+    // 4. Test Audio Relay Enforcement (Receiver Deafened)
+    state.broadcast_user_status(sess_a, false, false).await; // A unmuted
+    state.broadcast_user_status(sess_b, false, true).await;  // B deafened (and muted)
+    
+    // Drain ALL status updates for both
+    while rx_a.try_recv().is_ok() {}
+    while rx_b.try_recv().is_ok() {}
+
+    let packet2 = aura_protocol::FastAudioPacket {
+        session_id: sess_a,
+        sequence: 2,
+        epoch_hint: 1,
+        nonce: [0u8; 24],
+        payload: audio_data.clone().into(),
+    };
+    
+    state.route_audio_packet(packet2.to_bytes()).await;
+
+    // B should NOT receive because they are deafened
+    tokio::select! {
+        msg = rx_b.recv() => {
+            if let Some(ServiceMessage::RelayAudio(_)) = msg {
+                panic!("Deafened B should not have received audio packet!");
+            } else {
+                // It's okay if it's a status update delayed, but in this sync test we should have drained it.
+                // However, let's be safe.
+            }
+        },
+        _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
+    }
+}

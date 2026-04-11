@@ -1,6 +1,9 @@
-# Client Architecture
-
-This diagram illustrates the architecture of the macOS Swift Client and its interaction with the Rust Core via UniFFI.
+---
+title: macOS Client Architecture
+description: Architecture of the Apple/Swift client and UniFFI integration.
+agent_intent: technical_reference
+---
+# macOS Client Architecture (Swift)
 
 ```mermaid
 graph TB

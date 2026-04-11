@@ -1,3 +1,8 @@
+---
+title: MLS Security Architecture
+description: Security model for Aura's Messaging Layer Security implementation.
+agent_intent: security_audit
+---
 # Aura MLS E2EE Security Model
 
 ## Overview

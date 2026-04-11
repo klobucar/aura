@@ -14,7 +14,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -44,8 +44,14 @@ pub struct ClientSession {
     pub user_uuid: String,
     pub voice_group_id: Option<String>,
     pub text_group_id: Option<String>,
+    pub is_muted: bool,
+    pub is_deafened: bool,
     pub socket_addr: SocketAddr,
     pub sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
+    /// Bytes received from this client (audio + control)
+    pub bytes_in: Arc<AtomicU64>,
+    /// Bytes sent to this client (relayed audio)
+    pub bytes_out: Arc<AtomicU64>,
 }
 
 /// Internal messages sent to client connection loops
@@ -94,6 +100,12 @@ pub enum ServiceMessage {
         channel_id: String,
         is_voice: bool,
         welcome: Vec<u8>,
+    },
+    /// Status update (mute/deafen) - broadcast to channel members
+    UserStatusUpdate {
+        session_id: u32,
+        is_muted: bool,
+        is_deafened: bool,
     },
 }
 
@@ -307,8 +319,12 @@ impl ServerState {
             user_uuid: user_uuid.clone(),
             voice_group_id: None,
             text_group_id: None,
+            is_muted: false,
+            is_deafened: false,
             socket_addr,
             sender,
+            bytes_in: Arc::new(AtomicU64::new(0)),
+            bytes_out: Arc::new(AtomicU64::new(0)),
         };
         self.sessions.insert(session_id, session);
         
@@ -362,8 +378,16 @@ impl ServerState {
                 }
             }
             info!("Removed session {}", session_id);
-            // Cleanup profile
-            self.profiles.remove(&session.user_uuid);
+            
+            // Only remove the profile cache entry if no other active session
+            // shares this user_uuid. A fast reconnect can register a new session
+            // before the old one is fully torn down — we must not wipe the new
+            // session's profile in that case.
+            let still_active = self.sessions.iter()
+                .any(|s| s.value().user_uuid == session.user_uuid);
+            if !still_active {
+                self.profiles.remove(&session.user_uuid);
+            }
         }
     }
 
@@ -423,11 +447,25 @@ impl ServerState {
         let mut channels = Vec::new();
         for meta_entry in self.channel_metadata.iter() {
             let meta = meta_entry.value();
-            let mut user_ids = Vec::new();
+            let mut users = Vec::new();
             
             if let Some(group_lock) = self.voice_groups.get(&meta.id) {
                 let group = group_lock.read().await;
-                user_ids = group.members.iter().map(|id| *id).collect();
+                for id in group.members.iter() {
+                    if let Some(sess) = self.sessions.get(&id) {
+                        users.push(aura_protocol::ChannelUserStatus {
+                            session_id: *id,
+                            is_muted: sess.is_muted,
+                            is_deafened: sess.is_deafened,
+                        });
+                    } else {
+                        users.push(aura_protocol::ChannelUserStatus {
+                            session_id: *id,
+                            is_muted: false,
+                            is_deafened: false,
+                        });
+                    }
+                }
             }
 
             let icon = match meta.icon_type {
@@ -449,7 +487,8 @@ impl ServerState {
                 comment: meta.comment.clone(),
                 icon,
                 position: meta.position,
-                user_ids,
+                user_ids: users.iter().map(|u| u.session_id).collect(),
+                users,
             });
         }
 
@@ -490,6 +529,27 @@ impl ServerState {
                     session_id,
                 });
             }
+        }
+    }
+
+    /// Broadcast user status update (mute/deafen) to everyone.
+    pub async fn broadcast_user_status(&self, session_id: u32, is_muted: bool, is_deafened: bool) {
+        // Force muted true if deafened is true
+        let (is_muted, is_deafened) = if is_deafened { (true, true) } else { (is_muted, is_deafened) };
+
+        // Update in-memory session state
+        if let Some(mut sess) = self.sessions.get_mut(&session_id) {
+            sess.is_muted = is_muted;
+            sess.is_deafened = is_deafened;
+        }
+
+        // Broadcast to ALL connected users
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::UserStatusUpdate {
+                session_id,
+                is_muted,
+                is_deafened,
+            });
         }
     }
 
@@ -1004,6 +1064,63 @@ impl ServerState {
         // Update in-memory cache
         self.profiles.insert(user_uuid, profile);
 
+        Ok(())
+    }
+
+    /// Delete a channel persistently.
+    pub async fn delete_channel_persistent(&self, channel_id: &str) -> Result<()> {
+        // Update DB
+        self.db.delete_channel(channel_id)?;
+        
+        // Update in-memory metadata
+        self.channel_metadata.remove(channel_id);
+        
+        // Force everyone out of the channel groups in-memory
+        if let Some(voice_group) = self.voice_groups.get(channel_id) {
+            let members = { voice_group.read().await.members.clone() };
+            for session_id in members {
+                self.remove_from_voice_group(channel_id.to_string(), session_id).await;
+            }
+        }
+        if let Some(text_group) = self.text_groups.get(channel_id) {
+            let members = { text_group.read().await.members.clone() };
+            for session_id in members {
+                self.remove_from_text_group(channel_id.to_string(), session_id).await;
+            }
+        }
+
+        self.voice_groups.remove(channel_id);
+        self.text_groups.remove(channel_id);
+
+        // Broadcast full state update to everyone
+        let snapshot = self.get_server_snapshot().await;
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a user profile and all associated data persistently.
+    pub async fn delete_user_persistent(&self, user_uuid: &str) -> Result<()> {
+        // Update DB
+        self.db.delete_user(user_uuid)?;
+        
+        // Update in-memory
+        self.profiles.remove(user_uuid);
+        
+        // Invalidate any active sessions for this user
+        let mut sessions_to_remove = Vec::new();
+        for sess in self.sessions.iter() {
+            if sess.user_uuid == user_uuid {
+                sessions_to_remove.push(*sess.key());
+            }
+        }
+        
+        for session_id in sessions_to_remove {
+            self.remove_session(session_id).await;
+        }
+
         // Broadcast full state update
         let snapshot = self.get_server_snapshot().await;
         for sess in self.sessions.iter() {
@@ -1043,6 +1160,14 @@ impl ServerState {
             }
         };
 
+        // Don't relay if sender is muted
+        if sender_session.is_muted {
+            return;
+        }
+
+        // Track inbound bytes for this sender
+        sender_session.bytes_in.fetch_add(raw_bytes.len() as u64, Ordering::Relaxed);
+
         let voice_group_id = match sender_session.voice_group_id {
             Some(id) => id,
             None => return, // Not in a voice channel
@@ -1057,12 +1182,19 @@ impl ServerState {
         };
 
         // Fan-out to all other members
+        let relay_len = raw_bytes.len() as u64;
         for member_id in members {
             if member_id == sender_session.session_id {
                 continue; // Don't echo back
             }
 
             if let Some(session) = self.sessions.get(&member_id) {
+                // Don't relay if receiver is deafened
+                if session.is_deafened {
+                    continue;
+                }
+                // Track outbound bytes for this receiver
+                session.bytes_out.fetch_add(relay_len, Ordering::Relaxed);
                 let _ = session.sender.send(ServiceMessage::RelayAudio(raw_bytes.clone()));
             }
         }

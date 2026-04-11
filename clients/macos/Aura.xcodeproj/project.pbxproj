@@ -50,16 +50,6 @@
 		26CEE0DB2EEE01F6007D1C27 /* AuraUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AuraUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		263FF9DC2EF4519700DFDBF7 /* Exceptions for "Aura" folder in "Aura" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Generated/libaura_core.a,
-			);
-			target = 26CEE0C32EEE01F4007D1C27 /* Aura */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
 		263FF9DB2EF3E54900DFDBF7 /* Exceptions for "Aura" folder in "Embed Libraries" phase from "Aura" target */ = {
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
@@ -77,7 +67,6 @@
 		26CEE0C62EEE01F5007D1C27 /* Aura */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				263FF9DC2EF4519700DFDBF7 /* Exceptions for "Aura" folder in "Aura" target */,
 				263FF9DB2EF3E54900DFDBF7 /* Exceptions for "Aura" folder in "Embed Libraries" phase from "Aura" target */,
 			);
 			path = Aura;

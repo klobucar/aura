@@ -20,6 +20,9 @@ public class QuicNetworkClient {
     public var currentChannelId: UInt32?
     public var sessionId: UInt32?  // Our own session ID
     
+    public var isMuted = false
+    public var isDeafened = false
+    
     /// Users by channel ID (tracks all channels, not just current)
     public var usersByChannel: [UInt32: [ChannelUser]] = [:]
     
@@ -85,6 +88,7 @@ public class QuicNetworkClient {
     private static let MSG_CREATE_CHANNEL: UInt8 = 0x40
     private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
     private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
+    private static let MSG_UPDATE_STATUS: UInt8 = 0x45
     
     // MLS Protocol message types
     private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
@@ -758,6 +762,9 @@ public class QuicNetworkClient {
         case Self.MSG_MLS_WELCOME: // 0x55 - Welcome message from founder
             await handleMlsWelcome(stream: stream)
             
+        case Self.MSG_UPDATE_STATUS: // 0x45
+            await handleUserStatusUpdate(stream: stream)
+            
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
             break
@@ -806,16 +813,22 @@ public class QuicNetworkClient {
                     print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
                     
-                    // Add sender to audio receiver for decryption (using same key as sender)
-                    if let receiver = self.audioReceiver {
-                        // Use same DAVE key as AudioSenderWrapper (line 345)
-                        let keyData = Data(repeating: 0x42, count: 32)  // TODO: Derive from MLS
-                        
-                        do {
-                            try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: 0)
-                            print("[QuicClient] Added audio sender \(sessionId) for decryption")
-                        } catch {
-                            print("[QuicClient] Failed to add sender: \(error)")
+                    // Add sender to audio receiver for decryption
+                    if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
+                        // Derive actual DAVE key from MLS if we are in the group
+                        let keyData: Data
+                        if mls.isMember(channelId: channelId, isVoice: true) {
+                            do {
+                                let keyBytes = try mls.exportAudioKey(channelId: channelId, senderSessionId: sessionId)
+                                let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
+                                keyData = Data(keyBytes)
+                                try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: UInt16(epoch & 0xFFFF))
+                                print("[QuicClient] Added audio sender \(sessionId) with MLS key")
+                            } catch {
+                                print("[QuicClient] Failed to derive MLS key for new user \(sessionId): \(error)")
+                            }
+                        } else {
+                            print("[QuicClient] Not an MLS member for channel \(channelId), waiting for epoch advance to add sender \(sessionId)")
                         }
                     }
                 } else {
@@ -896,10 +909,18 @@ public class QuicNetworkClient {
                     newUserMapping[c.channelId] = users
                     
                     // Add listeners for decryption
-                    if let receiver = self.audioReceiver {
+                    if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
                         for sid in c.userIds where sid != self.sessionId {
-                            let keyData = Data(repeating: 0x42, count: 32) // TODO: Derive from MLS
-                            try? receiver.addSender(sessionId: sid, key: keyData, epochHint: 0)
+                            if mls.isMember(channelId: c.channelId, isVoice: true) {
+                                do {
+                                    let keyBytes = try mls.exportAudioKey(channelId: c.channelId, senderSessionId: sid)
+                                    let epoch = try mls.currentEpoch(channelId: c.channelId, isVoice: true)
+                                    try receiver.addSender(sessionId: sid, key: Data(keyBytes), epochHint: UInt16(epoch & 0xFFFF))
+                                    print("[QuicClient] Added receiver key for user \(sid) from snapshot")
+                                } catch {
+                                    print("[QuicClient] Failed to derive snapshot key for \(sid): \(error)")
+                                }
+                            }
                         }
                     }
                 }
@@ -1230,11 +1251,9 @@ public class QuicNetworkClient {
         
         // Update sender with new key
         if let sender = audioSender {
-            // Recreate sender with new key
-            audioSender = try AudioSenderWrapper(sessionId: session, key: Data(myKey))
-            audioSender?.setEpoch(epoch: epoch)
-            audioSender?.setDredDuration(duration: 10)
-            print("[QuicClient] Updated audio sender with MLS key, epoch=\(epoch)")
+            // Use updateKey to preserve sequence numbers and other state
+            try sender.updateKey(key: Data(myKey), epoch: epoch)
+            print("[QuicClient] Rotated audio sender key from MLS, epoch=\(epoch)")
         }
         
         // Update receiver keys for all known users
@@ -1422,6 +1441,65 @@ public class QuicNetworkClient {
         // Send MLS join with key package for E2EE (both voice and text groups)
         await sendMlsJoin(channelId: channelId, isVoice: true)
         await sendMlsJoin(channelId: channelId, isVoice: false)
+    }
+    
+    // MARK: - User Status
+    
+    /// Update own mute/deafen status
+    public func updateStatus(isMuted: Bool, isDeafened: Bool) async {
+        guard let sessionId = self.sessionId, let stream = controlStream else { return }
+        
+        let update = UserStatusUpdate(
+            sessionId: sessionId,
+            isMuted: isMuted,
+            isDeafened: isDeafened
+        )
+        
+        do {
+            let payload = try encodeUserStatusUpdate(update: update)
+            var msg = Data([Self.MSG_UPDATE_STATUS])
+            let len = UInt32(payload.count).littleEndian
+            msg.append(withUnsafeBytes(of: len) { Data($0) })
+            msg.append(payload)
+            
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Sent status update: muted=\(isMuted), deafened=\(isDeafened)")
+        } catch {
+            print("[QuicClient] Failed to send status update: \(error)")
+        }
+    }
+    
+    private func handleUserStatusUpdate(stream: NWConnection) async {
+        do {
+            // Read length (4 bytes)
+            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let length = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            
+            // Read payload
+            let payload = try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
+            
+            // Decode via Rust core
+            let update = try decodeUserStatusUpdate(data: payload)
+            
+            // Update profile state
+            await MainActor.run {
+                if var profile = profiles[update.sessionId] {
+                    // Update profile record (if we want to store it there)
+                    // profiles[update.sessionId] = profile
+                }
+                
+                // Update usersByChannel mapping
+                for channelId in usersByChannel.keys {
+                    if let index = usersByChannel[channelId]?.firstIndex(where: { $0.id == update.sessionId }) {
+                        usersByChannel[channelId]?[index].isMuted = update.isMuted
+                        usersByChannel[channelId]?[index].isDeafened = update.isDeafened
+                        print("[QuicClient] Updated status for user \(update.sessionId) in channel \(channelId): muted=\(update.isMuted), deafened=\(update.isDeafened)")
+                    }
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse status update: \(error)")
+        }
     }
     
     // MARK: - Text Messaging
@@ -1719,12 +1797,16 @@ public struct ChannelUser: Identifiable, Hashable {
     public let displayName: String
     public let bio: String
     public let avatarData: Data?
+    public var isMuted: Bool
+    public var isDeafened: Bool
     
-    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil) {
+    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil, isMuted: Bool = false, isDeafened: Bool = false) {
         self.id = sessionId
         self.displayName = displayName
         self.bio = bio
         self.avatarData = avatarData
+        self.isMuted = isMuted
+        self.isDeafened = isDeafened
     }
 }
 

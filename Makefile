@@ -76,6 +76,14 @@ clean:
 dev: build-core generate-bindings
 	@echo "🚀 Ready for development"
 
+# Documentation
+docs-serve:
+	pip install mkdocs-material
+	mkdocs serve
+
+docs-build:
+	mkdocs build --strict
+
 # Help
 help:
 	@echo "Aura Build System"
@@ -91,3 +99,5 @@ help:
 	@echo "  test             Run all tests"
 	@echo "  clean            Clean build artifacts"
 	@echo "  dev              Quick rebuild for development"
+	@echo "  docs-serve       Serve documentation locally"
+	@echo "  docs-build       Build static documentation site"

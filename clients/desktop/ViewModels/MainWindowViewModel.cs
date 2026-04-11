@@ -57,6 +57,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private bool _isMicEnabled;
     
     [ObservableProperty]
+    private bool _isDeafened;
+    
+    [ObservableProperty]
     private string _audioStats = "";
     
     [ObservableProperty]
@@ -206,6 +209,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _client.OnTextMessage += (mid, sid, cid, content, reply) => 
                 Dispatcher.UIThread.Post(() => HandleTextMessage(mid, sid, cid, content, reply));
             
+            _client.OnUserStatusUpdated += (sid, muted, deafened) =>
+                Dispatcher.UIThread.Post(() => HandleUserStatusUpdate(sid, muted, deafened));
+            
             ConnectionStatus = "Connecting...";
             Console.WriteLine($"[ViewModel] Connecting to {ServerAddress}:{ServerPort}...");
             await _client.ConnectAsync(ServerAddress, ServerPort);
@@ -305,8 +311,11 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
     
     [RelayCommand]
-    private void ToggleMicrophone()
+    private async Task ToggleMicrophoneAsync()
     {
+        if (IsDeafened && !IsMicEnabled) return;
+        
+        IsMicEnabled = !IsMicEnabled;
         if (IsMicEnabled)
         {
             StartMic();
@@ -315,6 +324,29 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             StopMic();
         }
+        
+        if (_client != null)
+        {
+            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
+        }
+    }
+    
+    [RelayCommand]
+    private async Task ToggleDeafenAsync()
+    {
+        IsDeafened = !IsDeafened;
+        
+        if (IsDeafened && IsMicEnabled)
+        {
+            // Auto-mute on deafen
+            await ToggleMicrophoneAsync();
+        }
+        else if (_client != null)
+        {
+            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
+        }
+        
+        // TODO: Actually mute output in RustAudioEngine if needed
     }
     
     private void StartMic()
@@ -409,6 +441,20 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             IsFromCurrentUser = false
         });
     }
+
+    private void HandleUserStatusUpdate(uint sessionId, bool isMuted, bool isDeafened)
+    {
+        foreach (var channel in Channels)
+        {
+            var user = channel.Users.FirstOrDefault(u => u.Id == sessionId);
+            if (user != null)
+            {
+                user.IsMuted = isMuted;
+                user.IsDeafened = isDeafened;
+                break;
+            }
+        }
+    }
     
     public async ValueTask DisposeAsync()
     {
@@ -466,14 +512,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 IsExpanded = true
             };
             
-            foreach (var userId in chanInfo.UserIds)
+            foreach (var userStatus in chanInfo.Users)
             {
+                uint userId = userStatus.SessionId;
                 if (_client != null && userId == _client.UserId) continue; // Skip self
                 
                 string name = $"User {userId}";
                 string comment = "";
                 
-                if (profileMap.TryGetValue(userId, out var profile))
+                if (profileMap.TryGetValue(userId.ToString(), out var profile))
                 {
                     name = profile.DisplayName;
                     comment = profile.Bio;
@@ -483,7 +530,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 { 
                     Id = userId, 
                     Name = name,
-                    Comment = comment
+                    Comment = comment,
+                    IsMuted = userStatus.IsMuted,
+                    IsDeafened = userStatus.IsDeafened
                 });
             }
             Channels.Add(channel);
@@ -554,6 +603,7 @@ public partial class User : ObservableObject
     [ObservableProperty] private string _name = "";
     [ObservableProperty] private string _comment = "";
     [ObservableProperty] private bool _isMuted;
+    [ObservableProperty] private bool _isDeafened;
     [ObservableProperty] private bool _isSpeaking;
     [ObservableProperty] private Position3D _position = new(0, 0, 0);
 }

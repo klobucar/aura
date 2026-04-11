@@ -1,0 +1,71 @@
+site_name: Aura Documentation
+site_url: https://aura.social/docs
+site_description: Privacy-first spatial audio platform using MLS and DAVE protocols.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: diagrams/02_server_architecture.md
+      - Protocol Flow: diagrams/01_protocol_flow.md
+      - macOS Client: diagrams/03_client_architecture.md
+      - Desktop Client (C#): diagrams/03_desktop_client_architecture.md
+      - Audio Pipeline: diagrams/04_audio_pipeline.md
+  - Protocol Details:
+      - Base Protocol: protocol.md
+      - DAVE Deviations: 05_dave_protocol_deviations.md
+      - MLS Security: MLS_SECURITY.md
+  - Developer Guides:
+      - Architecture Patterns: development/architecture_patterns.md
+      - Codec & Protocol: development/codec_and_protocol.md
+      - Testing Standards: development/testing_standards.md
+      - Speaker Indicators: speaker-indicators.md
+  - Operations:
+      - Fuzzing: FUZZING.md
+      - C# Client Migration: csharp-client-migration.md
+      - Roadmap: ROADMAP.md
