@@ -6,7 +6,7 @@ use crate::config::{Config, VerificationMode};
 use crate::db::{AdminPermissions, Database, User};
 use dashmap::DashMap;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use rand::Rng;
+use rand::RngExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -86,15 +86,15 @@ impl AuthService {
 
     /// Generate a cryptographically secure session token.
     fn generate_session_token() -> String {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let bytes: [u8; 32] = rng.random();
         hex::encode(bytes)
     }
 
     /// Generate a challenge for signature verification.
     pub fn generate_challenge() -> Vec<u8> {
-        let mut rng = rand::thread_rng();
-        let bytes: [u8; 32] = rng.gen();
+        let mut rng = rand::rng();
+        let bytes: [u8; 32] = rng.random();
         bytes.to_vec()
     }
 
@@ -390,7 +390,7 @@ mod tests {
         let config = Config::default();
         let auth = AuthService::new(db, config);
         
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let signing_key = SigningKey::generate(&mut rng);
         
         (auth, signing_key)
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_username_claiming() {
         let (auth, signing_key1) = create_test_auth_service();
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let signing_key2 = SigningKey::generate(&mut rng);
 
         let pk1: [u8; 32] = signing_key1.verifying_key().to_bytes();
@@ -476,7 +476,7 @@ mod tests {
         config.server.password = Some("secret123".to_string());
         let auth = AuthService::new(db, config);
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let signing_key = SigningKey::generate(&mut rng);
         let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
         let challenge = AuthService::generate_challenge();

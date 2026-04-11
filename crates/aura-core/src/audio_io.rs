@@ -68,7 +68,7 @@ impl AudioCapture {
         
         let config = StreamConfig {
             channels: 1,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
         };
         
@@ -142,7 +142,7 @@ impl AudioPlayback {
         
         let config = StreamConfig {
             channels: 1,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Fixed(FRAME_SIZE as u32),
         };
         
