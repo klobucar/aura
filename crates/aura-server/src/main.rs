@@ -7,16 +7,10 @@
 //! - Admin system for user verification and moderation
 //! - QUIC transport for low-latency voice
 
-use aura_server::auth;
-use aura_server::config;
-use aura_server::connection;
-use aura_server::db;
-use aura_server::state;
-
 use aura_server::config::Config;
 use aura_server::connection::QuicServer;
 use aura_server::db::Database;
-use aura_server::state::ServerState;
+use aura_server::state::{self, ServerState};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -116,7 +110,7 @@ async fn main() -> Result<()> {
         let icon_data = "🛋️".as_bytes();
         
         // Persist to DB
-        db.upsert_channel(Some(channel_id.clone()), name, comment, icon_type, icon_data, 0)?;
+        db.upsert_channel(Some(channel_id.clone()), name, comment, icon_type, icon_data, 0, 1)?; // 1 = Lobby
         
         // Initialize in memory
         state.create_channel(channel_id.clone());
@@ -127,6 +121,7 @@ async fn main() -> Result<()> {
             icon_type,
             icon_data: icon_data.to_vec(),
             position: 0,
+            channel_type: 1, // Lobby
         });
         
         info!("Created default channel '{}' (ID {})", name, channel_id);

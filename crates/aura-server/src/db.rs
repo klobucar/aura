@@ -132,7 +132,8 @@ impl Database {
                 comment TEXT,
                 icon_type INTEGER DEFAULT 0, -- 0=none, 1=emoji, 2=preset, 3=custom
                 icon_data BLOB,
-                position INTEGER DEFAULT 0
+                position INTEGER DEFAULT 0,
+                channel_type INTEGER DEFAULT 0 -- 0=regular, 1=lobby
             );
 
             -- User profiles table
@@ -482,10 +483,10 @@ impl Database {
     }
 
     /// Get all channels from the database.
-    pub fn get_all_channels(&self) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32)>> {
+    pub fn get_all_channels(&self) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32, i32)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, name, comment, icon_type, icon_data, position 
+            "SELECT channel_id, name, comment, icon_type, icon_data, position, channel_type 
              FROM channels ORDER BY position, channel_id",
         )?;
 
@@ -498,6 +499,7 @@ impl Database {
                     row.get(3)?,
                     row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -506,21 +508,21 @@ impl Database {
     }
 
     /// Upsert a channel.
-    pub fn upsert_channel(&self, id: Option<String>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32) -> Result<String> {
+    pub fn upsert_channel(&self, id: Option<String>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32, channel_type: i32) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         if let Some(id) = id {
             conn.execute(
-                "INSERT OR REPLACE INTO channels (channel_id, name, comment, icon_type, icon_data, position)
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                params![id, name, comment, icon_type, icon_data, position],
+                "INSERT OR REPLACE INTO channels (channel_id, name, comment, icon_type, icon_data, position, channel_type)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![id, name, comment, icon_type, icon_data, position, channel_type],
             )?;
             Ok(id)
         } else {
             let channel_id = format!("C_{}", Uuid::new_v4());
             conn.execute(
-                "INSERT INTO channels (channel_id, name, comment, icon_type, icon_data, position)
-                 VALUES (?, ?, ?, ?, ?, ?)",
-                params![channel_id, name, comment, icon_type, icon_data, position],
+                "INSERT INTO channels (channel_id, name, comment, icon_type, icon_data, position, channel_type)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![channel_id, name, comment, icon_type, icon_data, position, channel_type],
             )?;
             Ok(channel_id)
         }

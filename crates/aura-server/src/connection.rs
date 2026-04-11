@@ -18,12 +18,12 @@ use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
 // Protocol message types
-const MSG_CHALLENGE_REQUEST: u8 = 0x01;
+// const MSG_CHALLENGE_REQUEST: u8 = 0x01;
 const MSG_CHALLENGE_RESPONSE: u8 = 0x02;
 const MSG_AUTH_REQUEST: u8 = 0x03;
 const MSG_AUTH_RESPONSE: u8 = 0x04;
 const MSG_JOIN_CHANNEL: u8 = 0x10;
-const MSG_AUDIO_STREAM: u8 = 0x20;
+// const MSG_AUDIO_STREAM: u8 = 0x20;
 const MSG_TEXT_PACKET: u8 = 0x30;
 const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
@@ -38,7 +38,7 @@ const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after 
 
 // Security limits
 const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
-const MAX_TEXT_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB for text/metadata
+const MAX_CONTROL_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB for signaling/metadata
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -87,7 +87,7 @@ impl QuicServer {
         let alpn = vec![b"aura-dave".to_vec()];
         
         // Build ACME config
-        let mut acme_state = AcmeConfig::new([domain])
+        let acme_state = AcmeConfig::new([domain])
             .contact([format!("mailto:{}", contact)])
             .cache_with_boxed_err(DirCache::new(cache_path))
             .state();
@@ -375,11 +375,12 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 
 
 /// Client session after authentication.
+/* 
 struct AuthSession {
     session_id: u32,
-    user_uuid: String,
-    session_token: String,
+    username: String,
 }
+*/
 
 /// Authenticate a client using TOFU protocol.
 /// Server-first protocol for Apple Network.framework compatibility:
@@ -539,11 +540,9 @@ impl ConnectionContext {
                 // Keepalive ping, ignore
             }
             MSG_JOIN_CHANNEL => {
-                // [0x10] [len u8] [channel_id string]
-                let len = self.recv.read_u8().await? as usize;
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                let channel_id = String::from_utf8(buf)?;
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::JoinChannelRequest::decode(&buf[..])?;
+                let channel_id = req.channel_id;
                 
                 info!("[{}] Joining channel {}", self.remote, channel_id);
                 
@@ -588,46 +587,16 @@ impl ConnectionContext {
                  info!("[{}] Routed audio packet from session {}", self.remote, self.session_id);
             }
             MSG_TEXT_PACKET => {
-                // [0x30] [Length u32] [BinaryPacket]
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let packet_len = u32::from_le_bytes(len_buf) as usize;
+                let packet_buf = self.read_frame_payload().await?;
+                let packet = aura_protocol::EncryptedTextPacket::decode(&packet_buf[..])?;
                 
-                if packet_len > MAX_TEXT_PACKET_SIZE {
-                    warn!("[{}] Text packet too large: {}", self.remote, packet_len);
-                    return Ok(false); // Disconnect
-                }
+                info!("[{}] Text packet from session {} in channel {} (msgId: {})", 
+                      self.remote, packet.sender_session_id, packet.channel_id, packet.message_id);
                 
-                let mut packet_buf = Vec::new();
-                (&mut self.recv).take(packet_len as u64).read_to_end(&mut packet_buf).await?;
-                if packet_buf.len() != packet_len {
-                    return Err(anyhow!("Incomplete text packet received"));
-                }
-                
-                match parse_text_packet(&packet_buf) {
-                    Ok(text_packet) => {
-                         let message_id = text_packet.message_id.clone();
-                         info!("[{}] Text packet from session {} in channel {} (msgId: {})", 
-                            self.remote, text_packet.sender_session_id, text_packet.channel_id, message_id);
-                         
-                         let needs_ratchet = self.state.broadcast_text_message(self.session_id, text_packet).await;
-                         if needs_ratchet {
-                             info!("[{}] Text group needs ratcheting", self.remote);
-                         }
-                    }
-                    Err(e) => {
-                        warn!("[{}] Invalid text packet: {}", self.remote, e);
-                    }
-                }
+                self.state.broadcast_text_message(self.session_id, packet).await;
             }
             MSG_CREATE_CHANNEL => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::CreateChannelRequest::decode(&buf[..])?;
                 
                 // Only admins can create channels
@@ -661,13 +630,7 @@ impl ConnectionContext {
                 }
             }
             MSG_UPDATE_CHANNEL => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::UpdateChannelRequest::decode(&buf[..])?;
 
                 // Only admins can update channels
@@ -698,13 +661,7 @@ impl ConnectionContext {
                 }
             }
             MSG_UPDATE_PROFILE => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::UpdateProfile::decode(&buf[..])?;
                 
                 // Ensure they are only updating their own user_id
@@ -737,13 +694,7 @@ impl ConnectionContext {
                 }
             }
             MSG_DELETE_CHANNEL => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::DeleteChannelRequest::decode(&buf[..])?;
 
                 // Only admins can delete channels
@@ -774,13 +725,7 @@ impl ConnectionContext {
                 }
             }
             MSG_DELETE_USER => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::DeleteUserRequest::decode(&buf[..])?;
 
                 // Only admins or the user themselves can delete their profile
@@ -811,13 +756,7 @@ impl ConnectionContext {
                 }
             }
             MSG_UPDATE_STATUS => {
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let len = u32::from_le_bytes(len_buf) as usize;
-                
-                let mut buf = vec![0u8; len];
-                self.recv.read_exact(&mut buf).await?;
-                
+                let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::UserStatusUpdate::decode(&buf[..])?;
                 
                 // Only allow users to update their own status
@@ -829,31 +768,22 @@ impl ConnectionContext {
                 self.state.broadcast_user_status(req.session_id, req.is_muted, req.is_deafened).await;
             }
             MSG_MLS_JOIN => {
-                // [0x50] [channel_id_len: u8] [channel_id: string] [is_voice: u8] [kp_len: u32] [key_package]
-                let id_len = self.recv.read_u8().await? as usize;
-                let mut id_buf = vec![0u8; id_len];
-                self.recv.read_exact(&mut id_buf).await?;
-                let channel_id = String::from_utf8(id_buf)?;
+                let buf = self.read_frame_payload().await?;
+                let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
+                let channel_id = envelope.channel_id.clone();
+                let is_voice = envelope.group_type() == aura_protocol::MlsGroupType::Voice;
                 
-                let is_voice = self.recv.read_u8().await? != 0;
+                let Some(content) = envelope.content else {
+                    return Err(anyhow!("MLS join envelope missing content"));
+                };
                 
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let kp_len = u32::from_le_bytes(len_buf) as usize;
+                let key_package = match content {
+                    aura_protocol::mls_envelope::Content::KeyPackage(kp) => kp,
+                    _ => return Err(anyhow!("MLS join envelope must contain key_package")),
+                };
                 
-                if kp_len > MAX_TEXT_PACKET_SIZE {
-                    warn!("[{}] MLS key package too large: {}", self.remote, kp_len);
-                    return Ok(false);
-                }
-                
-                let mut key_package = Vec::new();
-                (&mut self.recv).take(kp_len as u64).read_to_end(&mut key_package).await?;
-                if key_package.len() != kp_len {
-                    return Err(anyhow!("Incomplete key package received"));
-                }
-                
-                info!("[{}] MLS join for {} channel {} ({} bytes KP)",
-                      self.remote, if is_voice { "voice" } else { "text" }, channel_id, kp_len);
+                info!("[{}] MLS join for {} channel {}", 
+                      self.remote, if is_voice { "voice" } else { "text" }, channel_id);
                 
                 self.state.handle_mls_join(
                     channel_id,
@@ -864,40 +794,21 @@ impl ConnectionContext {
                 ).await;
             }
             MSG_MLS_COMMIT_WELCOME => {
-                // [0x51] [channel_id_len: u8] [channel_id: string] [is_voice: u8] [new_member_session_id: u32]
-                //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
-                let id_len = self.recv.read_u8().await? as usize;
-                let mut id_buf = vec![0u8; id_len];
-                self.recv.read_exact(&mut id_buf).await?;
-                let channel_id = String::from_utf8(id_buf)?;
+                let buf = self.read_frame_payload().await?;
+                let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
+                let channel_id = envelope.channel_id.clone();
+                let is_voice = envelope.group_type() == aura_protocol::MlsGroupType::Voice;
                 
-                let is_voice = self.recv.read_u8().await? != 0;
+                let Some(content) = envelope.content else {
+                    return Err(anyhow!("MLS commit/welcome envelope missing content"));
+                };
                 
-                let mut len_buf = [0u8; 4];
-                self.recv.read_exact(&mut len_buf).await?;
-                let new_member_session_id = u32::from_le_bytes(len_buf);
-                
-                self.recv.read_exact(&mut len_buf).await?;
-                let commit_len = u32::from_le_bytes(len_buf) as usize;
-                if commit_len > MAX_TEXT_PACKET_SIZE {
-                    return Ok(false);
-                }
-                let mut commit = Vec::new();
-                (&mut self.recv).take(commit_len as u64).read_to_end(&mut commit).await?;
-                if commit.len() != commit_len {
-                    return Err(anyhow!("Incomplete commit received"));
-                }
-                
-                self.recv.read_exact(&mut len_buf).await?;
-                let welcome_len = u32::from_le_bytes(len_buf) as usize;
-                if welcome_len > MAX_TEXT_PACKET_SIZE {
-                    return Ok(false);
-                }
-                let mut welcome = Vec::new();
-                (&mut self.recv).take(welcome_len as u64).read_to_end(&mut welcome).await?;
-                if welcome.len() != welcome_len {
-                    return Err(anyhow!("Incomplete welcome received"));
-                }
+                let (new_member_session_id, commit, welcome) = match content {
+                    aura_protocol::mls_envelope::Content::CommitWelcome(cw) => {
+                        (cw.new_member_session_id, cw.commit, cw.welcome)
+                    }
+                    _ => return Err(anyhow!("MLS commit/welcome envelope must contain commit_welcome")),
+                };
                 
                 info!("[{}] MLS commit/welcome for {} channel {} (new member: {})",
                       self.remote, if is_voice { "voice" } else { "text" }, channel_id, new_member_session_id);
@@ -934,26 +845,20 @@ impl ConnectionContext {
                     self.send.flush().await?;
                 }
             }
-            ServiceMessage::UserJoined { channel_id, session_id: joined_id, display_name } => {
-                let id_bytes = channel_id.as_bytes();
-                let name_bytes = display_name.as_bytes();
-                let mut msg = vec![0x11u8];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.extend_from_slice(&joined_id.to_le_bytes());
-                msg.push(name_bytes.len() as u8);
-                msg.extend_from_slice(name_bytes);
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+            ServiceMessage::UserJoined { channel_id, session_id, display_name } => {
+                let msg = aura_protocol::UserJoined {
+                    channel_id,
+                    session_id,
+                    display_name,
+                };
+                self.send_proto_response(0x11, msg).await?;
             }
-            ServiceMessage::UserLeft { channel_id, session_id: left_id } => {
-                let id_bytes = channel_id.as_bytes();
-                let mut msg = vec![0x12u8];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.extend_from_slice(&left_id.to_le_bytes());
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+            ServiceMessage::UserLeft { channel_id, session_id } => {
+                let msg = aura_protocol::UserLeft {
+                    channel_id,
+                    session_id,
+                };
+                self.send_proto_response(0x12, msg).await?;
             }
             ServiceMessage::ServerSnapshot(snapshot) => {
                 let mut payload = Vec::new();
@@ -967,62 +872,53 @@ impl ConnectionContext {
                 self.send.flush().await?;
             }
             ServiceMessage::RelayText(text_packet) => {
-                let packet_bytes = serialize_text_packet(&text_packet);
-                let mut msg = vec![MSG_TEXT_PACKET];
-                msg.extend_from_slice(&(packet_bytes.len() as u32).to_le_bytes());
-                msg.extend_from_slice(&packet_bytes);
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+                self.send_proto_response(MSG_TEXT_PACKET, text_packet).await?;
             }
             
             // --- MLS Protocol Messages ---
             
             ServiceMessage::MlsCreateGroup { channel_id, is_voice } => {
-                let id_bytes = channel_id.as_bytes();
-                let mut msg = vec![0x52];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.push(if is_voice { 1 } else { 0 });
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
-                info!("[{}] Sent MlsCreateGroup for channel {}", self.remote, channel_id);
+                let envelope = aura_protocol::MlsEnvelope {
+                    sender_id: self.session_id,
+                    channel_id,
+                    group_type: if is_voice { aura_protocol::MlsGroupType::Voice as i32 } else { aura_protocol::MlsGroupType::Text as i32 },
+                    epoch: 0,
+                    content: Some(aura_protocol::mls_envelope::Content::CreateGroup(true)),
+                    ..Default::default()
+                };
+                self.send_proto_response(0x52, envelope).await?;
             }
             ServiceMessage::MlsAddMemberRequest { channel_id, is_voice, joiner_session_id, joiner_uuid, key_package } => {
-                let id_bytes = channel_id.as_bytes();
-                let uuid_bytes = joiner_uuid.as_bytes();
-                let mut msg = vec![0x53];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.push(if is_voice { 1 } else { 0 });
-                msg.extend_from_slice(&joiner_session_id.to_le_bytes());
-                msg.push(uuid_bytes.len() as u8);
-                msg.extend_from_slice(uuid_bytes);
-                msg.extend_from_slice(&(key_package.len() as u32).to_le_bytes());
-                msg.extend_from_slice(&key_package);
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+                let envelope = aura_protocol::MlsEnvelope {
+                    sender_id: self.session_id,
+                    channel_id,
+                    group_type: if is_voice { aura_protocol::MlsGroupType::Voice as i32 } else { aura_protocol::MlsGroupType::Text as i32 },
+                    target_session_id: joiner_session_id,
+                    target_uuid: joiner_uuid,
+                    content: Some(aura_protocol::mls_envelope::Content::KeyPackage(key_package)),
+                    ..Default::default()
+                };
+                self.send_proto_response(0x53, envelope).await?;
             }
             ServiceMessage::MlsCommit { channel_id, is_voice, commit } => {
-                let id_bytes = channel_id.as_bytes();
-                let mut msg = vec![0x54];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.push(if is_voice { 1 } else { 0 });
-                msg.extend_from_slice(&(commit.len() as u32).to_le_bytes());
-                msg.extend_from_slice(&commit);
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+                let envelope = aura_protocol::MlsEnvelope {
+                    sender_id: self.session_id,
+                    channel_id,
+                    group_type: if is_voice { aura_protocol::MlsGroupType::Voice as i32 } else { aura_protocol::MlsGroupType::Text as i32 },
+                    content: Some(aura_protocol::mls_envelope::Content::Commit(commit)),
+                    ..Default::default()
+                };
+                self.send_proto_response(0x54, envelope).await?;
             }
             ServiceMessage::MlsWelcome { channel_id, is_voice, welcome } => {
-                let id_bytes = channel_id.as_bytes();
-                let mut msg = vec![0x55];
-                msg.push(id_bytes.len() as u8);
-                msg.extend_from_slice(id_bytes);
-                msg.push(if is_voice { 1 } else { 0 });
-                msg.extend_from_slice(&(welcome.len() as u32).to_le_bytes());
-                msg.extend_from_slice(&welcome);
-                self.send.write_all(&msg).await?;
-                self.send.flush().await?;
+                let envelope = aura_protocol::MlsEnvelope {
+                    sender_id: self.session_id,
+                    channel_id,
+                    group_type: if is_voice { aura_protocol::MlsGroupType::Voice as i32 } else { aura_protocol::MlsGroupType::Text as i32 },
+                    content: Some(aura_protocol::mls_envelope::Content::Welcome(welcome)),
+                    ..Default::default()
+                };
+                self.send_proto_response(0x55, envelope).await?;
             }
             ServiceMessage::UserStatusUpdate { session_id, is_muted, is_deafened } => {
                 let update = aura_protocol::UserStatusUpdate {
@@ -1034,6 +930,20 @@ impl ConnectionContext {
             }
         }
         Ok(())
+    }
+
+    async fn read_frame_payload(&mut self) -> Result<Vec<u8>> {
+        let mut len_buf = [0u8; 4];
+        self.recv.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        
+        if len > MAX_CONTROL_PACKET_SIZE {
+            return Err(anyhow!("Incoming frame too large: {} bytes (max {})", len, MAX_CONTROL_PACKET_SIZE));
+        }
+        
+        let mut buf = vec![0u8; len];
+        self.recv.read_exact(&mut buf).await?;
+        Ok(buf)
     }
 
     async fn send_proto_response<M: Message>(&mut self, msg_type: u8, msg: M) -> Result<()> {
@@ -1052,220 +962,8 @@ impl ConnectionContext {
 
 // Helper functions for packet handling
 
-fn parse_text_packet(packet_buf: &[u8]) -> Result<aura_protocol::EncryptedTextPacket> {
-    // binary format:
-    // sender(4) + channel(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + content + nonce(24) + tag(16)
-    // min size: 4+4+8+1+0+4+0+24+16 = 61
-    
-    if packet_buf.len() < 61 {
-        return Err(anyhow!("Packet too short: {} bytes", packet_buf.len()));
-    }
-    
-    let mut offset = 0;
-    
-    fn read_u32(buf: &[u8], offset: &mut usize) -> Result<u32> {
-        if *offset + 4 > buf.len() { return Err(anyhow!("Unexpected EOF parsing u32")); }
-        let val = u32::from_le_bytes(buf[*offset..*offset+4].try_into()?);
-        *offset += 4;
-        Ok(val)
-    }
-    
-    fn read_u64(buf: &[u8], offset: &mut usize) -> Result<u64> {
-        if *offset + 8 > buf.len() { return Err(anyhow!("Unexpected EOF parsing u64")); }
-        let val = u64::from_le_bytes(buf[*offset..*offset+8].try_into()?);
-        *offset += 8;
-        Ok(val)
-    }
-    
-    let sender_session_id = read_u32(packet_buf, &mut offset)?;
-    
-    // Channel ID
-    if offset + 1 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing channel_id_len")); }
-    let channel_id_len = packet_buf[offset] as usize;
-    offset += 1;
-    if offset + channel_id_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing channel_id")); }
-    let channel_id = String::from_utf8(packet_buf[offset..offset+channel_id_len].to_vec())
-        .map_err(|_| anyhow!("Invalid UTF-8 in channel_id"))?;
-    offset += channel_id_len;
-
-    let epoch = read_u64(packet_buf, &mut offset)?;
-    
-    // Message ID
-    if offset + 1 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing msg_id_len")); }
-    let msg_id_len = packet_buf[offset] as usize;
-    offset += 1;
-    
-    if offset + msg_id_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing msg_id")); }
-    let message_id = String::from_utf8(packet_buf[offset..offset+msg_id_len].to_vec())
-        .map_err(|_| anyhow!("Invalid UTF-8 in message_id"))?;
-    offset += msg_id_len;
-    
-    // Content
-    let content_len = read_u32(packet_buf, &mut offset)? as usize;
-    if offset + content_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing content")); }
-    
-    let ciphertext = packet_buf[offset..offset+content_len].to_vec();
-    offset += content_len;
-    
-    // Nonce & Tag
-    if offset + 24 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing nonce")); }
-    let nonce = packet_buf[offset..offset+24].to_vec();
-    offset += 24;
-    
-    if offset + 16 > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing tag")); }
-    let tag = packet_buf[offset..offset+16].to_vec();
-    offset += 16;
-    
-    // Reply To ID (Optional)
-    let mut reply_to_id = String::new();
-    if offset < packet_buf.len() {
-        let reply_len = packet_buf[offset] as usize;
-        offset += 1;
-        if reply_len > 0 {
-            if offset + reply_len > packet_buf.len() { return Err(anyhow!("Unexpected EOF parsing reply_id")); }
-            reply_to_id = String::from_utf8(packet_buf[offset..offset+reply_len].to_vec())
-                .unwrap_or_default();
-        }
-    }
-    
-    Ok(aura_protocol::EncryptedTextPacket {
-        sender_session_id,
-        channel_id,
-        epoch,
-        message_id,
-        ciphertext,
-        nonce,
-        tag,
-        reply_to_id
-    })
-}
-
-fn serialize_text_packet(packet: &aura_protocol::EncryptedTextPacket) -> Vec<u8> {
-    let mut size = 62 + packet.message_id.len() + packet.ciphertext.len();
-    if !packet.reply_to_id.is_empty() {
-        size += packet.reply_to_id.len();
-    }
-    
-    let mut buf = Vec::with_capacity(size);
-    buf.extend_from_slice(&packet.sender_session_id.to_le_bytes());
-    
-    let channel_id_bytes = packet.channel_id.as_bytes();
-    buf.push(channel_id_bytes.len().min(255) as u8);
-    buf.extend_from_slice(&channel_id_bytes[..channel_id_bytes.len().min(255)]);
-
-    buf.extend_from_slice(&packet.epoch.to_le_bytes());
-    
-    let msg_id_bytes = packet.message_id.as_bytes();
-    buf.push(msg_id_bytes.len().min(255) as u8);
-    buf.extend_from_slice(&msg_id_bytes[..msg_id_bytes.len().min(255)]);
-    
-    buf.extend_from_slice(&(packet.ciphertext.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&packet.ciphertext);
-    
-    buf.extend_from_slice(&packet.nonce);
-    buf.extend_from_slice(&packet.tag);
-    
-    if !packet.reply_to_id.is_empty() {
-        let reply_bytes = packet.reply_to_id.as_bytes();
-        buf.push(reply_bytes.len().min(255) as u8);
-        buf.extend_from_slice(&reply_bytes[..reply_bytes.len().min(255)]);
-    } else {
-        buf.push(0);
-    }
-    
-    buf
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_text_packet_roundtrip() {
-        let packet = aura_protocol::EncryptedTextPacket {
-            sender_session_id: 123,
-            channel_id: "C_channel_123".to_string(),
-            epoch: 789,
-            message_id: "M_msg_uuid_1234".to_string(),
-            ciphertext: vec![1, 2, 3, 4],
-            nonce: vec![5; 24],
-            tag: vec![6; 16],
-            reply_to_id: "M_msg_reply_5678".to_string(),
-        };
-        
-        let bytes = serialize_text_packet(&packet);
-        let parsed = parse_text_packet(&bytes).expect("Failed to parse packet");
-        
-        assert_eq!(parsed.sender_session_id, packet.sender_session_id);
-        assert_eq!(parsed.channel_id, packet.channel_id);
-        assert_eq!(parsed.epoch, packet.epoch);
-        assert_eq!(parsed.message_id, packet.message_id);
-        assert_eq!(parsed.ciphertext, packet.ciphertext);
-        assert_eq!(parsed.nonce, packet.nonce);
-        assert_eq!(parsed.tag, packet.tag);
-        assert_eq!(parsed.reply_to_id, packet.reply_to_id);
-    }
-    
-    #[test]
-    fn test_packet_too_short() {
-        let bytes = vec![0u8; 60];
-        let result = parse_text_packet(&bytes);
-        assert!(result.is_err());
-    }
-    
-    #[test]
-    fn test_max_packet_size_logic() {
-        assert_eq!(MAX_TEXT_PACKET_SIZE, 2 * 1024 * 1024);
-        let packet = aura_protocol::EncryptedTextPacket {
-            sender_session_id: 1,
-            channel_id: "C_1".to_string(),
-            epoch: 1,
-            message_id: "M_1".to_string(),
-            ciphertext: vec![0u8; 1024 * 1024], // 1MB
-            nonce: vec![0u8; 24],
-            tag: vec![0u8; 16],
-            reply_to_id: "".to_string(),
-        };
-        
-        let bytes = serialize_text_packet(&packet);
-        // Should be fine as it is < 2MB
-        let result = parse_text_packet(&bytes);
-        assert!(result.is_ok());
-
-        // Test something over 2MB
-        let large_packet = aura_protocol::EncryptedTextPacket {
-            sender_session_id: 1,
-            channel_id: "C_1".to_string(),
-            epoch: 1,
-            message_id: "M_1".to_string(),
-            ciphertext: vec![0u8; 3 * 1024 * 1024], // 3MB
-            nonce: vec![0u8; 24],
-            tag: vec![0u8; 16],
-            reply_to_id: "".to_string(),
-        };
-        let large_bytes = serialize_text_packet(&large_packet);
-        assert!(large_bytes.len() > MAX_TEXT_PACKET_SIZE);
-        // Note: parse_text_packet itself doesn't check MAX_TEXT_PACKET_SIZE, 
-        // the connection handler does before calling it.
-        // Wait, let's check parse_text_packet implementation.
-    }
-    
-    #[test]
-    fn test_invalid_utf8_message_id() {
-         let packet = aura_protocol::EncryptedTextPacket {
-            sender_session_id: 1,
-            channel_id: "C_1".to_string(),
-            epoch: 1,
-            message_id: "valid".to_string(),
-            ciphertext: vec![],
-            nonce: vec![0u8; 24],
-            tag: vec![0u8; 16],
-            reply_to_id: "".to_string(),
-        };
-        
-        let mut bytes = serialize_text_packet(&packet);
-        bytes[17] = 0xFF;
-        let result = parse_text_packet(&bytes);
-        assert!(result.is_err());
-    }
 }
