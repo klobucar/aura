@@ -48,6 +48,20 @@ struct AuraGlassModifier: ViewModifier {
                         ),
                         lineWidth: 0.6
                     )
+                    // Inner rim light for thick glass feel
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [AuraTheme.Colors.rimLight, .clear, .clear],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1.5
+                            )
+                            .blur(radius: 0.5)
+                            .padding(0.5)
+                    )
             }
             .modifier(AuraTheme.Shadows.glass())
     }
@@ -67,6 +81,47 @@ struct AuraFluidHoverModifier: ViewModifier {
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovering)
             .onHover { hovering in
                 isHovering = hovering
+            }
+    }
+}
+
+// MARK: - Active Pulse Modifier
+
+struct AuraActivePulseModifier: ViewModifier {
+    let isActive: Bool
+    @State private var pulse = false
+    
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if isActive {
+                    RoundedRectangle(cornerRadius: AuraTheme.Layout.cornerRadius)
+                        .stroke(AuraTheme.Colors.primary.opacity(pulse ? 0.3 : 0.1), lineWidth: 2)
+                        .scaleEffect(pulse ? 1.05 : 1.0)
+                        .blur(radius: pulse ? 2 : 1)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                                pulse = true
+                            }
+                        }
+                }
+            }
+    }
+}
+
+// MARK: - Aura Glow Modifier
+
+struct AuraGlowModifier: ViewModifier {
+    let color: Color
+    let radius: CGFloat
+    @State private var breathe = false
+    
+    func body(content: Content) -> some View {
+        content
+            .shadow(color: color.opacity(breathe ? 0.6 : 0.3), radius: breathe ? radius * 1.5 : radius, x: 0, y: 0)
+            .animation(.easeInOut(duration: 3.0).repeatForever(autoreverses: true), value: breathe)
+            .onAppear {
+                breathe = true
             }
     }
 }
@@ -141,6 +196,44 @@ extension View {
         } else {
             self.auraGlass(cornerRadius: cornerRadius, material: .hudWindow)
         }
+    }
+    
+    /// Standardized section container for Settings and Profile views.
+    func auraGlassSection(title: String? = nil, icon: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let title = title {
+                HStack(spacing: 8) {
+                    if let icon = icon {
+                        Image(systemName: icon)
+                            .foregroundStyle(AuraTheme.Colors.primary)
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    Text(title.uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .kerning(1)
+                }
+            }
+            
+            self
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(AuraTheme.Colors.liquidFrosted)
+        .overlay {
+            RoundedRectangle(cornerRadius: AuraTheme.Layout.glassCornerRadius)
+                .strokeBorder(AuraTheme.Colors.glassBorder.opacity(0.5), lineWidth: 0.5)
+        }
+    }
+    
+    /// Specialized pulse for active UI elements.
+    func auraActivePulse(isActive: Bool) -> some View {
+        self.modifier(AuraActivePulseModifier(isActive: isActive))
+    }
+    
+    /// Applies a soft, ethereal colorful glow.
+    func auraGlow(color: Color = AuraTheme.Colors.primary, radius: CGFloat = 8) -> some View {
+        self.modifier(AuraGlowModifier(color: color, radius: radius))
     }
 }
 

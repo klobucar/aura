@@ -24,7 +24,6 @@ struct ContentView: View {
     @State private var pttCancellable: AnyCancellable?
     
     // Chat state
-    @State private var chatMessages: [ChatMessage] = []
     @State private var messageText = ""
     @State private var showingChat = true
     @State private var replyingTo: ChatMessage?
@@ -34,6 +33,8 @@ struct ContentView: View {
     @State private var showingProfileManagement = false
     @StateObject private var serverManager = ServerManager()
     @StateObject private var profileManager = ProfileManager()
+    
+    @FocusState private var isInputFocused: Bool
     
     
     var body: some View {
@@ -102,31 +103,55 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .padding(.top, 24) // Clear traffic lights
+                .frame(height: 56)
+                .padding(.top, 28) // Synced top offset
                 
                 // User info header
                 userHeader(identity: identity, client: client)
                 
-                Divider()
-                
                 // Channels list
                 channelList(client: client)
+                    .padding(.top, 8)
             }
             .frame(minWidth: 220, maxWidth: 280)
+            .background(VisualEffectBlur(auraMaterial: .sidebar, blendingMode: .withinWindow).opacity(0.8))
         } detail: {
             // Main content area
             ZStack(alignment: .bottom) {
                 channelDetailView(client: client)
                 
-                // Background message handlers
-                setupMessageHandlers(client: client)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AuraTheme.Colors.background)
+        .background {
+            ZStack {
+                AuraTheme.Colors.backgroundGradient
+                
+                // Animated Aura field (bleeds across sidebar and detail)
+                Group {
+                    Circle()
+                        .fill(AuraTheme.Colors.primary.opacity(0.1))
+                        .frame(width: 800, height: 800)
+                        .blur(radius: 100)
+                        .offset(x: -300, y: -200)
+                    
+                    Circle()
+                        .fill(AuraTheme.Colors.secondary.opacity(0.08))
+                        .frame(width: 600, height: 600)
+                        .blur(radius: 80)
+                        .offset(x: 300, y: 100)
+                    
+                    Circle()
+                        .fill(AuraTheme.Colors.accent.opacity(0.05))
+                        .frame(width: 400, height: 400)
+                        .blur(radius: 60)
+                        .offset(x: 0, y: 300)
+                }
+            }
+            .ignoresSafeArea()
+        }
         .sheet(isPresented: $showingProfileEditor) {
-            ProfileEditView(client: client)
+            ProfileView(client: client)
         }
         .sheet(isPresented: $showingChannelEditor) {
             ChannelEditView(client: client, channel: editingChannel)
@@ -182,17 +207,18 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .help("Disconnect")
         }
-        .padding(10)
-        .auraGlass(cornerRadius: 12)
-        .padding(.horizontal, 10)
-        .padding(.top, 10)
+        .padding(12)
+        .auraGlass(cornerRadius: 14)
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
     }
     
     // MARK: - Channel List
     
     @ViewBuilder
     private func channelList(client: QuicNetworkClient) -> some View {
-        let currentId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let lobbyId = client.channels.first(where: { $0.isLobby })?.id
+        let currentId: String = client.currentChannelId ?? lobbyId ?? client.channels.first?.id ?? "0"
         
         VStack(spacing: 0) {
             List {
@@ -233,12 +259,17 @@ struct ContentView: View {
                 .auraFluidHover()
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.bottom, 12)
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
         .sheet(isPresented: $showingSettings) {
             SettingsView(settings: audioSettings, ttsManager: tts)
+        }
+        .onAppear {
+            if client.isConnected && client.currentChannelId == nil, let lobbyId = lobbyId {
+                switchChannel(to: lobbyId, client: client)
+            }
         }
     }
 
@@ -265,7 +296,8 @@ struct ContentView: View {
     @ViewBuilder
     private func channelHeader(client: QuicNetworkClient) -> some View {
         let channel = currentChannel(for: client)
-        let currentId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let lobbyId = client.channels.first(where: { $0.isLobby })?.id
+        let currentId: String = client.currentChannelId ?? lobbyId ?? client.channels.first?.id ?? "0"
         let userCount = (client.usersByChannel[currentId]?.count ?? 0) + 1
         
         HStack {
@@ -281,6 +313,7 @@ struct ContentView: View {
             
             Text(channel?.name ?? "Channel")
                 .font(.system(size: 18, weight: .bold))
+                .offset(y: -2) // Pixel-perfect horizontal alignment with "Aura" text
             
             Spacer()
             
@@ -304,12 +337,12 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .auraGlass(cornerRadius: 10)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+        .padding(.top, 28) // Synced with sidebar header at 28
+        .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .withinWindow))
     }
-    .padding(.horizontal, 16)
-    .padding(.bottom, 16)
-    .padding(.top, 32) // Clear traffic lights area in detail view
-    .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .behindWindow))
-}
     
     @ViewBuilder
     private func voiceStatusPanel(client: QuicNetworkClient) -> some View {
@@ -386,13 +419,13 @@ struct ContentView: View {
                     Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(isMicEnabled ? .white : Color.secondary)
-                        .frame(width: 44, height: 38)
+                        .frame(width: 44, height: 42)
                         .background(
                             isMicEnabled ? 
                             AnyShapeStyle(AuraTheme.Gradients.lushIndigo) : 
-                            AnyShapeStyle(Color.clear)
+                            AnyShapeStyle(Color.primary.opacity(0.05))
                         )
-                        .clipShape(.rect(cornerRadius: 8))
+                        .clipShape(.rect(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
                 .help(isMicEnabled ? "Mute" : "Unmute")
@@ -406,29 +439,31 @@ struct ContentView: View {
                     Image(systemName: isDeafened ? "headphones.slash" : "headphones")
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(isDeafened ? .white : Color.secondary)
-                        .frame(width: 44, height: 38)
-                        .background(isDeafened ? Color.red.opacity(0.6) : Color.clear)
-                        .clipShape(.rect(cornerRadius: 8))
+                        .frame(width: 44, height: 42)
+                        .background(isDeafened ? Color.red.opacity(0.6) : Color.primary.opacity(0.05))
+                        .clipShape(.rect(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
                 .help(isDeafened ? "Undeafen" : "Deafen")
             }
-            .padding(6)
-            .auraGlass(cornerRadius: 12)
-            .auraFluidHover()
+            .padding(8)
+            .auraGlass(cornerRadius: 16)
+            .auraActivePulse(isActive: isMicEnabled)
             
             Spacer()
         }
         .frame(minWidth: 200)
     }
-        @ViewBuilder
+    @ViewBuilder
     private func chatPanel(client: QuicNetworkClient) -> some View {
-        VStack(spacing: 0) {
+        let currentMessages = computedChatMessages(client: client)
+        
+        return VStack(spacing: 0) {
             // Messages list
             ScrollViewReader { scrollProxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(chatMessages) { message in
+                        ForEach(currentMessages) { message in
                             if message.type == .info {
                                 infoMessageRow(message.content)
                                     .id(message.id)
@@ -442,8 +477,8 @@ struct ContentView: View {
                     }
                     .padding()
                 }
-                .onChange(of: chatMessages.count) { _, _ in
-                    if let lastMessage = chatMessages.last {
+                .onChange(of: currentMessages.count) { _, _ in
+                    if let lastMessage = currentMessages.last {
                         withAnimation {
                             scrollProxy.scrollTo(lastMessage.id, anchor: .bottom)
                         }
@@ -462,20 +497,86 @@ struct ContentView: View {
         }
         .frame(minWidth: 250)
         .background(AuraTheme.Colors.background.opacity(0.5))
+        .onChange(of: client.receivedMessages) { oldValue, newValue in
+            let newMsgs = newValue.filter { newMsg in oldValue.first(where: { $0.id == newMsg.id }) == nil }
+            for msg in newMsgs where msg.channelId == client.currentChannelId && msg.senderSessionId != client.sessionId {
+                tts.speakMessage(sender: msg.senderName, content: msg.content)
+            }
+        }
+        .onChange(of: client.systemEvents) { oldValue, newValue in
+            let newEvents = newValue.filter { newEvent in oldValue.first(where: { $0.id == newEvent.id }) == nil }
+            for event in newEvents where event.channelId == client.currentChannelId || event.channelId == "0" {
+                if event.content.contains("joined") {
+                    let name = event.content.replacingOccurrences(of: " joined the channel", with: "")
+                    tts.speakJoin(name: name)
+                } else if event.content.contains("left") {
+                    let name = event.content.replacingOccurrences(of: " left the channel", with: "")
+                    tts.speakLeave(name: name)
+                }
+            }
+        }
     }
     
-    private func infoMessageRow(_ content: String) -> some View {
-        HStack {
-            Text(content)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
+    // Combined chat messages for the current channel (computed dynamically)
+    private func computedChatMessages(client: QuicNetworkClient) -> [ChatMessage] {
+        guard let currentChannelId = client.currentChannelId else { return [] }
+        var messages: [ChatMessage] = []
+        
+        // Add text messages
+        for msg in client.receivedMessages where msg.channelId == currentChannelId {
+            var chatMsg = ChatMessage(
+                id: msg.id,
+                senderName: msg.senderName,
+                content: msg.content,
+                timestamp: msg.timestamp,
+                isOutgoing: msg.senderSessionId == client.sessionId
+            )
+            chatMsg.channelId = msg.channelId
+            
+            if let replyId = msg.replyToId, 
+               let originalMsg = client.receivedMessages.first(where: { $0.id == replyId }) {
+                chatMsg.replyToId = replyId
+                chatMsg.replyToSender = originalMsg.senderName
+                chatMsg.replyToPreview = String(originalMsg.content.prefix(50))
+            }
+            messages.append(chatMsg)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
+        
+        // Add system events
+        for event in client.systemEvents where event.channelId == currentChannelId || event.channelId == "0" {
+            var message = ChatMessage(
+                id: "sys_\(event.id.uuidString)",
+                senderName: "System",
+                content: event.content,
+                timestamp: event.timestamp,
+                isOutgoing: false
+            )
+            message.type = .info
+            message.channelId = event.channelId
+            messages.append(message)
+        }
+        
+        // Sort by timestamp
+        return messages.sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    private func infoMessageRow(_ text: String) -> some View {
+        HStack {
+            Spacer()
+            Text(text)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary.opacity(0.8))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background {
+                    Capsule()
+                        .fill(AuraTheme.Colors.ultraFrosted)
+                        .auraGlass(cornerRadius: 15)
+                        .auraGlow(color: AuraTheme.Colors.primary.opacity(0.15), radius: 6)
+                }
+            Spacer()
+        }
+        .padding(.vertical, 10)
     }
     
     private func replyPreview(_ message: ChatMessage) -> some View {
@@ -512,10 +613,14 @@ struct ContentView: View {
         HStack(spacing: 12) {
             TextField("Message...", text: $messageText)
                 .textFieldStyle(.plain)
+                .focused($isInputFocused)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(Color.primary.opacity(0.05))
-                .clipShape(.rect(cornerRadius: 10))
+                .background {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.primary.opacity(isInputFocused ? 0.08 : 0.02))
+                        .auraGlow(color: AuraTheme.Colors.primary.opacity(0.4), radius: isInputFocused ? 4 : 0)
+                }
                 .onSubmit {
                     sendMessage(client: client)
                 }
@@ -541,119 +646,37 @@ struct ContentView: View {
             .disabled(messageText.isEmpty)
             .auraFluidHover()
         }
-        .padding(12)
-        .auraGlass(cornerRadius: 20, material: .thin)
-        .padding(16)
+        .padding(8)
+        .auraGlass(cornerRadius: 24, material: .hudWindow)
+        .auraGlow(color: AuraTheme.Colors.primary.opacity(isInputFocused ? 0.3 : 0), radius: 15)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
     }
     
     private func divider() -> some View {
         Divider().opacity(0.1)
     }
     
-    // MARK: - Message Handling
-    
-    private func setupMessageHandlers(client: QuicNetworkClient) -> some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onChange(of: client.receivedMessages) { oldValue, newValue in
-                // Add new incoming messages to chat
-                for msg in newValue where !oldValue.contains(msg) {
-                    guard msg.channelId == client.currentChannelId else { continue }
-                    
-                    // Use message ID from packet (msg_{UUID})
-                    let messageId = msg.id
-                    
-                    // Skip if we already have this message (optimistic update or duplicate)
-                    if chatMessages.contains(where: { $0.id == messageId }) {
-                        continue
-                    }
-                    
-                    var chatMsg = ChatMessage(
-                        id: messageId,
-                        senderName: msg.senderName,
-                        content: msg.content,
-                        timestamp: msg.timestamp,
-                        isOutgoing: msg.senderSessionId == client.sessionId // Mark as outgoing if it's from us
-                    )
-                    chatMsg.channelId = msg.channelId
-                    
-                    // Lookup reply context if this is a reply
-                    if let replyId = msg.replyToId,
-                       let originalMsg = chatMessages.first(where: { $0.id == replyId }) {
-                        chatMsg.replyToId = replyId
-                        chatMsg.replyToSender = originalMsg.senderName
-                        chatMsg.replyToPreview = String(originalMsg.content.prefix(50))
-                    }
-                    
-                    chatMessages.append(chatMsg)
-                    
-                    // Speak the message
-                    tts.speakMessage(sender: msg.senderName, content: msg.content)
-                }
-            }
-            .onChange(of: client.systemEvents) { oldValue, newValue in
-                // Add new system events to chat (like user disconnects)
-                for event in newValue where !oldValue.contains(event) {
-                    // Only show events for current channel or global (0)
-                    guard event.channelId == client.currentChannelId || event.channelId == 0 else { continue }
-                    
-                    // Avoid duplicates
-                    let messageId = "sys_\(event.id.uuidString)"
-                    if chatMessages.contains(where: { $0.id == messageId }) { continue }
-                    
-                    var message = ChatMessage(
-                        id: messageId,
-                        senderName: "System",
-                        content: event.content,
-                        timestamp: event.timestamp,
-                        isOutgoing: false
-                    )
-                    message.type = .info
-                    message.channelId = event.channelId
-                    
-                    chatMessages.append(message)
-                    
-                    // Speak the system event
-                    if event.content.contains("joined") {
-                        // Extract name from "Name joined the channel"
-                        let name = event.content.replacingOccurrences(of: " joined the channel", with: "")
-                        tts.speakJoin(name: name)
-                    } else if event.content.contains("left") {
-                        let name = event.content.replacingOccurrences(of: " left the channel", with: "")
-                        tts.speakLeave(name: name)
-                    }
-                }
-            }
-    }
-    
     // MARK: - Helpers
     
     private func currentChannel(for client: QuicNetworkClient) -> ChannelModel? {
-        let channelId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let channelId = client.currentChannelId ?? client.channels.first?.id ?? "0"
         return client.channels.first { $0.id == channelId }
     }
     
-    private func switchChannel(to channelId: UInt32, client: QuicNetworkClient) {
+    private func switchChannel(to channelId: String, client: QuicNetworkClient) {
         guard channelId != client.currentChannelId else { return }
         
         // Capture old/new names for divider
-        let oldChannelId = client.currentChannelId ?? client.channels.first?.id ?? 0
+        let oldChannelId: String = client.currentChannelId ?? client.channels.first?.id ?? "0"
         let oldChannelName = client.channels.first(where: { $0.id == oldChannelId })?.name ?? "Unknown"
         let newChannelName = client.channels.first(where: { $0.id == channelId })?.name ?? "Unknown"
         
         // Add divider if we have chat history
-        if !chatMessages.isEmpty {
+        let currentMessages = computedChatMessages(client: client)
+        if !currentMessages.isEmpty {
             let text = "Joined #\(newChannelName)"
-            
-            var divider = ChatMessage(
-                id: "div_\(UUID().uuidString)",
-                senderName: "System",
-                content: text,
-                timestamp: Date(),
-                isOutgoing: false
-            )
-            divider.type = .info
-            chatMessages.append(divider)
+            client.systemEvents.append(SystemEvent(content: text, channelId: channelId))
         }
         
         Task {
@@ -769,7 +792,6 @@ struct ContentView: View {
         identity = nil
         isConnected = false
         isMicEnabled = false
-        chatMessages = []
         messageText = ""
     }
     
@@ -782,29 +804,23 @@ struct ContentView: View {
         replyingTo = nil // Clear reply state
         let timestamp = Date()
         let sessionId = client.sessionId ?? 0
-        let channelId = client.currentChannelId ?? 0
+        let channelId = client.currentChannelId ?? "0"
         
         // Use UUID message ID
         let messageId = "msg_\(UUID().uuidString)"
         
-        // Add to local messages (optimistic update)
-        var message = ChatMessage(
+        // Optimistically add to client.receivedMessages
+        let msg = ReceivedTextMessage(
             id: messageId,
+            senderSessionId: sessionId,
             senderName: identity?.displayName ?? "You",
+            channelId: channelId,
             content: content,
             timestamp: timestamp,
-            isOutgoing: true
+            rawPacket: Data(),
+            replyToId: replying?.id
         )
-        message.channelId = channelId
-        
-        // Add reply context if we're replying
-        if let replying = replying {
-            message.replyToId = replying.id
-            message.replyToSender = replying.senderName
-            message.replyToPreview = String(replying.content.prefix(50))
-        }
-        
-        chatMessages.append(message)
+        client.receivedMessages.append(msg)
         
         // Send to server with reply info and message ID
         Task {
@@ -817,7 +833,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func channelRow(channel: ChannelModel, currentId: UInt32, client: QuicNetworkClient) -> some View {
+    private func channelRow(channel: ChannelModel, currentId: String, client: QuicNetworkClient) -> some View {
                         VStack(alignment: .leading, spacing: 4) {
                             // Channel header
                             Button(action: {
@@ -834,9 +850,20 @@ struct ContentView: View {
                                     }
                                     
                                     VStack(alignment: .leading, spacing: 0) {
-                                        Text(channel.name)
-                                            .foregroundStyle(channel.id == currentId ? Color.primary : Color.secondary)
-                                            .fontWeight(channel.id == currentId ? .semibold : .regular)
+                                        HStack(spacing: 4) {
+                                            Text(channel.name)
+                                                .foregroundStyle(channel.id == currentId ? Color.primary : Color.secondary)
+                                                .fontWeight(channel.id == currentId ? .semibold : .regular)
+                                            
+                                            if channel.isLobby {
+                                                Text("LOBBY")
+                                                    .font(.system(size: 8, weight: .bold))
+                                                    .padding(.horizontal, 4)
+                                                    .padding(.vertical, 1)
+                                                    .background(Capsule().fill(Color.blue.opacity(0.1)))
+                                                    .foregroundStyle(.blue)
+                                            }
+                                        }
                                         
                                         if !channel.comment.isEmpty {
                                             Text(channel.comment)
@@ -944,102 +971,6 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Profile Edit View
-
-struct ProfileEditView: View {
-    @Environment(\.dismiss) var dismiss
-    let client: QuicNetworkClient
-    
-    @State private var bio: String = ""
-    @State private var avatarData: Data = Data()
-    @State private var showingImagePicker = false
-    
-    init(client: QuicNetworkClient) {
-        self.client = client
-        // Initialize with current profile if available
-        if let myProfile = client.profiles[client.sessionId ?? 0] {
-            _bio = State(initialValue: myProfile.bio)
-            _avatarData = State(initialValue: Data(myProfile.avatarData))
-        }
-    }
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("Edit Profile")
-                .font(.title2.bold())
-            
-            VStack(spacing: 12) {
-                // Avatar Preview
-                ZStack(alignment: .bottomTrailing) {
-                    if let image = NSImage(data: avatarData) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 80, height: 80)
-                            .clipShape(Circle())
-                    } else {
-                        Circle()
-                            .fill(AuraTheme.Gradients.primary)
-                            .frame(width: 80, height: 80)
-                    }
-                    
-                    Button(action: { selectImage() }) {
-                        Image(systemName: "camera.fill")
-                            .padding(6)
-                            .background(Circle().fill(Color.blue))
-                            .foregroundStyle(.white)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Bio")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextEditor(text: $bio)
-                        .frame(height: 100)
-                        .padding(4)
-                        .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-                }
-            }
-            .padding()
-            .auraGlass()
-            
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(.bordered)
-                
-                Spacer()
-                
-                Button("Save") {
-                    Task {
-                        await client.updateProfile(bio: bio, avatarData: avatarData)
-                        dismiss()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(30)
-        .frame(width: 400)
-    }
-    
-    private func selectImage() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = [.image]
-        
-        if panel.runModal() == .OK {
-            if let url = panel.url, let data = try? Data(contentsOf: url) {
-                // Resize if needed (limit 128KB in proto)
-                self.avatarData = data
-            }
-        }
-    }
-}
-
 // MARK: - Channel Edit View
 
 struct ChannelEditView: View {
@@ -1133,7 +1064,7 @@ struct ChatMessage: Identifiable, Equatable {
     let isOutgoing: Bool
     
     // Context
-    var channelId: UInt32 = 0
+    var channelId: String = "0"
     var type: MessageType = .regular
     
     // Reply-to threading
@@ -1276,29 +1207,40 @@ struct UserRowView: View {
     var body: some View {
     HStack(spacing: 8) {
         // Avatar
-        if let avatarData = user.avatarData, let image = NSImage(data: avatarData) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 18, height: 18)
-                .clipShape(Circle())
-        } else {
-            Circle()
-                .fill(AuraTheme.Gradients.primary)
-                .frame(width: 18, height: 18)
-                .overlay(
-                    Text(String(user.displayName.prefix(1).uppercased()))
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.white)
-                )
+        ZStack {
+            if let avatarData = user.avatarData, let image = NSImage(data: avatarData) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 18, height: 18)
+                    .clipShape(Circle())
+            } else {
+                Circle()
+                    .fill(AuraTheme.Gradients.primary)
+                    .frame(width: 18, height: 18)
+                    .overlay(
+                        Text(String(user.displayName.prefix(1).uppercased()))
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                    )
+            }
+            
+            if user.isDisconnected {
+                Circle()
+                    .fill(.black.opacity(0.3))
+                    .frame(width: 18, height: 18)
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .black))
+                    .foregroundStyle(.white)
+            }
         }
         
         VStack(alignment: .leading, spacing: 0) {
             Text(user.displayName)
                 .font(.system(size: 13))
-                .foregroundStyle(isActiveSpeaker ? AuraTheme.Colors.accent : Color.secondary)
+                .foregroundStyle(user.isDisconnected ? Color.secondary.opacity(0.5) : (isActiveSpeaker ? AuraTheme.Colors.accent : Color.secondary))
             
-            if !user.bio.isEmpty {
+            if !user.bio.isEmpty && !user.isDisconnected {
                 Text(user.bio)
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary.opacity(0.7))
@@ -1306,7 +1248,7 @@ struct UserRowView: View {
             }
         }
         
-        if isActiveSpeaker {
+        if isActiveSpeaker && !user.isDisconnected {
             Image(systemName: "waves.at.tail")
                 .foregroundStyle(AuraTheme.Gradients.lushIndigo)
                 .font(.system(size: 10))
@@ -1315,7 +1257,11 @@ struct UserRowView: View {
         
         Spacer()
         
-        if user.isDeafened {
+        if user.isDisconnected {
+            Text("LEFT")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.red.opacity(0.6))
+        } else if user.isDeafened {
             Image(systemName: "headphones.slash")
                 .font(.system(size: 10))
                 .foregroundStyle(.red.opacity(0.7))
@@ -1327,10 +1273,12 @@ struct UserRowView: View {
     }
     .padding(.leading, 24)
     .padding(.vertical, 2)
+    .grayscale(user.isDisconnected ? 1.0 : 0.0)
+    .opacity(user.isDisconnected ? 0.5 : 1.0)
     .help(user.bio.isEmpty ? user.displayName : "\(user.displayName): \(user.bio)")
     }
 }
 
-func calculateUserCount(usersCount: Int, channelId: UInt32, currentId: UInt32?) -> String {
+func calculateUserCount(usersCount: Int, channelId: String, currentId: String?) -> String {
     return String(usersCount + (channelId == currentId ? 1 : 0))
 }
