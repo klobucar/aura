@@ -2,6 +2,8 @@ import Foundation
 import Combine
 import Network
 import Observation
+import UserNotifications
+import SwiftUI
 
 /// Native QUIC client for Aura server using Apple's Network framework.
 /// Uses NWConnectionGroup to handle server-initiated streams for Apple/Quinn interop.
@@ -17,14 +19,14 @@ public class QuicNetworkClient {
     public var connectionStatus = "Disconnected"
     public var userId: UInt32 = 0
     public var sessionToken: String?
-    public var currentChannelId: UInt32?
+    public var currentChannelId: String?
     public var sessionId: UInt32?  // Our own session ID
     
     public var isMuted = false
     public var isDeafened = false
     
     /// Users by channel ID (tracks all channels, not just current)
-    public var usersByChannel: [UInt32: [ChannelUser]] = [:]
+    public var usersByChannel: [String: [ChannelUser]] = [:]
     
     /// All channels on the server
     public var channels: [ChannelModel] = []
@@ -61,7 +63,7 @@ public class QuicNetworkClient {
     private var mlsWrapper: MlsWrapper?
     
     /// Track the current voice channel for MLS group ID generation
-    private var currentVoiceChannelId: UInt32?
+    private var currentVoiceChannelId: String?
     
     /// Audio playback engine
     private let audioPlayback = AudioPlayback()
@@ -96,7 +98,11 @@ public class QuicNetworkClient {
     private static let MSG_MLS_CREATE_GROUP: UInt8 = 0x52   // Server tells client to create group
     private static let MSG_MLS_ADD_MEMBER_REQ: UInt8 = 0x53 // Server forwards key package
     private static let MSG_MLS_COMMIT: UInt8 = 0x54         // Server broadcasts commit
-    private static let MSG_MLS_WELCOME: UInt8 = 0x55        // Server sends welcome to new member
+    private static let MSG_MLS_WELCOME: UInt8 = 0x55        // Server broadcasts welcome
+    
+    // Security limits
+    private static let MAX_AUDIO_PACKET_SIZE = 65536
+    private static let MAX_CONTROL_PACKET_SIZE = 2 * 1024 * 1024 // 2MB
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
@@ -557,9 +563,6 @@ public class QuicNetworkClient {
                 print("[QuicClient] Failed to initialize audio: \(error)")
             }
             
-            // Auto-join default channel for testing
-            try await joinChannel(1)
-            
             // Start keepalive to prevent session timeout
             startKeepalive()
             
@@ -624,7 +627,7 @@ public class QuicNetworkClient {
     }
     
     /// Update channel metadata (Admin only)
-    public func updateChannel(id: UInt32, name: String? = nil, comment: String? = nil, emoji: String? = nil, presetId: String? = nil, position: Int32? = nil) async {
+    public func updateChannel(id: String, name: String? = nil, comment: String? = nil, emoji: String? = nil, presetId: String? = nil, position: Int32? = nil) async {
         guard isAdmin else { return }
         
         let icon = (emoji != nil || presetId != nil) ? ChannelIconRecord(emoji: emoji, presetId: presetId, customData: nil) : nil
@@ -781,24 +784,13 @@ public class QuicNetworkClient {
     /// Handle UserJoined message
     private func handleUserJoined(stream: NWConnection) async {
         do {
-            // Read channel_id_len (1 byte)
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let join = try decodeUserJoined(data: payload)
             
-            // Read channel_id string bytes
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
-            
-            // Read session_id (4 bytes) + name_len (1 byte)
-            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let sessionId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let nameLen = Int(header[4])
-            
-            // Read display name
-            let nameData = try await receive(on: stream, minimumLength: nameLen, maximumLength: nameLen)
-            let displayName = String(data: nameData, encoding: .utf8) ?? "Unknown"
-            
+            let channelId = join.channelId
+            let sessionId = join.sessionId
+            let displayName = join.displayName
+
             let user = ChannelUser(sessionId: sessionId, displayName: displayName)
             
             // Add to channel's user list (@Observable tracks this automatically)
@@ -858,37 +850,69 @@ public class QuicNetworkClient {
     /// Handle UserLeft message
     private func handleUserLeft(stream: NWConnection) async {
         do {
-            // Read channel_id_len (1 byte)
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let left = try decodeUserLeft(data: payload)
             
-            // Read channel_id string bytes
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
-            
-            // Read session_id (4 bytes)
-            let sessionData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let sessionId = sessionData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let channelId = left.channelId
+            let sessionId = left.sessionId
             
             // Remove from audio receiver
             audioReceiver?.removeSender(sessionId: sessionId)
-            print("[QuicClient] Removed audio sender \(sessionId) from receiver")
             
-            // Remove from channel's user list (@Observable tracks this automatically)
+            // Global cleanup across ALL channels to prevent state drift
             await MainActor.run {
-                if let index = usersByChannel[channelId]?.firstIndex(where: { $0.id == sessionId }) {
-                    let user = usersByChannel[channelId]?[index]
-                    let name = user?.displayName ?? "Unknown"
-                    
-                    // Add system event
-                    let event = SystemEvent(content: "\(name) disconnected", channelId: channelId)
-                    systemEvents.append(event)
-                    
-                    usersByChannel[channelId]?.remove(at: index)
-                    print("[QuicClient] User left channel \(channelId): \(name) (session \(sessionId))")
+                var foundUser: ChannelUser?
+                var foundChannelId: String?
+                
+                // Search all channels for this session
+                for (chId, users) in usersByChannel {
+                    if let index = users.firstIndex(where: { $0.id == sessionId }) {
+                        foundUser = users[index]
+                        foundChannelId = chId
+                        
+                        // Mark as disconnected in the array (Ghost state)
+                        withAnimation(.easeOut(duration: 0.5)) {
+                            usersByChannel[chId]?[index].isDisconnected = true
+                        }
+                        break
+                    }
                 }
-                print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
+                
+                var name = foundUser?.displayName ?? "Unknown User"
+                
+                // If not found in channels, try a profile cache lookup for the session ID
+                if foundUser == nil {
+                    if let profile = profiles[sessionId] {
+                        name = profile.displayName
+//                    } else if sessionId == userId {
+//                        name = identity?.displayName ?? "You"
+                    }
+                }
+                
+                // 1. Post macOS system notification
+                let content = UNMutableNotificationContent()
+                content.title = "Aura"
+                content.body = "\(name) disconnected"
+                content.sound = .default
+                let request = UNNotificationRequest(identifier: "aura_user_left_\(sessionId)", content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(request)
+                
+                // 2. Add system event to chat
+                let event = SystemEvent(content: "\(name) disconnected", channelId: foundChannelId ?? channelId)
+                systemEvents.append(event)
+                
+                // 3. Delayed removal (Ghost cleanup)
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                    await MainActor.run {
+                        if let chId = foundChannelId,
+                           let index = usersByChannel[chId]?.firstIndex(where: { $0.id == sessionId }) {
+                            withAnimation {
+                                usersByChannel[chId]?.remove(at: index)
+                            }
+                        }
+                    }
+                }
             }
         } catch {
             print("[QuicClient] Failed to parse UserLeft: \(error)")
@@ -898,14 +922,7 @@ public class QuicNetworkClient {
     /// Handle ServerState snapshot (Protobuf via UniFFI)
     private func handleServerState(stream: NWConnection) async {
         do {
-            // Read length (4 bytes)
-            let lengthData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let length = lengthData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            
-            print("[QuicClient] Receiving ServerState: \(length) bytes")
-            
-            // Read payload
-            let payload = try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
             
             // Decode via Rust core
             let snapshot = try decodeServerState(data: payload)
@@ -921,20 +938,21 @@ public class QuicNetworkClient {
                 self.profiles = newProfiles
                 
                 // Re-map usersByChannel (exclude ourselves)
-                var newUserMapping: [UInt32: [ChannelUser]] = [:]
+                var newUserMapping: [String: [ChannelUser]] = [:]
                 for c in snapshot.channels {
-                    let users = c.userIds.compactMap { sid -> ChannelUser? in
-                        // Don't include ourselves in the user list
-                        guard sid != self.sessionId else { return nil }
-                        guard let p = self.profiles[sid] else { return nil }
-                        return ChannelUser(sessionId: sid, displayName: p.displayName, bio: p.bio, avatarData: Data(p.avatarData))
+                    var usersList: [ChannelUser] = []
+                    for userStatus in c.users {
+                        let sid = userStatus.sessionId
+                        guard sid != self.sessionId else { continue }
+                        usersList.append(ChannelUser(sessionId: sid, displayName: userStatus.displayName))
                     }
-                    newUserMapping[c.channelId] = users
+                    newUserMapping[c.channelId] = usersList
                     
                     // Add listeners for decryption
                     if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
-                        for sid in c.userIds where sid != self.sessionId {
-                            if mls.isMember(channelId: c.channelId, isVoice: true) {
+                        for userStatus in c.users {
+                            let sid = userStatus.sessionId
+                            if sid != self.sessionId && mls.isMember(channelId: c.channelId, isVoice: true) {
                                 do {
                                     let keyBytes = try mls.exportAudioKey(channelId: c.channelId, senderSessionId: sid)
                                     let epoch = try mls.currentEpoch(channelId: c.channelId, isVoice: true)
@@ -959,74 +977,14 @@ public class QuicNetworkClient {
     /// Handle incoming TextPacket message
     private func handleTextPacket(stream: NWConnection) async {
         do {
-            // Read length (4 bytes)
-            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let packetLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let packet = try decodeEncryptedTextPacket(data: payload)
             
-            print("[QuicClient] Text packet length: \(packetLen)")
-            
-            // Read the binary packet
-            let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
-            
-            // Parse encrypted packet
-            // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
-            let minPacketSize = 16 + 1 + 1 + 4 + 24 + 16  // 62 bytes minimum
-            guard packetData.count >= minPacketSize else {
-                print("[QuicClient] Text packet too short for encrypted format")
-                return
-            }
-            
-            let senderSessionId = packetData.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let channelId = packetData.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let epoch = packetData.subdata(in: 8..<16).withUnsafeBytes { $0.load(as: UInt64.self).littleEndian }
-            
-            var offset = 16
-            
-            // Parse message ID
-            let messageIdLen = Int(packetData[offset])
-            offset += 1
-            
-            guard offset + messageIdLen <= packetData.count else {
-                print("[QuicClient] Text packet too short for message ID")
-                return
-            }
-            let messageIdData = packetData.subdata(in: offset..<offset+messageIdLen)
-            let messageId = String(data: messageIdData, encoding: .utf8) ?? UUID().uuidString
-            offset += messageIdLen
-            
-            // Parse ciphertext
-            guard offset + 4 <= packetData.count else {
-                print("[QuicClient] Text packet too short for ciphertext length")
-                return
-            }
-            let ciphertextLen = Int(packetData.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
-            offset += 4
-            
-            guard offset + ciphertextLen + 24 + 16 <= packetData.count else {
-                print("[QuicClient] Text packet too short for ciphertext + nonce + tag")
-                return
-            }
-            let ciphertext = Array(packetData.subdata(in: offset..<offset+ciphertextLen))
-            offset += ciphertextLen
-            
-            // Parse nonce (24 bytes)
-            let nonce = Array(packetData.subdata(in: offset..<offset+24))
-            offset += 24
-            
-            // Parse tag (16 bytes)
-            let tag = Array(packetData.subdata(in: offset..<offset+16))
-            offset += 16
-            
-            // Parse reply ID if present
-            var replyToId: String? = nil
-            if offset < packetData.count {
-                let replyLen = Int(packetData[offset])
-                offset += 1
-                if replyLen > 0 && offset + replyLen <= packetData.count {
-                    let replyData = packetData.subdata(in: offset..<offset+replyLen)
-                    replyToId = String(data: replyData, encoding: .utf8)
-                }
-            }
+            let channelId = packet.channelId
+            let senderSessionId = packet.senderSessionId
+            let epoch = packet.epoch
+            let messageId = packet.messageId
+            let replyToId = packet.replyToId.isEmpty ? nil : packet.replyToId
             
             // Decrypt the message using MLS-derived key for the sender
             guard let mls = mlsWrapper else {
@@ -1035,32 +993,35 @@ public class QuicNetworkClient {
             }
             
             // Derive decryption key from MLS text group for this sender
-            let senderKey: Data
-            do {
-                let keyBytes = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
-                senderKey = Data(keyBytes)
-            } catch {
-                print("[QuicClient] Failed to derive text key for sender \(senderSessionId): \(error)")
+            // The MLS text group may not be established yet if we just joined —
+            // wait briefly for the Welcome handshake to complete.
+            var senderKey: Data?
+            for attempt in 1...10 {
+                do {
+                    let keyBytes = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
+                    senderKey = keyBytes
+                    break
+                } catch {
+                    if attempt < 10 {
+                        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                    } else {
+                        print("[QuicClient] Failed to derive text key for sender \(senderSessionId) after \(attempt) attempts: \(error)")
+                        return
+                    }
+                }
+            }
+            
+            guard let senderKey = senderKey else {
+                print("[QuicClient] Could not derive text key for sender \(senderSessionId)")
                 return
             }
             
             // Create crypto wrapper with sender's key
             let crypto = try TextCryptoWrapper(key: senderKey)
             
-            let encryptedPacket = EncryptedTextPacketRecord(
-                senderSessionId: senderSessionId,
-                channelId: channelId,
-                epoch: epoch,
-                messageId: messageId,
-                ciphertext: Data(ciphertext),
-                nonce: Data(nonce),
-                tag: Data(tag),
-                replyToId: replyToId ?? ""
-            )
-            
             let decryptedMessage: TextMessageRecord
             do {
-                decryptedMessage = try crypto.decrypt(packet: encryptedPacket)
+                decryptedMessage = try crypto.decrypt(packet: packet)
             } catch {
                 print("[QuicClient] Failed to decrypt text message: \(error)")
                 return
@@ -1075,16 +1036,11 @@ public class QuicNetworkClient {
             } else {
                 // Look up in usersByChannel
                 if let users = usersByChannel[channelId] {
-                    print("[QuicClient] Looking for sender \(senderSessionId) in channel \(channelId) with \(users.count) users: \(users.map { "\($0.id):\($0.displayName)" }.joined(separator: ", "))")
                     if let user = users.first(where: { $0.id == senderSessionId }) {
                         senderName = user.displayName
-                    } else {
-                        print("[QuicClient] Sender \(senderSessionId) NOT FOUND in usersByChannel[\(channelId)]")
                     }
                 }
             }
-            
-            print("[QuicClient] Decrypted text from session \(senderSessionId) (msgId: \(messageId)), resolved to: \(senderName), replyTo: \(replyToId ?? "nil")")
             
             let message = ReceivedTextMessage(
                 id: messageId,
@@ -1093,7 +1049,7 @@ public class QuicNetworkClient {
                 channelId: channelId,
                 content: decryptedMessage.content,
                 timestamp: Date(timeIntervalSince1970: TimeInterval(decryptedMessage.timestamp) / 1000),
-                rawPacket: packetData,
+                rawPacket: payload,
                 replyToId: replyToId
             )
             
@@ -1109,29 +1065,32 @@ public class QuicNetworkClient {
     // MARK: - MLS Protocol Handlers
     
     /// Send MLS join with key package when joining a channel
-    private func sendMlsJoin(channelId: UInt32, isVoice: Bool) async {
-        guard let stream = controlStream else { return }
-        guard let mls = mlsWrapper else {
-            print("[QuicClient] MLS not initialized, cannot join with E2EE")
-            return
-        }
+    private func sendMlsJoin(channelId: String, isVoice: Bool) async {
+        guard let stream = controlStream, let mls = mlsWrapper else { return }
         
         do {
             let keyPackage = try mls.createKeyPackage()
+            let envelope = MlsEnvelopeRecord(
+                senderId: sessionId ?? userId,
+                channelId: String(channelId),
+                groupType: isVoice ? .voice : .text,
+                targetSessionId: 0,
+                targetUuid: "",
+                epoch: 0,
+                keyPackage: keyPackage,
+                commit: nil,
+                welcome: nil,
+                commitWelcome: nil
+            )
             
-            let channelStr = String(channelId)
-            let channelBytes = channelStr.data(using: .utf8) ?? Data()
-            
-            // [0x50] [channel_id_len: u8] [channel_id string] [is_voice: u8] [kp_len: u32] [key_package]
+            let payload = encodeMlsEnvelope(envelope: envelope)
             var msg = Data([Self.MSG_MLS_JOIN])
-            msg.append(UInt8(channelBytes.count))
-            msg.append(channelBytes)
-            msg.append(isVoice ? 1 : 0)
-            msg.append(withUnsafeBytes(of: UInt32(keyPackage.count).littleEndian) { Data($0) })
-            msg.append(Data(keyPackage))
+            let len = UInt32(payload.count).littleEndian
+            msg.append(withUnsafeBytes(of: len) { Data($0) })
+            msg.append(payload)
             
             try await send(data: msg, on: stream)
-            print("[QuicClient] Sent MLS join for \(isVoice ? "voice" : "text") channel \(channelId) (\(keyPackage.count) bytes)")
+            print("[QuicClient] Sent MLS join for \(isVoice ? "voice" : "text") channel \(channelId)")
         } catch {
             print("[QuicClient] Failed to send MLS join: \(error)")
         }
@@ -1140,18 +1099,11 @@ public class QuicNetworkClient {
     /// Handle server telling us to create a new MLS group (we're the first joiner)
     private func handleMlsCreateGroup(stream: NWConnection) async {
         do {
-            // [channel_id_len: u8]
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let envelope = try decodeMlsEnvelope(data: payload)
             
-            // [channel_id string]
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
-            
-            // [is_voice: u8]
-            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let isVoice = voiceData[0] != 0
+            let channelId = envelope.channelId
+            let isVoice = envelope.groupType == .voice
             
             guard let mls = mlsWrapper else {
                 print("[QuicClient] MLS not initialized")
@@ -1174,60 +1126,52 @@ public class QuicNetworkClient {
     /// Handle server forwarding a key package for us to add (we're a founder or authorized member)
     private func handleMlsAddMemberRequest(stream: NWConnection) async {
         do {
-            // [channel_id_len: u8]
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let envelope = try decodeMlsEnvelope(data: payload)
             
-            // [channel_id string]
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
+            let channelId = envelope.channelId
+            let isVoice = envelope.groupType == .voice
+            let joinerSessionId = envelope.targetSessionId
+            guard let keyPackage = envelope.keyPackage else { return }
             
-            // [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
-            var header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let isVoice = header[0] != 0
-            let joinerSessionId = header.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            
-            let uuidLen = try await receive(on: stream, minimumLength: 1, maximumLength: 1)[0]
-            let uuidData = try await receive(on: stream, minimumLength: Int(uuidLen), maximumLength: Int(uuidLen))
-            let joinerUuid = String(data: uuidData, encoding: .utf8) ?? ""
-            
-            var kpLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let kpLen = kpLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let keyPackage = try await receive(on: stream, minimumLength: Int(kpLen), maximumLength: Int(kpLen))
-            
-            guard let mls = mlsWrapper else {
-                print("[QuicClient] MLS not initialized")
-                return
-            }
-            
-            // Add the member - returns commit and welcome
-            let result = try mls.addMember(channelId: channelId, isVoice: isVoice, keyPackageBytes: Data(keyPackage))
-            
-            print("[QuicClient] Added member \(joinerSessionId) to MLS group, sending commit/welcome")
-            
-            // Send commit + welcome back to server
-            guard let stream = controlStream else { return }
-            
-            // [0x51] [channel_id_len: u8] [channel_id string] [is_voice: u8] [new_member_session_id: u32]
-            //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
-            let channelBytes = channelStr.data(using: .utf8) ?? Data()
-            var msg = Data([Self.MSG_MLS_COMMIT_WELCOME])
-            msg.append(UInt8(channelBytes.count))
-            msg.append(channelBytes)
-            msg.append(isVoice ? 1 : 0)
-            msg.append(withUnsafeBytes(of: joinerSessionId.littleEndian) { Data($0) })
-            msg.append(withUnsafeBytes(of: UInt32(result.commit.count).littleEndian) { Data($0) })
-            msg.append(Data(result.commit))
-            msg.append(withUnsafeBytes(of: UInt32(result.welcome.count).littleEndian) { Data($0) })
-            msg.append(Data(result.welcome))
-            
-            try await send(data: msg, on: stream)
-            print("[QuicClient] Sent commit/welcome for new member \(joinerSessionId)")
-            
-            // Update audio keys after epoch advance
-            if isVoice {
-                try updateAudioKeysFromMls(channelId: channelId)
+            if let mls = mlsWrapper {
+                // Add the member - returns commit and welcome
+                let result = try mls.addMember(channelId: channelId, isVoice: isVoice, keyPackageBytes: Data(keyPackage))
+                print("[QuicClient] Added member \(joinerSessionId) to MLS group, sending commit/welcome")
+                
+                // Send commit + welcome back to server
+                guard let stream = controlStream else { return }
+                
+                let envelopeOut = MlsEnvelopeRecord(
+                    senderId: sessionId ?? userId,
+                    channelId: channelId,
+                    groupType: envelope.groupType,
+                    targetSessionId: 0,
+                    targetUuid: "",
+                    epoch: 0,
+                    keyPackage: nil,
+                    commit: nil,
+                    welcome: nil,
+                    commitWelcome: MlsCommitWelcomeDetailRecord(
+                        commit: result.commit,
+                        welcome: result.welcome,
+                        newMemberSessionId: joinerSessionId
+                    )
+                )
+                
+                let responsePayload = encodeMlsEnvelope(envelope: envelopeOut)
+                var msg = Data([Self.MSG_MLS_COMMIT_WELCOME])
+                let len = UInt32(responsePayload.count).littleEndian
+                msg.append(withUnsafeBytes(of: len) { Data($0) })
+                msg.append(responsePayload)
+                
+                try await send(data: msg, on: stream)
+                print("[QuicClient] Sent commit/welcome for new member \(joinerSessionId)")
+                
+                // Update audio keys after epoch advance
+                if isVoice {
+                    try updateAudioKeysFromMls(channelId: channelId)
+                }
             }
         } catch {
             print("[QuicClient] Failed to handle MLS add member: \(error)")
@@ -1237,27 +1181,17 @@ public class QuicNetworkClient {
     /// Handle commit message from another member
     private func handleMlsCommit(stream: NWConnection) async {
         do {
-            // [channel_id_len: u8]
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let envelope = try decodeMlsEnvelope(data: payload)
             
-            // [channel_id string]
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
-            
-            // [is_voice: u8]
-            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let isVoice = voiceData[0] != 0
-            
-            let commitLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let commitLen = commitLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let commit = try await receive(on: stream, minimumLength: Int(commitLen), maximumLength: Int(commitLen))
+            let channelId = envelope.channelId
+            let isVoice = envelope.groupType == .voice
+            guard let commit = envelope.commit else { return }
             
             guard let mls = mlsWrapper else { return }
             
             let newEpoch = try mls.processCommit(channelId: channelId, isVoice: isVoice, commitBytes: Data(commit))
-            print("[QuicClient] Processed MLS commit, now at epoch \(newEpoch)")
+            print("[QuicClient] Processed MLS commit from \(envelope.senderId), now at epoch \(newEpoch)")
             
             // Update audio keys after epoch advance
             if isVoice {
@@ -1271,22 +1205,12 @@ public class QuicNetworkClient {
     /// Handle welcome message (we were just added to a group)
     private func handleMlsWelcome(stream: NWConnection) async {
         do {
-            // [channel_id_len: u8]
-            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let idLen = Int(lenData[0])
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let envelope = try decodeMlsEnvelope(data: payload)
             
-            // [channel_id string]
-            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
-            let channelStr = String(data: idData, encoding: .utf8) ?? ""
-            let channelId = UInt32(channelStr) ?? 0
-            
-            // [is_voice: u8]
-            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
-            let isVoice = voiceData[0] != 0
-            
-            let welcomeLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let welcomeLen = welcomeLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let welcome = try await receive(on: stream, minimumLength: Int(welcomeLen), maximumLength: Int(welcomeLen))
+            let channelId = envelope.channelId
+            let isVoice = envelope.groupType == .voice
+            guard let welcome = envelope.welcome else { return }
             
             guard let mls = mlsWrapper else { return }
             
@@ -1303,7 +1227,7 @@ public class QuicNetworkClient {
     }
     
     /// Update audio sender/receiver keys from MLS
-    private func updateAudioKeysFromMls(channelId: UInt32) throws {
+    private func updateAudioKeysFromMls(channelId: String) throws {
         guard let mls = mlsWrapper, let session = sessionId else { return }
         
         // Get our own key for sending
@@ -1321,9 +1245,20 @@ public class QuicNetworkClient {
         if let receiver = audioReceiver {
             for (chId, users) in usersByChannel where chId == channelId {
                 for user in users {
-                    let userKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: user.id)
-                    try receiver.updateSenderKey(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
-                    print("[QuicClient] Updated receiver key for user \(user.id)")
+                    do {
+                        let userKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: user.id)
+                        let updated = try receiver.updateSenderKey(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
+                        
+                        if updated {
+                            print("[QuicClient] Updated receiver key for user \(user.id)")
+                        } else {
+                            // If update failed, it's a new sender we missed during the initial Join race
+                            print("[QuicClient] New user \(user.id) found during key rotation, adding sender...")
+                            try receiver.addSender(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
+                        }
+                    } catch {
+                        print("[QuicClient] Failed to update/add audio key for user \(user.id): \(error)")
+                    }
                 }
             }
         }
@@ -1332,14 +1267,9 @@ public class QuicNetworkClient {
     /// Handle incoming audio packet from server
     private func handleAudioPacket(stream: NWConnection) async {
         do {
-            // Read length (4 bytes)
-            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let packetLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let packetData = try await receiveHardenedPayload(maxLen: Self.MAX_AUDIO_PACKET_SIZE, on: stream)
             
-            // Read audio packet data
-            let packetData = try await receive(on: stream, minimumLength: Int(packetLen), maximumLength: Int(packetLen))
-            
-            print("[QuicClient] Received audio packet: \(packetLen) bytes")
+            print("[QuicClient] Received audio packet: \(packetData.count) bytes")
             
             // Process the audio packet (decrypt + decode + play)
             await MainActor.run {
@@ -1484,20 +1414,22 @@ public class QuicNetworkClient {
     
     // MARK: - Channel
     
-    public func joinChannel(_ channelId: UInt32) async throws {
+    public func joinChannel(_ channelId: String) async throws {
         guard let stream = controlStream else {
             throw QuicClientError.notConnected
         }
         
         print("[QuicClient] Joining channel \(channelId)...")
         
-        var data = Data([Self.MSG_JOIN_CHANNEL])
-        let channelStr = String(channelId)
-        let channelBytes = channelStr.data(using: .utf8) ?? Data()
-        data.append(UInt8(channelBytes.count))
-        data.append(channelBytes)
+        let req = JoinChannelRequestRecord(channelId: String(channelId))
+        let payload = encodeJoinChannelRequest(req: req)
         
-        try await send(data: data, on: stream)
+        var msg = Data([Self.MSG_JOIN_CHANNEL])
+        let len = UInt32(payload.count).littleEndian
+        msg.append(withUnsafeBytes(of: len) { Data($0) })
+        msg.append(payload)
+        
+        try await send(data: msg, on: stream)
         currentChannelId = channelId
         currentVoiceChannelId = channelId
         let channelName = channels.first(where: { $0.id == channelId })?.name ?? "channel \(channelId)"
@@ -1587,12 +1519,32 @@ public class QuicNetworkClient {
         print("[QuicClient] Sending encrypted text message to channel \(channelId): \(content.prefix(30))...")
         print("[QuicClient] ID: \(messageId), Session: \(senderSessionId) (replyTo: \(replyToId ?? "nil"))")
         
-        // Derive encryption key from MLS text group for our session
-        let myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
-        let epoch = try mls.currentEpoch(channelId: channelId, isVoice: false)
+        // Wait for MLS text group to be established (the Welcome/CreateGroup handshake
+        // completes asynchronously after joinChannel returns).
+        var myKey: Data?
+        var epoch: UInt64 = 0
+        for attempt in 1...15 {
+            do {
+                myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
+                epoch = try mls.currentEpoch(channelId: channelId, isVoice: false)
+                break
+            } catch {
+                if attempt < 15 {
+                    print("[QuicClient] MLS text group not ready yet (attempt \(attempt)/15), waiting...")
+                    try await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                } else {
+                    print("[QuicClient] MLS text group unavailable after \(attempt) attempts")
+                    throw error
+                }
+            }
+        }
+        
+        guard let myKey = myKey else {
+            throw QuicClientError.protocolError("MLS text group not available")
+        }
         
         // Create crypto wrapper with our key
-        let crypto = try TextCryptoWrapper(key: Data(myKey))
+        let crypto = try TextCryptoWrapper(key: myKey)
         
         // Create plaintext message record
         let textMsg = TextMessageRecord(
@@ -1600,7 +1552,10 @@ public class QuicNetworkClient {
             timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
             content: content,
             replyToId: replyToId ?? "",
-            messageId: messageId
+            messageId: messageId,
+            mediaType: 0, // TEXT
+            fileSize: 0,
+            sha256Hash: ""
         )
         
         // Encrypt using DAVE with MLS-derived key
@@ -1611,44 +1566,25 @@ public class QuicNetworkClient {
             message: textMsg
         )
         
-        // Serialize encrypted packet to binary format
-        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
-        var packet = Data()
-        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.senderSessionId.littleEndian) { Data($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.channelId.littleEndian) { Data($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: encryptedPacket.epoch.littleEndian) { Data($0) })
+        let packetRecord = EncryptedTextPacketRecord(
+            senderSessionId: encryptedPacket.senderSessionId,
+            channelId: String(encryptedPacket.channelId),
+            epoch: encryptedPacket.epoch,
+            messageId: messageId,
+            ciphertext: encryptedPacket.ciphertext,
+            nonce: encryptedPacket.nonce,
+            tag: encryptedPacket.tag,
+            replyToId: replyToId ?? ""
+        )
         
-        // Message ID (length-prefixed)
-        let messageIdData = messageId.data(using: .utf8) ?? Data()
-        packet.append(UInt8(messageIdData.count))
-        packet.append(messageIdData)
+        let payload = encodeEncryptedTextPacket(packet: packetRecord)
+        var msg = Data([Self.MSG_TEXT_PACKET])
+        let len = UInt32(payload.count).littleEndian
+        msg.append(withUnsafeBytes(of: len) { Data($0) })
+        msg.append(payload)
         
-        // Ciphertext (encrypted content)
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(encryptedPacket.ciphertext.count).littleEndian) { Data($0) })
-        packet.append(Data(encryptedPacket.ciphertext))
-        
-        // Nonce (24 bytes from encryption)
-        packet.append(Data(encryptedPacket.nonce))
-        
-        // Tag (16 bytes from encryption)
-        packet.append(Data(encryptedPacket.tag))
-        
-        // Reply-to ID (length-prefixed)
-        if let replyId = replyToId, let replyData = replyId.data(using: .utf8), replyData.count <= 255 {
-            packet.append(UInt8(replyData.count))
-            packet.append(replyData)
-        } else {
-            packet.append(UInt8(0))  // No reply
-        }
-        
-        // Build message: 0x30 + length(4) + packet
-        var message = Data([Self.MSG_TEXT_PACKET])
-        message.append(contentsOf: withUnsafeBytes(of: UInt32(packet.count).littleEndian) { Data($0) })
-        message.append(packet)
-
-        
-        try await send(data: message, on: stream)
-        print("[QuicClient] Sent text message (\(message.count) bytes)")
+        try await send(data: msg, on: stream)
+        print("[QuicClient] Sent encrypted text message (\(msg.count) bytes)")
     }
     
     // MARK: - Disconnect
@@ -1792,6 +1728,7 @@ public class QuicNetworkClient {
     
     // MARK: - Network Helpers
     
+    
     private func send(data: Data, on connection: NWConnection) async throws {
         return try await withCheckedThrowingContinuation { continuation in
             connection.send(content: data, completion: .contentProcessed { error in
@@ -1802,6 +1739,19 @@ public class QuicNetworkClient {
                 }
             })
         }
+    }
+    
+    /// Receive a length-prefixed payload with strict size limits to prevent OOM
+    private func receiveHardenedPayload(maxLen: Int, on stream: NWConnection) async throws -> Data {
+        let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+        let length = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        
+        guard length <= maxLen else {
+            print("[QuicClient] Incoming frame too large: \(length) bytes (max \(maxLen))")
+            throw QuicClientError.protocolError("Incoming frame exceeds size limit")
+        }
+        
+        return try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
     }
     
     private func receive(on connection: NWConnection, minimumLength: Int, maximumLength: Int) async throws -> Data {
@@ -1879,29 +1829,32 @@ public struct ChannelUser: Identifiable, Hashable {
     public let avatarData: Data?
     public var isMuted: Bool
     public var isDeafened: Bool
+    public var isDisconnected: Bool = false
     
-    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil, isMuted: Bool = false, isDeafened: Bool = false) {
+    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil, isMuted: Bool = false, isDeafened: Bool = false, isDisconnected: Bool = false) {
         self.id = sessionId
         self.displayName = displayName
         self.bio = bio
         self.avatarData = avatarData
         self.isMuted = isMuted
         self.isDeafened = isDeafened
+        self.isDisconnected = isDisconnected
     }
 }
 
 // MARK: - Channel Model
 
 public struct ChannelModel: Identifiable, Hashable {
-    public let id: UInt32
+    public let id: String
     public let name: String
     public let comment: String
     public let iconEmoji: String?
     public let iconPresetId: String?
     public let iconCustomData: Data?
     public let position: Int32
+    public let isLobby: Bool
     
-    public init(id: UInt32, name: String, comment: String = "", iconEmoji: String? = nil, iconPresetId: String? = nil, iconCustomData: Data? = nil, position: Int32 = 0) {
+    public init(id: String, name: String, comment: String = "", iconEmoji: String? = nil, iconPresetId: String? = nil, iconCustomData: Data? = nil, position: Int32 = 0, isLobby: Bool = false) {
         self.id = id
         self.name = name
         self.comment = comment
@@ -1909,6 +1862,7 @@ public struct ChannelModel: Identifiable, Hashable {
         self.iconPresetId = iconPresetId
         self.iconCustomData = iconCustomData
         self.position = position
+        self.isLobby = isLobby
     }
     
     public init(record: ChannelInfoRecord) {
@@ -1919,6 +1873,7 @@ public struct ChannelModel: Identifiable, Hashable {
         self.iconPresetId = record.icon?.presetId
         self.iconCustomData = record.icon?.customData
         self.position = record.position
+        self.isLobby = record.channelType == .lobby
     }
 }
 
@@ -1929,7 +1884,7 @@ public struct ReceivedTextMessage: Identifiable, Equatable {
     public let id: String
     public let senderSessionId: UInt32
     public let senderName: String
-    public let channelId: UInt32
+    public let channelId: String
     public let content: String
     public let timestamp: Date
     public let rawPacket: Data  // For future decryption
@@ -1946,9 +1901,9 @@ public struct SystemEvent: Identifiable, Equatable {
     public let id = UUID()
     public let content: String
     public let timestamp = Date()
-    public let channelId: UInt32 // 0 for global
+    public let channelId: String // "0" for global
     
-    public init(content: String, channelId: UInt32 = 0) {
+    public init(content: String, channelId: String = "0") {
         self.content = content
         self.channelId = channelId
     }
