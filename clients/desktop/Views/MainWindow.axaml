@@ -5,191 +5,270 @@
         x:Class="Aura.Desktop.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="Aura"
-        Width="950" Height="650"
-        MinWidth="700" MinHeight="500"
+        Width="1100" Height="700"
+        MinWidth="800" MinHeight="550"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E2E">
-    
+
     <Window.Resources>
         <converters:BoolToColorConverter x:Key="BoolToColorConverter"/>
         <converters:StatusToBrushConverter x:Key="StatusToBrushConverter"/>
+        <converters:InverseBoolConverter x:Key="InverseBoolConverter"/>
+        <converters:MicOrbBrushConverter x:Key="MicOrbBrushConverter"/>
+        <converters:StringToBoolConverter x:Key="StringToBoolConverter"/>
     </Window.Resources>
-    
+
     <Design.DataContext>
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid ColumnDefinitions="300,*">
-        
-        <!-- LEFT SIDEBAR: Connection + Channels -->
-        <Border Grid.Column="0" 
-                Background="#181825" 
-                BorderBrush="#313244" 
+    <!-- ================================================================
+         Root: Sidebar (260px) + Detail Area  
+         ================================================================ -->
+    <Grid ColumnDefinitions="260,*">
+
+        <!-- ============================================================
+             LEFT SIDEBAR
+             ============================================================ -->
+        <Border Grid.Column="0"
+                Background="#181825"
+                BorderBrush="#313244"
                 BorderThickness="0,0,1,0">
-            <Grid RowDefinitions="Auto,Auto,*,Auto">
-                
-                <!-- Header -->
-                <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="20,25,20,20" Spacing="12">
-                     <!-- Simple Logo: Circles and Wave-like shape -->
-                    <Grid Width="32" Height="32">
-                        <Ellipse Fill="#89B4FA"/>
-                        <Path Data="M 12,16 L 16,12 L 20,16 L 16,20 Z" Fill="#1E1E2E" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        <TextBlock Text="🔊" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Foreground="White" Opacity="0.8"/>
-                    </Grid>
-                    <TextBlock Text="Aura" 
-                               FontSize="22" 
-                               FontWeight="Heavy" 
-                               Foreground="#CDD6F4"
-                               VerticalAlignment="Center"/>
-                </StackPanel>
-                
-                <!-- Connection Panel -->
-                <Border Grid.Row="1" Padding="20,0,20,20">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="CONNECTION" FontSize="11" FontWeight="Bold" Foreground="#6C7086" Margin="4,0,0,4"/>
-                        
-                        <!-- Connection Status Badge -->
-                        <Border Background="#11111B" 
-                                CornerRadius="8" 
-                                Padding="12,10"
-                                IsVisible="{Binding IsConnected}">
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <Ellipse Width="8" Height="8" Fill="#a6e3a1"/>
-                                <TextBlock Text="{Binding ConnectionStatus}" 
-                                           FontSize="13" 
-                                           Foreground="#CDD6F4"
-                                           FontWeight="Medium"/>
+            <Grid RowDefinitions="Auto,Auto,*,Auto,Auto">
+
+                <!-- ── User Header ── -->
+                <Border Grid.Row="0" Padding="12,14,12,10">
+                    <Border Background="#11111B"
+                            CornerRadius="12"
+                            Padding="10,10">
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+
+                            <!-- Avatar circle with initial -->
+                            <Grid Grid.Column="0" Width="36" Height="36" Margin="0,0,10,0">
+                                <Ellipse>
+                                    <Ellipse.Fill>
+                                        <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                            <GradientStop Color="#89B4FA" Offset="0"/>
+                                            <GradientStop Color="#CBA6F7" Offset="1"/>
+                                        </LinearGradientBrush>
+                                    </Ellipse.Fill>
+                                </Ellipse>
+                                <TextBlock Text="{Binding DisplayName[0]}"
+                                           FontSize="15"
+                                           FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           IsVisible="{Binding IsConnected}"/>
+                                <TextBlock Text="?"
+                                           FontSize="15"
+                                           FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           IsVisible="{Binding IsConnected, Converter={StaticResource InverseBoolConverter}}"/>
+                            </Grid>
+
+                            <!-- Name + status -->
+                            <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding DisplayName}"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"
+                                           Foreground="#CDD6F4"/>
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <Ellipse Width="6" Height="6"
+                                             Fill="{Binding IsConnected, Converter={StaticResource BoolToColorConverter}}"
+                                             VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding ConnectionStatus}"
+                                               FontSize="10"
+                                               Foreground="#6C7086"
+                                               MaxWidth="130"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
                             </StackPanel>
-                        </Border>
-                        
-                        <!-- Server Address + Port -->
-                        <Grid ColumnDefinitions="*,Auto" IsVisible="{Binding !IsConnected}">
+
+                            <!-- Disconnect button (when connected) -->
+                            <Button Grid.Column="2"
+                                    Command="{Binding DisconnectCommand}"
+                                    IsVisible="{Binding IsConnected}"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    Padding="6,4"
+                                    CornerRadius="6"
+                                    ToolTip.Tip="Disconnect"
+                                    Cursor="Hand">
+                                <TextBlock Text="⏏" FontSize="14" Foreground="#6C7086"/>
+                            </Button>
+                        </Grid>
+                    </Border>
+                </Border>
+
+                <!-- ── Connection Form (when disconnected) ── -->
+                <Border Grid.Row="1"
+                        Padding="12,0,12,12"
+                        IsVisible="{Binding IsConnected, Converter={StaticResource InverseBoolConverter}}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="CONNECTION"
+                                   FontSize="10"
+                                   FontWeight="Bold"
+                                   Foreground="#6C7086"
+                                   Margin="4,0,0,2"/>
+
+                        <!-- Server + Port row -->
+                        <Grid ColumnDefinitions="*,Auto">
                             <TextBox Grid.Column="0"
                                      Text="{Binding ServerAddress}"
-                                     Watermark="Server Address"
+                                     Watermark="Server"
                                      Background="#313244"
                                      Foreground="#CDD6F4"
                                      BorderThickness="0"
-                                     CornerRadius="10"
-                                     Padding="12,12"/>
+                                     CornerRadius="8"
+                                     Padding="10,9"
+                                     FontSize="13"/>
                             <TextBox Grid.Column="1"
                                      Text="{Binding ServerPort}"
                                      Watermark="Port"
-                                     Width="80"
-                                     Margin="10,0,0,0"
+                                     Width="72"
+                                     Margin="6,0,0,0"
                                      Background="#313244"
                                      Foreground="#CDD6F4"
                                      BorderThickness="0"
-                                     CornerRadius="10"
-                                     Padding="12,12"/>
+                                     CornerRadius="8"
+                                     Padding="10,9"
+                                     FontSize="13"/>
                         </Grid>
-                        
-                        <!-- Server Password -->
+
+                        <!-- Password -->
                         <TextBox Text="{Binding ServerPassword}"
                                  Watermark="Password (optional)"
                                  PasswordChar="•"
                                  Background="#313244"
                                  Foreground="#CDD6F4"
                                  BorderThickness="0"
-                                 CornerRadius="10"
-                                 Padding="12,12"
-                                 IsVisible="{Binding !IsConnected}"/>
-                        
+                                 CornerRadius="8"
+                                 Padding="10,9"
+                                 FontSize="13"/>
+
                         <!-- Display Name -->
                         <TextBox Text="{Binding DisplayName}"
                                  Watermark="Display Name"
                                  Background="#313244"
                                  Foreground="#CDD6F4"
                                  BorderThickness="0"
-                                 CornerRadius="10"
-                                 Padding="12,12"
-                                 IsVisible="{Binding !IsConnected}"/>
-                        
-                        <!-- Connect/Disconnect Button -->
+                                 CornerRadius="8"
+                                 Padding="10,9"
+                                 FontSize="13"/>
+
+                        <!-- Connect Button -->
                         <Button Command="{Binding ConnectCommand}"
-                                IsVisible="{Binding !IsConnected}"
-                                Background="#89B4FA" 
+                                Background="#89B4FA"
                                 Foreground="#1E1E2E"
                                 FontWeight="Bold"
-                                CornerRadius="10"
-                                Padding="20,14"
+                                FontSize="13"
+                                CornerRadius="8"
+                                Padding="0,12"
                                 HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center">
-                            <TextBlock Text="Connect" FontSize="14"/>
+                            Connect
                         </Button>
-                        
-                        <Button Command="{Binding DisconnectCommand}"
-                                IsVisible="{Binding IsConnected}"
-                                Background="#f38ba8"
-                                Foreground="White"
-                                FontWeight="Bold"
-                                CornerRadius="10"
-                                Padding="20,14"
-                                HorizontalAlignment="Stretch"
-                                HorizontalContentAlignment="Center">
-                            <TextBlock Text="Disconnect" FontSize="14"/>
-                        </Button>
-                        
-                        <!-- Status Messages (errors, etc) -->
-                        <Border Background="#313244" 
-                                CornerRadius="8" 
-                                Padding="12,10"
-                                IsVisible="{Binding !IsConnected}">
-                            <TextBlock Text="{Binding ConnectionStatus}" 
-                                       FontSize="12" 
-                                       Foreground="#A6ADC8"
-                                       TextWrapping="Wrap"/>
-                        </Border>
                     </StackPanel>
                 </Border>
-                
-                <!-- Channel List -->
-                <ScrollViewer Grid.Row="2" Padding="20,0">
-                    <StackPanel Spacing="5">
-                        <TextBlock Text="CHANNELS" FontSize="11" FontWeight="Bold" Foreground="#6C7086" Margin="4,0,0,12"/>
-                        
+
+                <!-- ── Channel List ── -->
+                <ScrollViewer Grid.Row="2" Padding="12,0">
+                    <StackPanel Spacing="0">
+
+                        <!-- Header label -->
+                        <TextBlock Text="CHANNELS"
+                                   FontSize="10"
+                                   FontWeight="Bold"
+                                   Foreground="#6C7086"
+                                   Margin="6,0,0,8"/>
+
                         <ItemsControl ItemsSource="{Binding Channels}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:Channel">
-                                    <StackPanel Margin="0,0,0,8">
-                                        <!-- Channel Header -->
-                                        <Button Background="Transparent" 
+                                    <StackPanel Margin="0,0,0,2">
+
+                                        <!-- Channel row -->
+                                        <Button Background="Transparent"
                                                 BorderThickness="0"
                                                 HorizontalContentAlignment="Left"
-                                                Padding="10,8"
-                                                Cursor="Hand"
+                                                Padding="8,7"
                                                 CornerRadius="8"
+                                                Cursor="Hand"
                                                 Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).JoinChannelCommand}"
                                                 CommandParameter="{Binding}">
-                                            <StackPanel Orientation="Horizontal" Spacing="12">
-                                                <TextBlock Text="🔊" FontSize="16" Opacity="0.7"/>
-                                                <TextBlock Text="{Binding Name}" 
-                                                           FontSize="15" 
-                                                           Foreground="#CDD6F4"/>
-                                            </StackPanel>
+                                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                                <!-- Channel icon -->
+                                                <TextBlock Grid.Column="0"
+                                                           Text="🔊"
+                                                           FontSize="14"
+                                                           Opacity="0.65"
+                                                           VerticalAlignment="Center"
+                                                           Margin="0,0,8,0"/>
+
+                                                <!-- Channel name -->
+                                                <TextBlock Grid.Column="1"
+                                                           Text="{Binding Name}"
+                                                           FontSize="14"
+                                                           FontWeight="Medium"
+                                                           Foreground="#CDD6F4"
+                                                           VerticalAlignment="Center"/>
+
+                                                <!-- User count badge -->
+                                                <Border Grid.Column="2"
+                                                        Background="#313244"
+                                                        CornerRadius="8"
+                                                        Padding="6,2">
+                                                    <TextBlock Text="{Binding Users.Count}"
+                                                               FontSize="10"
+                                                               FontWeight="Bold"
+                                                               Foreground="#A6ADC8"/>
+                                                </Border>
+                                            </Grid>
                                         </Button>
-                                        
-                                        <!-- Users in Channel -->
+
+                                        <!-- Users in channel -->
                                         <ItemsControl ItemsSource="{Binding Users}"
                                                       IsVisible="{Binding IsExpanded}"
-                                                      Margin="40,4,0,0">
+                                                      Margin="0,0,0,4">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate x:DataType="vm:User">
-                                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4">
-                                                        <Grid Width="16" Height="16">
-                                                            <Ellipse Fill="#313244"/>
-                                                            <TextBlock Text="🎙️" IsVisible="{Binding IsSpeaking}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                            <TextBlock Text="🔇" IsVisible="{Binding IsMuted}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                            <TextBlock Text="🚫" IsVisible="{Binding IsDeafened}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    <Grid ColumnDefinitions="Auto,*,Auto"
+                                                          Margin="28,2,8,2">
+
+                                                        <!-- Avatar circle -->
+                                                        <Grid Grid.Column="0" Width="20" Height="20" Margin="0,0,8,0">
+                                                            <Ellipse Fill="{Binding IsSpeaking, Converter={StaticResource MicOrbBrushConverter}}"
+                                                                     Opacity="0.8"/>
+                                                            <TextBlock Text="{Binding Name[0]}"
+                                                                       FontSize="9"
+                                                                       FontWeight="Bold"
+                                                                       Foreground="White"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center"/>
                                                         </Grid>
-                                                        <TextBlock Text="{Binding Name}" 
-                                                                   FontSize="14"
-                                                                   Foreground="{Binding IsSpeaking, Converter={StaticResource StatusToBrushConverter}}"/>
-                                                        
-                                                        <StackPanel Orientation="Horizontal" Spacing="4" IsVisible="{Binding IsDeafened}">
-                                                            <TextBlock Text="🎧" FontSize="10" Opacity="0.5"/>
+
+                                                        <!-- Name + bio -->
+                                                        <StackPanel Grid.Column="1" Spacing="0" VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding Name}"
+                                                                       FontSize="13"
+                                                                       Foreground="{Binding IsSpeaking, Converter={StaticResource StatusToBrushConverter}}"/>
+                                                            <TextBlock Text="{Binding Comment}"
+                                                                       FontSize="10"
+                                                                       Foreground="#585B70"
+                                                                       IsVisible="{Binding Comment, Converter={StaticResource StringToBoolConverter}}"
+                                                                       TextTrimming="CharacterEllipsis"/>
                                                         </StackPanel>
-                                                    </StackPanel>
+
+                                                        <!-- Status icons -->
+                                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                                            <TextBlock Text="〜" FontSize="10" IsVisible="{Binding IsSpeaking}" Foreground="#A6E3A1" Opacity="0.9"/>
+                                                            <TextBlock Text="⊘" FontSize="10" IsVisible="{Binding IsDeafened}" Foreground="#F38BA8" Opacity="0.7"/>
+                                                            <TextBlock Text="⊘" FontSize="10" IsVisible="{Binding IsMuted}" Foreground="#A6ADC8" Opacity="0.5"/>
+                                                        </StackPanel>
+                                                    </Grid>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
@@ -199,199 +278,439 @@
                         </ItemsControl>
                     </StackPanel>
                 </ScrollViewer>
-                
-                <!-- Voice Controls -->
-                <Border Grid.Row="3" Padding="20">
-                    <StackPanel Spacing="12">
-                        <Grid ColumnDefinitions="*,*">
-                            <ToggleButton Grid.Column="0"
-                                          IsChecked="{Binding IsMicEnabled}"
-                                          Command="{Binding ToggleMicrophoneAsyncCommand}"
-                                          Background="#313244"
-                                          Foreground="#CDD6F4"
-                                          CornerRadius="10"
-                                          Padding="10,12"
-                                          Margin="0,0,5,0"
-                                          HorizontalAlignment="Stretch"
-                                          HorizontalContentAlignment="Center"
-                                          IsEnabled="{Binding IsAuthenticated}">
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}" FontSize="14"/>
-                                    <TextBlock Text="Mic" FontSize="13" FontWeight="SemiBold"/>
-                                </StackPanel>
-                            </ToggleButton>
-                            
-                            <ToggleButton Grid.Column="1"
-                                          IsChecked="{Binding IsDeafened}"
-                                          Command="{Binding ToggleDeafenAsyncCommand}"
-                                          Background="#313244"
-                                          Foreground="#CDD6F4"
-                                          CornerRadius="10"
-                                          Padding="10,12"
-                                          Margin="5,0,0,0"
-                                          HorizontalAlignment="Stretch"
-                                          HorizontalContentAlignment="Center"
-                                          IsEnabled="{Binding IsAuthenticated}">
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}" FontSize="14"/>
-                                    <TextBlock Text="Deafen" FontSize="13" FontWeight="SemiBold"/>
-                                </StackPanel>
-                            </ToggleButton>
-                        </Grid>
-                        
-                        <!-- Audio Settings Button -->
+
+                <!-- ── Voice Controls Bar ── -->
+                <Border Grid.Row="3"
+                        IsVisible="{Binding IsAuthenticated}"
+                        Background="#11111B"
+                        BorderBrush="#313244"
+                        BorderThickness="0,1,0,0"
+                        Padding="12,10">
+                    <StackPanel Spacing="8">
+
+                        <!-- Mic + Deafen capsule -->
+                        <Border Background="#1E1E2E"
+                                CornerRadius="12"
+                                Padding="4">
+                            <Grid ColumnDefinitions="*,Auto,*">
+
+                                <!-- Mic toggle -->
+                                <ToggleButton Grid.Column="0"
+                                              IsChecked="{Binding IsMicEnabled}"
+                                              Command="{Binding ToggleMicrophoneCommand}"
+                                              CornerRadius="9"
+                                              Padding="10,10"
+                                              HorizontalContentAlignment="Center"
+                                              HorizontalAlignment="Stretch"
+                                              IsEnabled="{Binding IsAuthenticated}">
+                                    <ToggleButton.Styles>
+                                        <Style Selector="ToggleButton:checked">
+                                            <Setter Property="Background" Value="#264D2E"/>
+                                            <Setter Property="Foreground" Value="#A6E3A1"/>
+                                        </Style>
+                                        <Style Selector="ToggleButton:unchecked">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Setter Property="Foreground" Value="#6C7086"/>
+                                        </Style>
+                                    </ToggleButton.Styles>
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}"
+                                                   FontSize="13"/>
+                                        <TextBlock Text="Mic" FontSize="12" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </ToggleButton>
+
+                                <!-- Divider -->
+                                <Separator Grid.Column="1" Background="#313244" Width="1" Margin="4,6"/>
+
+                                <!-- Deafen toggle -->
+                                <ToggleButton Grid.Column="2"
+                                              IsChecked="{Binding IsDeafened}"
+                                              Command="{Binding ToggleDeafenCommand}"
+                                              CornerRadius="9"
+                                              Padding="10,10"
+                                              HorizontalContentAlignment="Center"
+                                              HorizontalAlignment="Stretch"
+                                              IsEnabled="{Binding IsAuthenticated}">
+                                    <ToggleButton.Styles>
+                                        <Style Selector="ToggleButton:checked">
+                                            <Setter Property="Background" Value="#4A1C20"/>
+                                            <Setter Property="Foreground" Value="#F38BA8"/>
+                                        </Style>
+                                        <Style Selector="ToggleButton:unchecked">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Setter Property="Foreground" Value="#6C7086"/>
+                                        </Style>
+                                    </ToggleButton.Styles>
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}"
+                                                   FontSize="13"/>
+                                        <TextBlock Text="Deafen" FontSize="12" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </ToggleButton>
+                            </Grid>
+                        </Border>
+
+                        <!-- Stats -->
+                        <TextBlock Text="{Binding AudioStats}"
+                                   FontSize="10"
+                                   Foreground="#45475A"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Audio Settings (collapsible) ── -->
+                <Border Grid.Row="4"
+                        Padding="12,0,12,12"
+                        IsVisible="{Binding IsAuthenticated}">
+                    <StackPanel Spacing="6">
+
                         <Button Command="{Binding ToggleAudioSettingsCommand}"
                                 Background="Transparent"
                                 BorderThickness="0"
                                 HorizontalAlignment="Stretch"
                                 Padding="8,4"
                                 Cursor="Hand">
-                            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
-                                <TextBlock Text="⚙️" FontSize="12"/>
-                                <TextBlock Text="Audio Settings" FontSize="12" Foreground="#6C7086"/>
+                            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
+                                <TextBlock Text="⚙" FontSize="11" Foreground="#45475A"/>
+                                <TextBlock Text="Audio Settings" FontSize="11" Foreground="#45475A"/>
                             </StackPanel>
                         </Button>
-                        
-                        <!-- Collapsible Audio Settings Panel -->
+
                         <Border IsVisible="{Binding ShowAudioSettings}"
                                 Background="#11111B"
                                 CornerRadius="10"
-                                Padding="15">
-                            <StackPanel Spacing="12">
-                                <TextBlock Text="AUDIO PROCESSING" FontSize="10" FontWeight="Bold" Foreground="#6C7086"/>
-                                
-                                <!-- RNNoise Toggle -->
+                                Padding="12,10">
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="PROCESSING" FontSize="9" FontWeight="Bold" Foreground="#585B70"/>
+
                                 <CheckBox IsChecked="{Binding RnnoiseEnabled}"
                                           Content="RNNoise Suppression"
-                                          Foreground="#CDD6F4"
-                                          FontSize="12"/>
-                                
-                                <!-- AEC Toggle -->
+                                          Foreground="#CDD6F4" FontSize="12"/>
                                 <CheckBox IsChecked="{Binding AecEnabled}"
-                                          Content="Echo Cancellation (AEC)"
-                                          Foreground="#CDD6F4"
-                                          FontSize="12"/>
-                                
-                                <!-- WebRTC NS Toggle -->
+                                          Content="Echo Cancellation"
+                                          Foreground="#CDD6F4" FontSize="12"/>
                                 <CheckBox IsChecked="{Binding WebrtcNsEnabled}"
                                           Content="WebRTC Noise Suppression"
-                                          Foreground="#CDD6F4"
-                                          FontSize="12"/>
-                                
-                                <!-- AGC Toggle -->
+                                          Foreground="#CDD6F4" FontSize="12"/>
                                 <CheckBox IsChecked="{Binding AgcEnabled}"
                                           Content="Auto Gain Control"
-                                          Foreground="#CDD6F4"
-                                          FontSize="12"/>
-                                
-                                <Separator Background="#313244" Height="1" Margin="0,8"/>
-                                
-                                <TextBlock Text="LATENCY" FontSize="10" FontWeight="Bold" Foreground="#6C7086"/>
-                                
-                                <!-- DRED Duration -->
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="{Binding DredDuration, StringFormat='DRED Redundancy: {0}0ms'}" 
+                                          Foreground="#CDD6F4" FontSize="12"/>
+
+                                <Separator Background="#2A2A3C" Height="1" Margin="0,4"/>
+                                <TextBlock Text="LATENCY" FontSize="9" FontWeight="Bold" Foreground="#585B70"/>
+
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="{Binding DredDuration, StringFormat='DRED: {0}0ms'}"
                                                FontSize="11" Foreground="#A6ADC8"/>
                                     <Slider Minimum="0" Maximum="10" Value="{Binding DredDuration}"
                                             IsSnapToTickEnabled="True" TickFrequency="1"/>
                                 </StackPanel>
-                                
-                                <!-- Jitter Buffer -->
-                                <StackPanel Spacing="4">
-                                    <TextBlock Text="{Binding JitterBufferMs, StringFormat='Jitter Buffer: {0}ms'}" 
+
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="{Binding JitterBufferMs, StringFormat='Jitter: {0}ms'}"
                                                FontSize="11" Foreground="#A6ADC8"/>
                                     <Slider Minimum="0" Maximum="100" Value="{Binding JitterBufferMs}"
                                             IsSnapToTickEnabled="True" TickFrequency="10"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
-                        
-                        <TextBlock Text="{Binding AudioStats}" 
-                                   FontSize="10" 
-                                   Foreground="#6C7086"
-                                   HorizontalAlignment="Center"/>
                     </StackPanel>
                 </Border>
             </Grid>
         </Border>
-        
-        <!-- MAIN CONTENT: Chat Area -->
-        <Grid Grid.Column="1" RowDefinitions="*,Auto" Background="#1E1E2E">
-            
-            <!-- Messages Area -->
-            <ScrollViewer Grid.Row="0" 
-                          Padding="30"
-                          HorizontalScrollBarVisibility="Disabled"
-                          VerticalScrollBarVisibility="Auto">
-                <ItemsControl ItemsSource="{Binding Messages}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ChatMessage">
-                            <StackPanel Margin="0,4" 
-                                        HorizontalAlignment="{Binding IsFromCurrentUser, Converter={x:Static converters:BoolToAlignmentConverter.Instance}}">
-                                
-                                <!-- User Name (for others only) -->
-                                <TextBlock Text="{Binding UserName}"
-                                           FontSize="11"
-                                           Foreground="#6C7086"
-                                           IsVisible="{Binding !IsFromCurrentUser}"
-                                           Margin="12,0,0,4"
-                                           Opacity="{Binding System, Converter={x:Static converters:BoolToOpacityConverter.Instance}}"/>
-                                
-                                <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
-                                        BorderThickness="{Binding System, Converter={x:Static converters:BoolToThicknessConverter.Instance}}"
-                                        BorderBrush="#313244"
-                                        CornerRadius="{Binding System, Converter={x:Static converters:SystemMessageCornerRadiusConverter.Instance}, FallbackValue=18}"
-                                        Padding="{Binding System, Converter={x:Static converters:SystemMessagePaddingConverter.Instance}, FallbackValue='16,10'}"
-                                        MaxWidth="600"
-                                        HorizontalAlignment="{Binding System, Converter={x:Static converters:BoolToAlignmentConverter.CenterIfSystem}}">
-                                    <TextBlock Text="{Binding Content}"
-                                               Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
-                                               TextWrapping="Wrap"
-                                               FontSize="14"/>
-                                </Border>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </ScrollViewer>
-            
-            <!-- Message Input Bar -->
-            <Border Grid.Row="1" 
-                    Background="#1E1E2E"
-                    Padding="30,10,30,30">
-                <Grid ColumnDefinitions="*,Auto">
-                    <Border Grid.Column="0" 
-                            Background="#181825" 
-                            CornerRadius="24"
-                            BorderBrush="#313244"
-                            BorderThickness="1">
-                        <TextBox Text="{Binding MessageInput}"
-                                 Watermark="Message..."
-                                 Background="Transparent"
-                                 BorderThickness="0"
-                                 Foreground="#CDD6F4"
-                                 FontSize="15"
-                                 Padding="20,12"
-                                 VerticalAlignment="Center">
-                            <TextBox.KeyBindings>
-                                <KeyBinding Gesture="Enter" Command="{Binding SendMessageCommand}"/>
-                            </TextBox.KeyBindings>
-                        </TextBox>
+
+        <!-- ============================================================
+             DETAIL AREA: Voice Status + Chat
+             ============================================================ -->
+        <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto">
+
+            <!-- ── Channel Header Bar ── -->
+            <Border Grid.Row="0"
+                    Background="#181825"
+                    BorderBrush="#313244"
+                    BorderThickness="0,0,0,1"
+                    Padding="20,14">
+                <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+
+                    <!-- Channel icon -->
+                    <TextBlock Grid.Column="0"
+                               Text="🔊"
+                               FontSize="18"
+                               Opacity="0.8"
+                               VerticalAlignment="Center"
+                               Margin="0,0,10,0"/>
+
+                    <!-- Channel name -->
+                    <TextBlock Grid.Column="1"
+                               Text="{Binding SelectedChannel.Name, FallbackValue='No Channel'}"
+                               FontSize="17"
+                               FontWeight="Bold"
+                               Foreground="#CDD6F4"
+                               VerticalAlignment="Center"/>
+
+                    <!-- User count badge -->
+                    <Border Grid.Column="2"
+                            Background="#313244"
+                            CornerRadius="10"
+                            Padding="10,4"
+                            Margin="0,0,12,0"
+                            VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <TextBlock Text="👥" FontSize="11"/>
+                            <TextBlock Text="{Binding SelectedChannel.Users.Count, FallbackValue='0'}"
+                                       FontSize="11"
+                                       FontWeight="Bold"
+                                       Foreground="#A6ADC8"/>
+                        </StackPanel>
                     </Border>
-                    
-                    <Button Grid.Column="1" 
-                            Command="{Binding SendMessageCommand}"
-                            Background="#89B4FA"
-                            Width="48" Height="48"
-                            CornerRadius="24"
-                            Margin="15,0,0,0"
-                            Padding="0"
-                            HorizontalContentAlignment="Center"
-                            VerticalContentAlignment="Center"
-                            Cursor="Hand">
-                        <Path Fill="#1E1E2E" Data="M 24,14 L 24,34 M 24,14 L 16,22 M 24,14 L 32,22" Stroke="#1E1E2E" StrokeThickness="3" StrokeJoin="Round" StrokeLineCap="Round"/>
-                    </Button>
                 </Grid>
+            </Border>
+
+            <!-- ── Main Content: Voice Panel (left) + Chat (right) ── -->
+            <Grid Grid.Row="1" ColumnDefinitions="*,360">
+
+                <!-- ── Voice Status Panel ── -->
+                <Grid Grid.Column="0" Background="#1E1E2E">
+                    <StackPanel VerticalAlignment="Center"
+                                HorizontalAlignment="Center"
+                                Spacing="20">
+
+                        <!-- Mic orb -->
+                        <Grid HorizontalAlignment="Center">
+
+                            <!-- Outer glow ring -->
+                            <Ellipse Width="120" Height="120"
+                                     HorizontalAlignment="Center">
+                                <Ellipse.Fill>
+                                    <RadialGradientBrush>
+                                        <GradientStop Color="#20A6E3A1" Offset="0"/>
+                                        <GradientStop Color="Transparent" Offset="1"/>
+                                    </RadialGradientBrush>
+                                </Ellipse.Fill>
+                            </Ellipse>
+
+                            <!-- Glass ring -->
+                            <Ellipse Width="100" Height="100"
+                                     StrokeThickness="1"
+                                     HorizontalAlignment="Center">
+                                <Ellipse.Stroke>
+                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                        <GradientStop Color="#33FFFFFF" Offset="0"/>
+                                        <GradientStop Color="#0AFFFFFF" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Ellipse.Stroke>
+                            </Ellipse>
+
+                            <!-- Orb fill -->
+                            <Ellipse Width="80" Height="80"
+                                     Fill="{Binding IsMicEnabled, Converter={StaticResource MicOrbBrushConverter}}"
+                                     HorizontalAlignment="Center"/>
+
+                            <!-- Mic emoji -->
+                            <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}"
+                                       FontSize="32"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,0,2"/>
+                        </Grid>
+
+                        <!-- Status labels -->
+                        <StackPanel Spacing="6" HorizontalAlignment="Center">
+                            <!-- Deafened label -->
+                            <TextBlock Text="Deafened"
+                                       FontSize="18"
+                                       FontWeight="Bold"
+                                       Foreground="#6C7086"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding IsDeafened}"/>
+
+                            <!-- Transmitting label -->
+                            <TextBlock Text="Transmitting"
+                                       FontSize="18"
+                                       FontWeight="Bold"
+                                       Foreground="#A6E3A1"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding IsMicEnabled}"/>
+
+                            <!-- Muted label -->
+                            <TextBlock Text="Muted"
+                                       FontSize="18"
+                                       FontWeight="Bold"
+                                       Foreground="#6C7086"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding IsMicEnabled, Converter={StaticResource InverseBoolConverter}}"/>
+
+                            <!-- Subtitle -->
+                            <TextBlock Text="Your audio is private"
+                                       FontSize="11"
+                                       Foreground="#45475A"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding IsMicEnabled, Converter={StaticResource InverseBoolConverter}}"/>
+                            <TextBlock Text="You cannot hear or speak"
+                                       FontSize="11"
+                                       Foreground="#45475A"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding IsDeafened}"/>
+                        </StackPanel>
+
+                        <!-- Compact Mic + Deafen capsule -->
+                        <Border Background="#11111B"
+                                CornerRadius="14"
+                                Padding="6"
+                                HorizontalAlignment="Center"
+                                IsVisible="{Binding IsAuthenticated}">
+                            <StackPanel Orientation="Horizontal" Spacing="0">
+
+                                <!-- Mic -->
+                                <Button Command="{Binding ToggleMicrophoneCommand}"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        CornerRadius="9"
+                                        Padding="14,10"
+                                        Cursor="Hand"
+                                        ToolTip.Tip="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}">
+                                    <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}"
+                                               FontSize="18"/>
+                                </Button>
+
+                                <Separator Background="#313244" Width="1" Margin="4,8"/>
+
+                                <!-- Deafen -->
+                                <Button Command="{Binding ToggleDeafenCommand}"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        CornerRadius="9"
+                                        Padding="14,10"
+                                        Cursor="Hand"
+                                        ToolTip.Tip="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}">
+                                    <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}"
+                                               FontSize="18"/>
+                                </Button>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Connect prompt when not connected -->
+                        <StackPanel Spacing="8"
+                                    HorizontalAlignment="Center"
+                                    IsVisible="{Binding IsConnected, Converter={StaticResource InverseBoolConverter}}">
+                            <TextBlock Text="🔌"
+                                       FontSize="48"
+                                       HorizontalAlignment="Center"
+                                       Opacity="0.3"/>
+                            <TextBlock Text="Connect to a server to begin"
+                                       FontSize="14"
+                                       Foreground="#45475A"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+
+            <!-- Chat Column -->
+            <Grid Grid.Column="1" Background="#181825" RowDefinitions="*,Auto">
+                <Border Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
+                        Width="1" Background="#313244"
+                        HorizontalAlignment="Left"/>
+
+
+                    <!-- Messages -->
+                    <ScrollViewer Grid.Row="0"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto"
+                                  Padding="16,16,16,8">
+                        <ItemsControl ItemsSource="{Binding Messages}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:ChatMessage">
+                                    <StackPanel Margin="0,3"
+                                                HorizontalAlignment="{Binding IsFromCurrentUser, Converter={x:Static converters:BoolToAlignmentConverter.Instance}}">
+
+                                        <!-- Sender name (others only) -->
+                                        <TextBlock Text="{Binding UserName}"
+                                                   FontSize="10"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="#6C7086"
+                                                   Margin="12,0,0,3"
+                                                   IsVisible="{Binding IsFromCurrentUser, Converter={StaticResource InverseBoolConverter}}"
+                                                   Opacity="{Binding System, Converter={x:Static converters:BoolToOpacityConverter.Instance}}"/>
+
+                                        <!-- Bubble -->
+                                        <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
+                                                BorderBrush="#313244"
+                                                BorderThickness="{Binding System, Converter={x:Static converters:BoolToThicknessConverter.Instance}}"
+                                                CornerRadius="{Binding System, Converter={x:Static converters:SystemMessageCornerRadiusConverter.Instance}, FallbackValue=18}"
+                                                Padding="{Binding System, Converter={x:Static converters:SystemMessagePaddingConverter.Instance}, FallbackValue='14,9'}"
+                                                MaxWidth="280"
+                                                HorizontalAlignment="{Binding System, Converter={x:Static converters:BoolToAlignmentConverter.CenterIfSystem}}">
+                                            <TextBlock Text="{Binding Content}"
+                                                       Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
+                                                       TextWrapping="Wrap"
+                                                       FontSize="13"/>
+                                        </Border>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <!-- Message Input -->
+                    <Border Grid.Row="1"
+                            Background="#181825"
+                            BorderBrush="#313244"
+                            BorderThickness="0,1,0,0"
+                            Padding="12,10">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <Border Grid.Column="0"
+                                    Background="#11111B"
+                                    CornerRadius="20"
+                                    BorderBrush="#313244"
+                                    BorderThickness="1">
+                                <TextBox Text="{Binding MessageInput}"
+                                         Watermark="Message..."
+                                         Background="Transparent"
+                                         BorderThickness="0"
+                                         Foreground="#CDD6F4"
+                                         FontSize="13"
+                                         Padding="14,10"
+                                         VerticalAlignment="Center">
+                                    <TextBox.KeyBindings>
+                                        <KeyBinding Gesture="Enter" Command="{Binding SendMessageCommand}"/>
+                                    </TextBox.KeyBindings>
+                                </TextBox>
+                            </Border>
+
+                            <!-- Send button -->
+                            <Button Grid.Column="1"
+                                    Command="{Binding SendMessageCommand}"
+                                    Width="40" Height="40"
+                                    CornerRadius="20"
+                                    Margin="8,0,0,0"
+                                    Padding="0"
+                                    HorizontalContentAlignment="Center"
+                                    VerticalContentAlignment="Center"
+                                    Cursor="Hand">
+                                <Button.Background>
+                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                        <GradientStop Color="#89B4FA" Offset="0"/>
+                                        <GradientStop Color="#CBA6F7" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Button.Background>
+                                <TextBlock Text="↑" FontSize="16" FontWeight="Bold" Foreground="#1E1E2E"/>
+                            </Button>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Grid>
+
+            <!-- Status bar -->
+            <Border Grid.Row="2"
+                    Background="#11111B"
+                    BorderBrush="#313244"
+                    BorderThickness="0,1,0,0"
+                    Padding="16,6"
+                    IsVisible="{Binding IsConnected}">
+                <TextBlock Text="{Binding ConnectionStatus}"
+                           FontSize="11"
+                           Foreground="#585B70"/>
             </Border>
         </Grid>
     </Grid>

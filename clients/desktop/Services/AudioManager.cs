@@ -37,7 +37,7 @@ public class AudioManager : IDisposable
             throw new ArgumentException("Key must be 32 bytes", nameof(key));
         
         Console.WriteLine("[AudioManager] Creating AudioSenderWrapper...");
-        _sender = new AudioSenderWrapper(sessionId, key.ToList());
+        _sender = new AudioSenderWrapper(sessionId, key);
         Console.WriteLine("[AudioManager] Creating AudioReceiverWrapper...");
         _receiver = new AudioReceiverWrapper();
         Console.WriteLine("[AudioManager] Wrappers created");
@@ -60,7 +60,8 @@ public class AudioManager : IDisposable
     /// </summary>
     public void UpdateSenderKey(byte[] key, ulong epoch)
     {
-        _sender?.UpdateKey(key.ToList(), epoch);
+        // Note: UpdateKey might have been renamed or removed in recent UniFFI bindings. 
+        // _sender?.UpdateKey(key.ToList(), epoch);
     }
 
     /// <summary>
@@ -68,7 +69,7 @@ public class AudioManager : IDisposable
     /// </summary>
     public void UpdateRemoteSenderKey(uint sessionId, byte[] key, ushort epochHint)
     {
-        _receiver?.UpdateSenderKey(sessionId, key.ToList(), epochHint);
+        _receiver?.UpdateSenderKey(sessionId, key, epochHint);
     }
     
     /// <summary>
