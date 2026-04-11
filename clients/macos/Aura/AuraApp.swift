@@ -10,10 +10,16 @@ struct AuraApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .background(VisualEffectBlur(material: .headerView, blendingMode: .behindWindow))
+                .background {
+                    if #available(macOS 26, *) {
+                        Color.clear // System handles Liquid Glass chrome
+                    } else {
+                        VisualEffectBlur(material: .headerView, blendingMode: .behindWindow)
+                    }
+                }
         }
-        .windowStyle(HiddenTitleBarWindowStyle())
-        .defaultSize(width: 900, height: 600)
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 960, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) { }
         }

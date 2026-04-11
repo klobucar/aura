@@ -17,6 +17,7 @@ struct ServerListView: View {
                 Spacer()
                 Button(action: { showingAddServer = true }) {
                     Image(systemName: "plus.circle.fill")
+                        .accessibilityLabel("Add")
                         .font(.title2)
                         .foregroundStyle(AuraTheme.Gradients.lushIndigo)
                 }
@@ -67,7 +68,7 @@ struct ServerListView: View {
         HStack {
             Text(title)
                 .font(.caption.bold())
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
                 .textCase(.uppercase)
             Spacer()
         }
@@ -79,7 +80,7 @@ struct ServerListView: View {
             // Icon
             Image(systemName: server.isFavorite ? "star.fill" : "server.rack")
                 .font(.title3)
-                .foregroundColor(server.isFavorite ? .yellow : AuraTheme.Colors.primary)
+                .foregroundStyle(server.isFavorite ? .yellow : AuraTheme.Colors.primary)
                 .frame(width: 32)
             
             // Info
@@ -88,7 +89,7 @@ struct ServerListView: View {
                     .font(.system(size: 14, weight: .semibold))
                 Text("\\(server.host):\\(server.port)")
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             
             Spacer()

@@ -130,6 +130,10 @@ public class QuicNetworkClient {
     /// Task for scheduled reconnection
     private var reconnectTask: Task<Void, Never>?
     
+    /// Guards against reconnection when user intentionally disconnects.
+    /// Set to true BEFORE cancelling streams/group in disconnect().
+    private var isIntentionalDisconnect = false
+    
     /// Saved connection parameters for retry
     private var savedHost: String?
     private var savedPort: UInt16?
@@ -187,6 +191,9 @@ public class QuicNetworkClient {
     /// Connect to the Aura server via QUIC using NWConnectionGroup.
     /// This allows accepting server-initiated streams.
     public func connect(host: String, port: UInt16 = 8443) async throws {
+        // Clear intentional disconnect flag for fresh connections
+        isIntentionalDisconnect = false
+        
         // Save connection parameters for retry
         savedHost = host
         savedPort = port
@@ -288,8 +295,8 @@ public class QuicNetworkClient {
                         self?.isConnected = false
                         resumed = true
                         
-                        // Trigger reconnection if this was an unexpected disconnect
-                        if self?.isAuthenticated == true {
+                        // Trigger reconnection only if this was an unexpected disconnect
+                        if self?.isAuthenticated == true && self?.isIntentionalDisconnect != true {
                             self?.handleConnectionLoss()
                         }
                         
@@ -300,8 +307,8 @@ public class QuicNetworkClient {
                         if !resumed {
                             resumed = true
                             
-                            // Trigger reconnection if this was an unexpected disconnect
-                            if self?.isAuthenticated == true {
+                            // Trigger reconnection only if this was an unexpected disconnect
+                            if self?.isAuthenticated == true && self?.isIntentionalDisconnect != true {
                                 self?.handleConnectionLoss()
                             }
                             
@@ -339,8 +346,8 @@ public class QuicNetworkClient {
                     self?.streamContinuation?.resume(throwing: error)
                     self?.streamContinuation = nil
                     
-                    // Trigger reconnection if we were authenticated
-                    if self?.isAuthenticated == true {
+                    // Trigger reconnection only if we were authenticated and it wasn't intentional
+                    if self?.isAuthenticated == true && self?.isIntentionalDisconnect != true {
                         self?.handleConnectionLoss()
                     }
                 }
@@ -774,11 +781,19 @@ public class QuicNetworkClient {
     /// Handle UserJoined message
     private func handleUserJoined(stream: NWConnection) async {
         do {
-            // Read channel_id (4 bytes) + session_id (4 bytes) + name_len (1 byte)
-            let header = try await receive(on: stream, minimumLength: 9, maximumLength: 9)
-            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let sessionId = header.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let nameLen = Int(header[8])
+            // Read channel_id_len (1 byte)
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
+            
+            // Read channel_id string bytes
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // Read session_id (4 bytes) + name_len (1 byte)
+            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let sessionId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            let nameLen = Int(header[4])
             
             // Read display name
             let nameData = try await receive(on: stream, minimumLength: nameLen, maximumLength: nameLen)
@@ -843,10 +858,18 @@ public class QuicNetworkClient {
     /// Handle UserLeft message
     private func handleUserLeft(stream: NWConnection) async {
         do {
-            // Read channel_id (4 bytes) + session_id (4 bytes)
-            let data = try await receive(on: stream, minimumLength: 8, maximumLength: 8)
-            let channelId = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let sessionId = data.subdata(in: 4..<8).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            // Read channel_id_len (1 byte)
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
+            
+            // Read channel_id string bytes
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // Read session_id (4 bytes)
+            let sessionData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let sessionId = sessionData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             
             // Remove from audio receiver
             audioReceiver?.removeSender(sessionId: sessionId)
@@ -1096,9 +1119,13 @@ public class QuicNetworkClient {
         do {
             let keyPackage = try mls.createKeyPackage()
             
-            // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
+            let channelStr = String(channelId)
+            let channelBytes = channelStr.data(using: .utf8) ?? Data()
+            
+            // [0x50] [channel_id_len: u8] [channel_id string] [is_voice: u8] [kp_len: u32] [key_package]
             var msg = Data([Self.MSG_MLS_JOIN])
-            msg.append(withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
+            msg.append(UInt8(channelBytes.count))
+            msg.append(channelBytes)
             msg.append(isVoice ? 1 : 0)
             msg.append(withUnsafeBytes(of: UInt32(keyPackage.count).littleEndian) { Data($0) })
             msg.append(Data(keyPackage))
@@ -1113,10 +1140,18 @@ public class QuicNetworkClient {
     /// Handle server telling us to create a new MLS group (we're the first joiner)
     private func handleMlsCreateGroup(stream: NWConnection) async {
         do {
-            // [channel_id: u32] [is_voice: u8]
-            let data = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let channelId = data.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let isVoice = data[4] != 0
+            // [channel_id_len: u8]
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
+            
+            // [channel_id string]
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // [is_voice: u8]
+            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let isVoice = voiceData[0] != 0
             
             guard let mls = mlsWrapper else {
                 print("[QuicClient] MLS not initialized")
@@ -1139,11 +1174,19 @@ public class QuicNetworkClient {
     /// Handle server forwarding a key package for us to add (we're a founder or authorized member)
     private func handleMlsAddMemberRequest(stream: NWConnection) async {
         do {
-            // [channel_id: u32] [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
-            var header = try await receive(on: stream, minimumLength: 9, maximumLength: 9)
-            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let isVoice = header[4] != 0
-            let joinerSessionId = header.subdata(in: 5..<9).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            // [channel_id_len: u8]
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
+            
+            // [channel_id string]
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
+            var header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
+            let isVoice = header[0] != 0
+            let joinerSessionId = header.subdata(in: 1..<5).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             
             let uuidLen = try await receive(on: stream, minimumLength: 1, maximumLength: 1)[0]
             let uuidData = try await receive(on: stream, minimumLength: Int(uuidLen), maximumLength: Int(uuidLen))
@@ -1166,10 +1209,12 @@ public class QuicNetworkClient {
             // Send commit + welcome back to server
             guard let stream = controlStream else { return }
             
-            // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
+            // [0x51] [channel_id_len: u8] [channel_id string] [is_voice: u8] [new_member_session_id: u32]
             //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
+            let channelBytes = channelStr.data(using: .utf8) ?? Data()
             var msg = Data([Self.MSG_MLS_COMMIT_WELCOME])
-            msg.append(withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
+            msg.append(UInt8(channelBytes.count))
+            msg.append(channelBytes)
             msg.append(isVoice ? 1 : 0)
             msg.append(withUnsafeBytes(of: joinerSessionId.littleEndian) { Data($0) })
             msg.append(withUnsafeBytes(of: UInt32(result.commit.count).littleEndian) { Data($0) })
@@ -1192,13 +1237,21 @@ public class QuicNetworkClient {
     /// Handle commit message from another member
     private func handleMlsCommit(stream: NWConnection) async {
         do {
-            // [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
-            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let isVoice = header[4] != 0
+            // [channel_id_len: u8]
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
             
-            var lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let commitLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            // [channel_id string]
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // [is_voice: u8]
+            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let isVoice = voiceData[0] != 0
+            
+            let commitLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let commitLen = commitLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             let commit = try await receive(on: stream, minimumLength: Int(commitLen), maximumLength: Int(commitLen))
             
             guard let mls = mlsWrapper else { return }
@@ -1218,13 +1271,21 @@ public class QuicNetworkClient {
     /// Handle welcome message (we were just added to a group)
     private func handleMlsWelcome(stream: NWConnection) async {
         do {
-            // [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
-            let header = try await receive(on: stream, minimumLength: 5, maximumLength: 5)
-            let channelId = header.prefix(4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-            let isVoice = header[4] != 0
+            // [channel_id_len: u8]
+            let lenData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let idLen = Int(lenData[0])
             
-            var lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
-            let welcomeLen = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            // [channel_id string]
+            let idData = try await receive(on: stream, minimumLength: idLen, maximumLength: idLen)
+            let channelStr = String(data: idData, encoding: .utf8) ?? ""
+            let channelId = UInt32(channelStr) ?? 0
+            
+            // [is_voice: u8]
+            let voiceData = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
+            let isVoice = voiceData[0] != 0
+            
+            let welcomeLenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let welcomeLen = welcomeLenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
             let welcome = try await receive(on: stream, minimumLength: Int(welcomeLen), maximumLength: Int(welcomeLen))
             
             guard let mls = mlsWrapper else { return }
@@ -1431,12 +1492,16 @@ public class QuicNetworkClient {
         print("[QuicClient] Joining channel \(channelId)...")
         
         var data = Data([Self.MSG_JOIN_CHANNEL])
-        data.append(contentsOf: withUnsafeBytes(of: channelId.littleEndian) { Data($0) })
+        let channelStr = String(channelId)
+        let channelBytes = channelStr.data(using: .utf8) ?? Data()
+        data.append(UInt8(channelBytes.count))
+        data.append(channelBytes)
         
         try await send(data: data, on: stream)
         currentChannelId = channelId
         currentVoiceChannelId = channelId
-        connectionStatus = "In channel \(channelId)"
+        let channelName = channels.first(where: { $0.id == channelId })?.name ?? "channel \(channelId)"
+        connectionStatus = "In #\(channelName)"
         
         // Send MLS join with key package for E2EE (both voice and text groups)
         await sendMlsJoin(channelId: channelId, isVoice: true)
@@ -1589,8 +1654,17 @@ public class QuicNetworkClient {
     // MARK: - Disconnect
     
     public func disconnect() {
+        // Set intentional flag BEFORE cancelling anything to prevent
+        // stale state handler callbacks from triggering reconnection
+        isIntentionalDisconnect = true
+        
         stopKeepalive()
         stopListening()
+        
+        // Clear state handlers before cancelling to avoid race conditions
+        quicGroup?.stateUpdateHandler = nil
+        controlStream?.stateUpdateHandler = nil
+        
         controlStream?.cancel()
         quicGroup?.cancel()
         controlStream = nil
@@ -1687,6 +1761,12 @@ public class QuicNetworkClient {
     
     /// Handle connection loss and trigger reconnection
     private func handleConnectionLoss() {
+        // Never reconnect if the user intentionally disconnected
+        guard !isIntentionalDisconnect else {
+            print("[QuicClient] Ignoring connection loss — intentional disconnect")
+            return
+        }
+        
         guard isConnected || isAuthenticated else {
             // Already disconnected, don't trigger retry
             return

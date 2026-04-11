@@ -32,7 +32,7 @@ struct AuraGlassModifier: ViewModifier {
                 VisualEffectBlur(auraMaterial: material, blendingMode: .behindWindow)
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             )
-            .overlay(
+            .overlay {
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .strokeBorder(
                         LinearGradient(
@@ -48,7 +48,7 @@ struct AuraGlassModifier: ViewModifier {
                         ),
                         lineWidth: 0.6
                     )
-            )
+            }
             .modifier(AuraTheme.Shadows.glass())
     }
 }
@@ -99,7 +99,7 @@ extension View {
                 }
             )
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
+            .overlay {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(
                         LinearGradient(
@@ -112,7 +112,7 @@ extension View {
                         ),
                         lineWidth: 0.5
                     )
-            )
+            }
         
         return Group {
             if isOutgoing {
@@ -130,6 +130,57 @@ extension View {
             .auraGlass()
             .modifier(AuraTheme.Shadows.soft())
     }
+    
+    /// Native macOS 26 Liquid Glass effect.
+    /// Uses system .glassEffect() when available, falls back to auraGlass().
+    @ViewBuilder
+    func liquidGlass(cornerRadius: CGFloat = AuraTheme.Layout.liquidGlassCornerRadius) -> some View {
+        if #available(macOS 26, *) {
+            self
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self.auraGlass(cornerRadius: cornerRadius, material: .hudWindow)
+        }
+    }
+}
+
+// MARK: - Glass Button Style
+
+struct AuraGlassButtonStyle: ButtonStyle {
+    @State private var isHovering = false
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background {
+                ZStack {
+                    VisualEffectBlur(auraMaterial: .thin, blendingMode: .behindWindow)
+                    
+                    if isHovering {
+                        Color.white.opacity(0.08)
+                    }
+                    if configuration.isPressed {
+                        Color.black.opacity(0.1)
+                    }
+                }
+            }
+            .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(AuraTheme.Colors.glassBorder, lineWidth: 0.5)
+            }
+            .scaleEffect(configuration.isPressed ? 0.96 : (isHovering ? 1.02 : 1.0))
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isHovering)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+    }
+}
+
+extension ButtonStyle where Self == AuraGlassButtonStyle {
+    static var auraGlass: AuraGlassButtonStyle { AuraGlassButtonStyle() }
 }
 
 // MARK: - VisualEffectBlur Helper

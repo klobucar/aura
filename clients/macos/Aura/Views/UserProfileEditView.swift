@@ -32,7 +32,7 @@ struct UserProfileEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Display Name")
                         .font(.caption.bold())
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     TextField("My Profile", text: $displayName)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -42,23 +42,23 @@ struct UserProfileEditView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Public Key")
                             .font(.caption.bold())
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                         Text(identity.publicKeyHex)
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(6)
+                            .clipShape(.rect(cornerRadius: 6))
                     }
                 } else {
                     Text("A new keypair will be generated")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .padding()
                         .frame(maxWidth: .infinity)
                         .background(Color.blue.opacity(0.1))
-                        .cornerRadius(6)
+                        .clipShape(.rect(cornerRadius: 6))
                 }
                 
                 // Biometric Protection Toggle
@@ -69,10 +69,10 @@ struct UserProfileEditView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption2)
-                            .foregroundColor(.orange)
+                            .foregroundStyle(.orange)
                         Text("Adds extra security but requires Touch ID/Face ID each time")
                             .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(.leading, 4)
                 }

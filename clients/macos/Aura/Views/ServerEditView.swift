@@ -32,7 +32,7 @@ struct ServerEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Name")
                         .font(.caption.bold())
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     TextField("My Server", text: $name)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -41,7 +41,7 @@ struct ServerEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Host")
                         .font(.caption.bold())
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     TextField("127.0.0.1", text: $host)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -50,7 +50,7 @@ struct ServerEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Port")
                         .font(.caption.bold())
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     TextField("8443", text: $port)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -59,7 +59,7 @@ struct ServerEditView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Server Password (Optional)")
                         .font(.caption.bold())
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     SecureField("", text: $password)
                         .textFieldStyle(.roundedBorder)
                 }

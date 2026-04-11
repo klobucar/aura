@@ -25,6 +25,7 @@ struct ProfileListView: View {
                 
                 Button(action: { showingAddProfile = true }) {
                     Image(systemName: "plus.circle.fill")
+                        .accessibilityLabel("Add")
                         .font(.title2)
                         .foregroundStyle(AuraTheme.Gradients.lushIndigo)
                 }
@@ -74,7 +75,7 @@ struct ProfileListView: View {
         HStack {
             Text(title)
                 .font(.caption.bold())
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
                 .textCase(.uppercase)
             Spacer()
         }
@@ -87,11 +88,11 @@ struct ProfileListView: View {
             Circle()
                 .fill(AuraTheme.Gradients.primary)
                 .frame(width: 40, height: 40)
-                .overlay(
+                .overlay {
                     Text(String(profile.displayName.prefix(1)))
                         .font(.title3.bold())
-                        .foregroundColor(.white)
-                )
+                        .foregroundStyle(.white)
+                }
             
             // Info
             VStack(alignment: .leading, spacing: 4) {
@@ -99,7 +100,7 @@ struct ProfileListView: View {
                     .font(.system(size: 14, weight: .semibold))
                 Text("\\(profile.publicKeyHex.prefix(16))...")
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             
             Spacer()

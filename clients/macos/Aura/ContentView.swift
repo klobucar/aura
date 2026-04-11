@@ -89,6 +89,22 @@ struct ContentView: View {
         NavigationSplitView {
             // Sidebar
             VStack(alignment: .leading, spacing: 0) {
+                // Branded Header
+                HStack(spacing: 8) {
+                    Image(systemName: "wave.3.right.circle.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.linearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    
+                    Text("Aura")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(Color.primary.opacity(0.9))
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .padding(.top, 24) // Clear traffic lights
+                
                 // User info header
                 userHeader(identity: identity, client: client)
                 
@@ -98,16 +114,6 @@ struct ContentView: View {
                 channelList(client: client)
             }
             .frame(minWidth: 220, maxWidth: 280)
-            .toolbar {
-                ToolbarItem(placement: .navigation) {
-                    HStack {
-                        Image(systemName: "wave.3.right.circle.fill")
-                            .foregroundStyle(.linearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        Text("Aura")
-                            .font(.headline)
-                    }
-                }
-            }
         } detail: {
             // Main content area
             ZStack(alignment: .bottom) {
@@ -117,7 +123,6 @@ struct ContentView: View {
                 setupMessageHandlers(client: client)
             }
         }
-        .navigationTitle("")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AuraTheme.Colors.background)
         .sheet(isPresented: $showingProfileEditor) {
@@ -147,7 +152,7 @@ struct ContentView: View {
                 .overlay(
                     Text(identity.displayName.prefix(1).uppercased())
                         .font(.headline)
-                        .foregroundColor(.white)
+                        .foregroundStyle(.white)
                 )
             
             VStack(alignment: .leading, spacing: 2) {
@@ -155,7 +160,7 @@ struct ContentView: View {
                     .font(.headline)
                 Text(client.connectionStatus)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             
@@ -164,7 +169,7 @@ struct ContentView: View {
             // Edit Profile button
             Button(action: { showingProfileEditor = true }) {
                 Image(systemName: "pencil.circle")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help("Edit Profile")
@@ -172,15 +177,15 @@ struct ContentView: View {
             // Disconnect button
             Button(action: disconnect) {
                 Image(systemName: "rectangle.portrait.and.arrow.right")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help("Disconnect")
         }
         .padding(10)
         .auraGlass(cornerRadius: 12)
-        .padding(.horizontal, 8)
-        .padding(.top, 8)
+        .padding(.horizontal, 10)
+        .padding(.top, 10)
     }
     
     // MARK: - Channel List
@@ -200,187 +205,13 @@ struct ContentView: View {
                             showingChannelEditor = true 
                         }) {
                             Image(systemName: "plus.circle.fill")
-                                .foregroundColor(.accentColor)
+                                .foregroundStyle(Color.accentColor)
                         }
                         .buttonStyle(.plain)
                     }
                 }) {
                     ForEach(client.channels) { channel in
-                        VStack(alignment: .leading, spacing: 4) {
-                            // Channel header
-                            Button(action: {
-                                switchChannel(to: channel.id, client: client)
-                            }) {
-                                HStack {
-                                    if let emoji = channel.iconEmoji {
-                                        Text(emoji)
-                                            .frame(width: 20)
-                                    } else {
-                                        Image(systemName: channel.iconPresetId ?? "speaker.wave.2")
-                                            .foregroundColor(channel.id == currentId ? .blue : .secondary)
-                                            .frame(width: 20)
-                                    }
-                                    
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        Text(channel.name)
-                                            .foregroundColor(channel.id == currentId ? .primary : .secondary)
-                                            .fontWeight(channel.id == currentId ? .semibold : .regular)
-                                        
-                                        if !channel.comment.isEmpty {
-                                            Text(channel.comment)
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.secondary)
-                                                .lineLimit(1)
-                                        }
-                                    }
-                                    
-                                    Spacer()
-                                    
-                                    // User count
-                                    if let users = client.usersByChannel[channel.id], !users.isEmpty {
-                                        Text("\(users.count + (channel.id == currentId ? 1 : 0))")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Capsule().fill(Color.white.opacity(0.1)))
-                                    } else if channel.id == currentId {
-                                        Text("1")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Capsule().fill(Color.white.opacity(0.1)))
-                                    }
-                                    
-                                    // Active Indicator
-                                    if channel.id == currentId {
-                                        Circle()
-                                            .fill(AuraTheme.Colors.accent)
-                                            .frame(width: 6, height: 6)
-                                            .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
-                                    }
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(channel.id == currentId ? AuraTheme.Colors.primary.opacity(0.15) : Color.clear)
-                                .cornerRadius(8)
-                                .auraFluidHover()
-                                .contextMenu {
-                                    if client.isAdmin {
-                                        Button(action: {
-                                            editingChannel = channel
-                                            showingChannelEditor = true
-                                        }) {
-                                            Label("Edit Channel", systemImage: "pencil")
-                                        }
-                                        
-                                        Divider()
-                                        
-                                        Button(role: .destructive, action: {
-                                            // TODO: Implement delete
-                                        }) {
-                                            Label("Delete Channel", systemImage: "trash")
-                                        }
-                                    }
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            
-                            // Users in this channel
-                            if let users = client.usersByChannel[channel.id] {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    // Show current user if in this channel
-                                    if channel.id == currentId {
-                                        HStack(spacing: 8) {
-                                            Circle()
-                                                .fill(isMicEnabled ? Color.green : Color.secondary)
-                                                .frame(width: 18, height: 18)
-                                                .overlay(
-                                                    Text("ME")
-                                                        .font(.system(size: 7, weight: .bold))
-                                                        .foregroundColor(.white)
-                                                )
-                                            
-                                            Text("You")
-                                                .font(.system(size: 13))
-                                                .foregroundColor(.secondary)
-                                            
-                                            Spacer()
-                                            
-                                            if isDeafened {
-                                                Image(systemName: "headphones.slash")
-                                                    .font(.system(size: 10))
-                                                    .foregroundColor(.red)
-                                            } else if !isMicEnabled {
-                                                Image(systemName: "mic.slash.fill")
-                                                    .font(.system(size: 10))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                        .padding(.leading, 24)
-                                    }
-                                    
-                                    // Show other users
-                                    ForEach(users) { user in
-                                        HStack(spacing: 8) {
-                                            // Avatar
-                                            if let avatarData = user.avatarData, let image = NSImage(data: avatarData) {
-                                                Image(nsImage: image)
-                                                    .resizable()
-                                                    .aspectRatio(contentMode: .fill)
-                                                    .frame(width: 18, height: 18)
-                                                    .clipShape(Circle())
-                                            } else {
-                                                Circle()
-                                                    .fill(AuraTheme.Gradients.primary)
-                                                    .frame(width: 18, height: 18)
-                                                    .overlay(
-                                                        Text(user.displayName.prefix(1).uppercased())
-                                                            .font(.system(size: 8, weight: .bold))
-                                                            .foregroundColor(.white)
-                                                    )
-                                            }
-                                            
-                                            VStack(alignment: .leading, spacing: 0) {
-                                                Text(user.displayName)
-                                                    .font(.system(size: 13))
-                                                    .foregroundColor(client.activeSpeakers.contains(user.id) ? AuraTheme.Colors.accent : .secondary)
-                                                
-                                                if !user.bio.isEmpty {
-                                                    Text(user.bio)
-                                                        .font(.system(size: 9))
-                                                        .foregroundColor(.secondary.opacity(0.7))
-                                                        .lineLimit(1)
-                                                }
-                                            }
-                                            
-                                            if client.activeSpeakers.contains(user.id) {
-                                                Image(systemName: "waves.at.tail")
-                                                    .foregroundStyle(AuraTheme.Gradients.lushIndigo)
-                                                    .font(.system(size: 10))
-                                                    .transition(.scale.combined(with: .opacity))
-                                            }
-                                            
-                                            Spacer()
-                                            
-                                            if user.isDeafened {
-                                                Image(systemName: "headphones.slash")
-                                                    .font(.system(size: 10))
-                                                    .foregroundColor(.red.opacity(0.7))
-                                            } else if user.isMuted {
-                                                Image(systemName: "mic.slash.fill")
-                                                    .font(.system(size: 10))
-                                                    .foregroundColor(.secondary.opacity(0.7))
-                                            }
-                                        }
-                                        .padding(.leading, 24)
-                                        .padding(.vertical, 2)
-                                        .help(user.bio.isEmpty ? user.displayName : "\(user.displayName): \(user.bio)")
-                                    }
-                                }
-                                .padding(.top, 2)
-                            }
-                        }
-                        .padding(.vertical, 2)
+                        channelRow(channel: channel, currentId: currentId, client: client)
                     }
                 }
             }
@@ -444,7 +275,7 @@ struct ContentView: View {
             } else {
                 Image(systemName: channel?.iconPresetId ?? "speaker.wave.2")
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
                     .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
             }
             
@@ -461,7 +292,7 @@ struct ContentView: View {
             }) {
                 Image(systemName: showingChat ? "bubble.left.fill" : "bubble.left")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(showingChat ? AuraTheme.Colors.primary : .secondary)
+                    .foregroundStyle(showingChat ? AuraTheme.Colors.primary : Color.secondary)
             }
             .buttonStyle(.plain)
             .auraFluidHover()
@@ -469,14 +300,16 @@ struct ContentView: View {
             // User count badge
             Text("\(userCount)")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .auraGlass(cornerRadius: 10)
-        }
-        .padding(16)
-        .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .behindWindow))
     }
+    .padding(.horizontal, 16)
+    .padding(.bottom, 16)
+    .padding(.top, 32) // Clear traffic lights area in detail view
+    .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .behindWindow))
+}
     
     @ViewBuilder
     private func voiceStatusPanel(client: QuicNetworkClient) -> some View {
@@ -516,21 +349,21 @@ struct ContentView: View {
                 
                 Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
                     .font(.system(size: 32, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.white)
             }
             .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isMicEnabled)
             
             VStack(spacing: 8) {
                 Text(isDeafened ? "Deafened" : (isMicEnabled ? "Transmitting" : "Muted"))
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundColor(isDeafened ? .secondary : .primary)
+                    .foregroundStyle(isDeafened ? Color.secondary : Color.primary)
                 
                 if isMicEnabled && !isDeafened {
                     HStack(spacing: 4) {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
                         Text("\(audioCapture.packetsSent) packets sent")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
@@ -538,11 +371,11 @@ struct ContentView: View {
                 } else if isDeafened {
                     Text("You cannot hear or speak")
                         .font(.system(size: 10))
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundStyle(.secondary.opacity(0.7))
                 } else {
                     Text("Your audio is currently private")
                         .font(.system(size: 10))
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundStyle(.secondary.opacity(0.7))
                 }
             }
             
@@ -552,14 +385,14 @@ struct ContentView: View {
                 Button(action: { toggleMic(client: client) }) {
                     Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(isMicEnabled ? .white : .secondary)
+                        .foregroundStyle(isMicEnabled ? .white : Color.secondary)
                         .frame(width: 44, height: 38)
                         .background(
                             isMicEnabled ? 
                             AnyShapeStyle(AuraTheme.Gradients.lushIndigo) : 
                             AnyShapeStyle(Color.clear)
                         )
-                        .cornerRadius(8)
+                        .clipShape(.rect(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
                 .help(isMicEnabled ? "Mute" : "Unmute")
@@ -572,10 +405,10 @@ struct ContentView: View {
                 Button(action: { toggleDeafen(client: client) }) {
                     Image(systemName: isDeafened ? "headphones.slash" : "headphones")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(isDeafened ? .white : .secondary)
+                        .foregroundStyle(isDeafened ? .white : Color.secondary)
                         .frame(width: 44, height: 38)
                         .background(isDeafened ? Color.red.opacity(0.6) : Color.clear)
-                        .cornerRadius(8)
+                        .clipShape(.rect(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
                 .help(isDeafened ? "Undeafen" : "Deafen")
@@ -633,17 +466,16 @@ struct ContentView: View {
     
     private func infoMessageRow(_ content: String) -> some View {
         HStack {
-            VStack { divider() }
             Text(content)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .auraGlass(cornerRadius: 10)
-            VStack { divider() }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
     }
     
     private func replyPreview(_ message: ChatMessage) -> some View {
@@ -655,10 +487,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Replying to \(message.senderName)")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
                 Text(message.content)
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             
@@ -666,7 +498,7 @@ struct ContentView: View {
             
             Button(action: { replyingTo = nil }) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .auraFluidHover()
@@ -683,7 +515,7 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
                 .background(Color.primary.opacity(0.05))
-                .cornerRadius(10)
+                .clipShape(.rect(cornerRadius: 10))
                 .onSubmit {
                     sendMessage(client: client)
                 }
@@ -691,7 +523,7 @@ struct ContentView: View {
             Button(action: { sendMessage(client: client) }) {
                 Image(systemName: "paperplane.fill")
                     .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
                     .background(
                         Group {
@@ -811,9 +643,7 @@ struct ContentView: View {
         
         // Add divider if we have chat history
         if !chatMessages.isEmpty {
-            let truncatedOld = String(oldChannelName.prefix(25))
-            let truncatedNew = String(newChannelName.prefix(25))
-            let text = "Left \(truncatedOld) joined \(truncatedNew)"
+            let text = "Joined #\(newChannelName)"
             
             var divider = ChatMessage(
                 id: "div_\(UUID().uuidString)",
@@ -985,6 +815,133 @@ struct ContentView: View {
             }
         }
     }
+
+    @ViewBuilder
+    private func channelRow(channel: ChannelModel, currentId: UInt32, client: QuicNetworkClient) -> some View {
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Channel header
+                            Button(action: {
+                                switchChannel(to: channel.id, client: client)
+                            }) {
+                                HStack {
+                                    if let emoji = channel.iconEmoji {
+                                        Text(emoji)
+                                            .frame(width: 20)
+                                    } else {
+                                        Image(systemName: channel.iconPresetId ?? "speaker.wave.2")
+                                            .foregroundStyle(channel.id == currentId ? .blue : Color.secondary)
+                                            .frame(width: 20)
+                                    }
+                                    
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        Text(channel.name)
+                                            .foregroundStyle(channel.id == currentId ? Color.primary : Color.secondary)
+                                            .fontWeight(channel.id == currentId ? .semibold : .regular)
+                                        
+                                        if !channel.comment.isEmpty {
+                                            Text(channel.comment)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    // User count
+                                    if let users = client.usersByChannel[channel.id], !users.isEmpty {
+                                        Text(calculateUserCount(usersCount: users.count, channelId: channel.id, currentId: currentId))
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.white.opacity(0.1)))
+                                    } else if channel.id == currentId {
+                                        Text("1")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color.white.opacity(0.1)))
+                                    }
+                                    
+                                    // Active Indicator
+                                    if channel.id == currentId {
+                                        Circle()
+                                            .fill(AuraTheme.Colors.accent)
+                                            .frame(width: 6, height: 6)
+                                            .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(channel.id == currentId ? AuraTheme.Colors.primary.opacity(0.15) : Color.clear)
+                                .clipShape(.rect(cornerRadius: 8))
+                                .auraFluidHover()
+                                .contextMenu {
+                                    if client.isAdmin {
+                                        Button(action: {
+                                            editingChannel = channel
+                                            showingChannelEditor = true
+                                        }) {
+                                            Label("Edit Channel", systemImage: "pencil")
+                                        }
+                                        
+                                        Divider()
+                                        
+                                        Button(role: .destructive, action: {
+                                            // TODO: Implement delete
+                                        }) {
+                                            Label("Delete Channel", systemImage: "trash")
+                                        }
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            
+                            // Users in this channel
+                            if let users = client.usersByChannel[channel.id] {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    // Show current user if in this channel
+                                    if channel.id == currentId {
+                                        HStack(spacing: 8) {
+                                            Circle()
+                                                .fill(isMicEnabled ? Color.green : Color.secondary)
+                                                .frame(width: 18, height: 18)
+                                                .overlay(
+                                                    Text(identity?.displayName.prefix(1).uppercased() ?? "U")
+                                                        .font(.system(size: 8, weight: .bold))
+                                                        .foregroundStyle(.white)
+                                                )
+                                            
+                                            Text("You")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(.secondary)
+                                            
+                                            Spacer()
+                                            
+                                            if isDeafened {
+                                                Image(systemName: "headphones.slash")
+                                                    .font(.system(size: 10))
+                                                    .foregroundStyle(.red)
+                                            } else if !isMicEnabled {
+                                                Image(systemName: "mic.slash.fill")
+                                                    .font(.system(size: 10))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .padding(.leading, 24)
+                                        .padding(.vertical, 2)
+                                    }
+                                    
+                                    // Show other users
+                                    ForEach(users) { user in
+                                        UserRowView(user: user, isActiveSpeaker: client.activeSpeakers.contains(user.id))
+                                    }
+                                }
+                                .padding(.top, 2)
+                            }
+                        }
+                        .padding(.vertical, 2)
+    }
 }
 
 // MARK: - Profile Edit View
@@ -1030,7 +987,7 @@ struct ProfileEditView: View {
                         Image(systemName: "camera.fill")
                             .padding(6)
                             .background(Circle().fill(Color.blue))
-                            .foregroundColor(.white)
+                            .foregroundStyle(.white)
                     }
                     .buttonStyle(.plain)
                 }
@@ -1038,7 +995,7 @@ struct ProfileEditView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Bio")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                     TextEditor(text: $bio)
                         .frame(height: 100)
                         .padding(4)
@@ -1213,7 +1170,7 @@ struct MessageBubble: View {
                     Text(message.senderName)
                         .font(.caption)
                         .fontWeight(.medium)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .padding(.leading, 12)
                 }
                 
@@ -1229,10 +1186,10 @@ struct MessageBubble: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(message.replyToSender ?? "")
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(message.isOutgoing ? .white.opacity(0.8) : .blue)
+                                    .foregroundStyle(message.isOutgoing ? .white.opacity(0.8) : .blue)
                                 Text(replyPreview)
                                     .font(.system(size: 10))
-                                    .foregroundColor(message.isOutgoing ? .white.opacity(0.6) : .secondary)
+                                    .foregroundStyle(message.isOutgoing ? .white.opacity(0.6) : Color.secondary)
                                     .lineLimit(1)
                             }
                         }
@@ -1263,7 +1220,7 @@ struct MessageBubble: View {
                 // Timestamp
                 Text(message.formattedTime)
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
             }
             
@@ -1309,4 +1266,71 @@ struct MarkdownText: View {
 
 #Preview {
     ContentView()
+}
+
+
+struct UserRowView: View {
+    let user: ChannelUser
+    let isActiveSpeaker: Bool
+    
+    var body: some View {
+    HStack(spacing: 8) {
+        // Avatar
+        if let avatarData = user.avatarData, let image = NSImage(data: avatarData) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 18, height: 18)
+                .clipShape(Circle())
+        } else {
+            Circle()
+                .fill(AuraTheme.Gradients.primary)
+                .frame(width: 18, height: 18)
+                .overlay(
+                    Text(String(user.displayName.prefix(1).uppercased()))
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                )
+        }
+        
+        VStack(alignment: .leading, spacing: 0) {
+            Text(user.displayName)
+                .font(.system(size: 13))
+                .foregroundStyle(isActiveSpeaker ? AuraTheme.Colors.accent : Color.secondary)
+            
+            if !user.bio.isEmpty {
+                Text(user.bio)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary.opacity(0.7))
+                    .lineLimit(1)
+            }
+        }
+        
+        if isActiveSpeaker {
+            Image(systemName: "waves.at.tail")
+                .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                .font(.system(size: 10))
+                .transition(.scale.combined(with: .opacity))
+        }
+        
+        Spacer()
+        
+        if user.isDeafened {
+            Image(systemName: "headphones.slash")
+                .font(.system(size: 10))
+                .foregroundStyle(.red.opacity(0.7))
+        } else if user.isMuted {
+            Image(systemName: "mic.slash.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary.opacity(0.7))
+        }
+    }
+    .padding(.leading, 24)
+    .padding(.vertical, 2)
+    .help(user.bio.isEmpty ? user.displayName : "\(user.displayName): \(user.bio)")
+    }
+}
+
+func calculateUserCount(usersCount: Int, channelId: UInt32, currentId: UInt32?) -> String {
+    return String(usersCount + (channelId == currentId ? 1 : 0))
 }
