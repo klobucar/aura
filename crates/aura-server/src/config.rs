@@ -29,6 +29,26 @@ pub struct ServerConfig {
     /// If set, clients must provide this password to connect.
     #[serde(default)]
     pub password: Option<String>,
+
+    /// Optional path to a TLS certificate in PEM format.
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+
+    /// Optional path to a TLS private key in PEM format.
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+
+    /// Optional domain for automated Let's Encrypt (ACME) certificates.
+    #[serde(default)]
+    pub acme_domain: Option<String>,
+
+    /// Optional email contact for ACME registration.
+    #[serde(default)]
+    pub acme_contact: Option<String>,
+
+    /// Optional path for the ACME certificate cache.
+    #[serde(default)]
+    pub acme_cache_path: Option<PathBuf>,
 }
 
 /// Database configuration.
@@ -65,6 +85,11 @@ impl Default for Config {
                 max_connections: 1000,
                 log_level: "info".to_string(),
                 password: None,
+                cert_path: None,
+                key_path: None,
+                acme_domain: None,
+                acme_contact: None,
+                acme_cache_path: Some(PathBuf::from("data/acme")),
             },
             database: DatabaseConfig {
                 path: PathBuf::from("aura.db"),
@@ -81,8 +106,37 @@ impl Config {
     ///
     /// If the file doesn't exist, returns default configuration.
     /// If the file exists but is invalid, returns an error.
+    /// Load configuration from `server.toml` with environment variable overrides.
     pub fn load() -> anyhow::Result<Self> {
-        Self::load_from("server.toml")
+        let mut config = Self::load_from("server.toml")?;
+        
+        // Environment variable overrides
+        if let Ok(addr) = std::env::var("AURA_BIND_ADDRESS") {
+            config.server.bind_address = addr;
+        }
+        if let Ok(db_path) = std::env::var("AURA_DATABASE_PATH") {
+            config.database.path = PathBuf::from(db_path);
+        }
+        if let Ok(password) = std::env::var("AURA_PASSWORD") {
+            config.server.password = Some(password);
+        }
+        if let Ok(cert_path) = std::env::var("AURA_CERT_PATH") {
+            config.server.cert_path = Some(PathBuf::from(cert_path));
+        }
+        if let Ok(key_path) = std::env::var("AURA_KEY_PATH") {
+            config.server.key_path = Some(PathBuf::from(key_path));
+        }
+        if let Ok(domain) = std::env::var("AURA_ACME_DOMAIN") {
+            config.server.acme_domain = Some(domain);
+        }
+        if let Ok(contact) = std::env::var("AURA_ACME_CONTACT") {
+            config.server.acme_contact = Some(contact);
+        }
+        if let Ok(cache_path) = std::env::var("AURA_ACME_CACHE_PATH") {
+            config.server.acme_cache_path = Some(PathBuf::from(cache_path));
+        }
+        
+        Ok(config)
     }
 
     /// Load configuration from a specific path.
