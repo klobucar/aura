@@ -37,7 +37,8 @@ const MSG_MLS_JOIN: u8 = 0x50;           // Client sends key package on channel 
 const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after adding member
 
 // Security limits
-const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB
+const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
+const MAX_TEXT_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB for text/metadata
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -572,13 +573,17 @@ impl ConnectionContext {
                  info!("[{}] Received audio packet: {} bytes", self.remote, packet_len);
                  
                  // Limit audio packet size too
-                 if packet_len > MAX_PACKET_SIZE {
+                 if packet_len > MAX_AUDIO_PACKET_SIZE {
                      warn!("[{}] Audio packet too large: {}", self.remote, packet_len);
                      return Ok(false); // Disconnect
                  }
                  
-                 let mut packet_buf = vec![0u8; packet_len];
-                 self.recv.read_exact(&mut packet_buf).await?;
+                 let mut packet_buf = Vec::new();
+                 (&mut self.recv).take(packet_len as u64).read_to_end(&mut packet_buf).await?;
+                 if packet_buf.len() != packet_len {
+                     return Err(anyhow!("Incomplete audio packet received"));
+                 }
+                 
                  self.state.route_audio_packet(bytes::Bytes::from(packet_buf)).await;
                  info!("[{}] Routed audio packet from session {}", self.remote, self.session_id);
             }
@@ -588,13 +593,16 @@ impl ConnectionContext {
                 self.recv.read_exact(&mut len_buf).await?;
                 let packet_len = u32::from_le_bytes(len_buf) as usize;
                 
-                if packet_len > MAX_PACKET_SIZE {
+                if packet_len > MAX_TEXT_PACKET_SIZE {
                     warn!("[{}] Text packet too large: {}", self.remote, packet_len);
                     return Ok(false); // Disconnect
                 }
                 
-                let mut packet_buf = vec![0u8; packet_len];
-                self.recv.read_exact(&mut packet_buf).await?;
+                let mut packet_buf = Vec::new();
+                (&mut self.recv).take(packet_len as u64).read_to_end(&mut packet_buf).await?;
+                if packet_buf.len() != packet_len {
+                    return Err(anyhow!("Incomplete text packet received"));
+                }
                 
                 match parse_text_packet(&packet_buf) {
                     Ok(text_packet) => {
@@ -833,13 +841,16 @@ impl ConnectionContext {
                 self.recv.read_exact(&mut len_buf).await?;
                 let kp_len = u32::from_le_bytes(len_buf) as usize;
                 
-                if kp_len > MAX_PACKET_SIZE {
+                if kp_len > MAX_TEXT_PACKET_SIZE {
                     warn!("[{}] MLS key package too large: {}", self.remote, kp_len);
                     return Ok(false);
                 }
                 
-                let mut key_package = vec![0u8; kp_len];
-                self.recv.read_exact(&mut key_package).await?;
+                let mut key_package = Vec::new();
+                (&mut self.recv).take(kp_len as u64).read_to_end(&mut key_package).await?;
+                if key_package.len() != kp_len {
+                    return Err(anyhow!("Incomplete key package received"));
+                }
                 
                 info!("[{}] MLS join for {} channel {} ({} bytes KP)",
                       self.remote, if is_voice { "voice" } else { "text" }, channel_id, kp_len);
@@ -868,19 +879,25 @@ impl ConnectionContext {
                 
                 self.recv.read_exact(&mut len_buf).await?;
                 let commit_len = u32::from_le_bytes(len_buf) as usize;
-                if commit_len > MAX_PACKET_SIZE {
+                if commit_len > MAX_TEXT_PACKET_SIZE {
                     return Ok(false);
                 }
-                let mut commit = vec![0u8; commit_len];
-                self.recv.read_exact(&mut commit).await?;
+                let mut commit = Vec::new();
+                (&mut self.recv).take(commit_len as u64).read_to_end(&mut commit).await?;
+                if commit.len() != commit_len {
+                    return Err(anyhow!("Incomplete commit received"));
+                }
                 
                 self.recv.read_exact(&mut len_buf).await?;
                 let welcome_len = u32::from_le_bytes(len_buf) as usize;
-                if welcome_len > MAX_PACKET_SIZE {
+                if welcome_len > MAX_TEXT_PACKET_SIZE {
                     return Ok(false);
                 }
-                let mut welcome = vec![0u8; welcome_len];
-                self.recv.read_exact(&mut welcome).await?;
+                let mut welcome = Vec::new();
+                (&mut self.recv).take(welcome_len as u64).read_to_end(&mut welcome).await?;
+                if welcome.len() != welcome_len {
+                    return Err(anyhow!("Incomplete welcome received"));
+                }
                 
                 info!("[{}] MLS commit/welcome for {} channel {} (new member: {})",
                       self.remote, if is_voice { "voice" } else { "text" }, channel_id, new_member_session_id);
@@ -1198,7 +1215,7 @@ mod tests {
     
     #[test]
     fn test_max_packet_size_logic() {
-        assert_eq!(MAX_PACKET_SIZE, 2 * 1024 * 1024);
+        assert_eq!(MAX_TEXT_PACKET_SIZE, 2 * 1024 * 1024);
         let packet = aura_protocol::EncryptedTextPacket {
             sender_session_id: 1,
             channel_id: "C_1".to_string(),
@@ -1227,8 +1244,8 @@ mod tests {
             reply_to_id: "".to_string(),
         };
         let large_bytes = serialize_text_packet(&large_packet);
-        assert!(large_bytes.len() > MAX_PACKET_SIZE);
-        // Note: parse_text_packet itself doesn't check MAX_PACKET_SIZE, 
+        assert!(large_bytes.len() > MAX_TEXT_PACKET_SIZE);
+        // Note: parse_text_packet itself doesn't check MAX_TEXT_PACKET_SIZE, 
         // the connection handler does before calling it.
         // Wait, let's check parse_text_packet implementation.
     }
