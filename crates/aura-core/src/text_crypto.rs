@@ -36,7 +36,7 @@ pub fn encrypt_text(
     
     Ok(EncryptedTextPacket {
         sender_session_id,
-        channel_id,
+        channel_id: channel_id.to_string(),
         epoch,
         message_id: message.message_id.clone(),
         ciphertext: ciphertext_without_tag,
@@ -88,6 +88,7 @@ pub fn create_text_message(sender_uuid: &str, content: &str, reply_to: Option<&s
         content: content.to_string(),
         reply_to_id: reply_to.unwrap_or("").to_string(),
         message_id,
+        r#type: 0,
     }
 }
 

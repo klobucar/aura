@@ -10,7 +10,7 @@ use aura_protocol::{
     FastAudioPacket, UserProfile as ProtoProfile, ChannelInfo as ProtoChannel, 
     ServerState as ProtoState, ChannelIcon as ProtoIcon, channel_icon,
     CreateChannelRequest as ProtoCreateChannel, UpdateChannelRequest as ProtoUpdateChannel,
-    UpdateProfile as ProtoUpdateProfile,
+    UpdateProfile as ProtoUpdateProfile, UserStatusUpdate as ProtoUserStatusUpdate,
 };
 use prost::Message;
 use crate::audio_pipeline::{
@@ -373,6 +373,7 @@ impl From<TextMessageRecord> for TextMessage {
             content: r.content,
             reply_to_id: r.reply_to_id,
             message_id: r.message_id,
+            r#type: 0,
         }
     }
 }
@@ -394,7 +395,7 @@ impl From<EncryptedTextPacket> for EncryptedTextPacketRecord {
     fn from(p: EncryptedTextPacket) -> Self {
         Self {
             sender_session_id: p.sender_session_id,
-            channel_id: p.channel_id,
+            channel_id: p.channel_id.parse().unwrap_or(0),
             epoch: p.epoch,
             message_id: p.message_id,
             ciphertext: p.ciphertext,
@@ -409,7 +410,7 @@ impl From<EncryptedTextPacketRecord> for EncryptedTextPacket {
     fn from(r: EncryptedTextPacketRecord) -> Self {
         Self {
             sender_session_id: r.sender_session_id,
-            channel_id: r.channel_id,
+            channel_id: r.channel_id.to_string(),
             epoch: r.epoch,
             message_id: r.message_id,
             ciphertext: r.ciphertext,
@@ -516,6 +517,13 @@ pub struct UserProfileRecord {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct UserStatusUpdate {
+    pub session_id: u32,
+    pub is_muted: bool,
+    pub is_deafened: bool,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct ServerStateRecord {
     pub channels: Vec<ChannelInfoRecord>,
     pub profiles: Vec<UserProfileRecord>,
@@ -536,7 +544,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
         });
 
         ChannelInfoRecord {
-            channel_id: c.channel_id,
+            channel_id: c.channel_id.parse().unwrap_or(0),
             name: c.name,
             comment: c.comment,
             icon,
@@ -547,7 +555,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
 
     let profiles = proto.profiles.into_iter().map(|p| {
         UserProfileRecord {
-            user_id: p.user_id,
+            user_id: p.user_id.parse().unwrap_or(0),
             display_name: p.display_name,
             bio: p.bio,
             avatar_data: p.avatar_data.to_vec(),
@@ -563,7 +571,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
 pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
     use prost::Message;
     let proto_profile = ProtoProfile {
-        user_id: profile.user_id,
+        user_id: profile.user_id.to_string(),
         display_name: profile.display_name,
         bio: profile.bio,
         avatar_data: profile.avatar_data.into(),
@@ -576,6 +584,28 @@ pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
     };
     
     req.encode_to_vec()
+}
+
+#[uniffi::export]
+pub fn encode_user_status_update(update: UserStatusUpdate) -> Vec<u8> {
+    use prost::Message;
+    let proto = ProtoUserStatusUpdate {
+        session_id: update.session_id,
+        is_muted: update.is_muted,
+        is_deafened: update.is_deafened,
+    };
+    proto.encode_to_vec()
+}
+
+#[uniffi::export]
+pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, AudioError> {
+    use prost::Message;
+    let proto = ProtoUserStatusUpdate::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    Ok(UserStatusUpdate {
+        session_id: proto.session_id,
+        is_muted: proto.is_muted,
+        is_deafened: proto.is_deafened,
+    })
 }
 
 // =============================================================================
@@ -813,7 +843,7 @@ pub fn encode_update_channel(
     });
 
     let req = ProtoUpdateChannel {
-        channel_id,
+        channel_id: channel_id.to_string(),
         name,
         comment,
         icon: proto_icon,
