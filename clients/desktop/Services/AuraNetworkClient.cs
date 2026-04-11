@@ -23,13 +23,18 @@ namespace Aura.Desktop.Services;
 public class AuraNetworkClient : IAsyncDisposable
 {
     // Protocol message types
-    private const byte MSG_MLS_JOIN = 0x50;           // Client sends key package
-    private const byte MSG_MLS_COMMIT_WELCOME = 0x51; // Client sends commit + welcome
-    private const byte MSG_MLS_CREATE_GROUP = 0x52;   // Server tells client to create group
-    private const byte MSG_MLS_ADD_MEMBER_REQ = 0x53; // Server forwards key package
-    private const byte MSG_MLS_COMMIT = 0x54;         // Server broadcasts commit
-    private const byte MSG_MLS_WELCOME = 0x55;        // Server sends welcome to new member
-    private const byte MSG_UPDATE_STATUS = 0x45;      // User mute/deafen sync
+    private const byte MSG_JOIN_CHANNEL = 0x10;
+    private const byte MSG_USER_JOINED = 0x11;
+    private const byte MSG_USER_LEFT = 0x12;
+    private const byte MSG_CHANNEL_STATE = 0x13;
+    private const byte MSG_TEXT_PACKET = 0x30;
+    private const byte MSG_UPDATE_STATUS = 0x45;
+    private const byte MSG_MLS_JOIN = 0x50;           
+    private const byte MSG_MLS_COMMIT_WELCOME = 0x51; 
+    private const byte MSG_MLS_CREATE_GROUP = 0x52;   
+    private const byte MSG_MLS_ADD_MEMBER_REQ = 0x53; 
+    private const byte MSG_MLS_COMMIT = 0x54;         
+    private const byte MSG_MLS_WELCOME = 0x55;        
     
     private QuicConnection? _connection;
     private QuicStream? _controlStream;
@@ -233,17 +238,13 @@ public class AuraNetworkClient : IAsyncDisposable
         
         Console.WriteLine($"[AuraClient] Joining channel {channelId}...");
         
-        // Send join channel message
-        var buffer = new byte[5];
-        buffer[0] = 0x10; // JoinChannel message type
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(1, 4), channelId);
+        var req = new JoinChannelRequest { ChannelId = channelId.ToString() };
+        await SendProtoRequestAsync(MSG_JOIN_CHANNEL, req, ct);
         
-        await _controlStream.WriteAsync(buffer, ct);
         _currentChannelId = channelId;
-        
         OnStatusChanged?.Invoke($"Joined channel {channelId}");
         
-        // Send MLS join with key package for E2EE (both voice and text groups)
+        // Send MLS join for E2EE
         await SendMlsJoinAsync(channelId, isVoice: true, ct);
         await SendMlsJoinAsync(channelId, isVoice: false, ct);
     }
@@ -263,18 +264,14 @@ public class AuraNetworkClient : IAsyncDisposable
         {
             var keyPackage = _mlsWrapper.CreateKeyPackage();
             
-            // [0x50] [channel_id: u32] [is_voice: u8] [kp_len: u32] [key_package]
-            using var ms = new MemoryStream();
-            ms.WriteByte(MSG_MLS_JOIN);
-            var buf = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
-            ms.Write(buf);
-            ms.WriteByte((byte)(isVoice ? 1 : 0));
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)keyPackage.Length);
-            ms.Write(buf);
-            ms.Write(keyPackage);
+            var envelope = new MlsEnvelope {
+                SenderId = _userId,
+                ChannelId = channelId.ToString(),
+                GroupType = isVoice ? MlsGroupType.Voice : MlsGroupType.Text,
+                KeyPackage = Google.Protobuf.ByteString.CopyFrom(keyPackage)
+            };
             
-            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            await SendProtoRequestAsync(MSG_MLS_JOIN, envelope, ct);
             Console.WriteLine($"[AuraClient] Sent MLS join for {(isVoice ? "voice" : "text")} channel {channelId} ({keyPackage.Length} bytes)");
         }
         catch (Exception ex)
@@ -299,16 +296,7 @@ public class AuraNetworkClient : IAsyncDisposable
         
         try
         {
-            using var ms = new MemoryStream();
-            ms.WriteByte(MSG_UPDATE_STATUS);
-            
-            var payload = update.ToByteArray();
-            var lenBuf = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(lenBuf, (uint)payload.Length);
-            ms.Write(lenBuf);
-            ms.Write(payload);
-            
-            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            await SendProtoRequestAsync(MSG_UPDATE_STATUS, update, ct);
             Console.WriteLine($"[AuraClient] Sent status update: muted={isMuted}, deafened={isDeafened}");
         }
         catch (Exception ex)
@@ -427,6 +415,9 @@ public class AuraNetworkClient : IAsyncDisposable
     // Receive Loop & State Handlers
     // ========================================================================
 
+    private const int MaxAudioPacketSize = 65536;
+    private const int MaxControlPacketSize = 2 * 1024 * 1024;
+
     public event Action<uint, uint, string>? OnUserJoined; // channelId, sessionId, name
     public event Action<uint, uint>? OnUserLeft;           // channelId, sessionId
     public event Action<ServerState>? OnServerSnapshot;
@@ -506,14 +497,7 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleAudioPacketAsync(CancellationToken ct)
     {
-        // 1. Read Length (4 bytes)
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
-        
-        // 2. Read Packet
-        var packet = new byte[len];
-        await ReadExactAsync(packet, ct);
+        var packet = await ReadHardenedPayloadAsync(MaxAudioPacketSize, ct);
         
         // 3. Decrypt and decode using AudioManager
         if (_audioManager != null)
@@ -534,7 +518,7 @@ public class AuraNetworkClient : IAsyncDisposable
         else
         {
             // Fallback: Play raw payload (legacy behavior)
-            if (len > 32)
+            if (packet.Length > 32)
             {
                 var payload = packet.AsSpan(32).ToArray();
                 _audioEngine?.PlayAudio(payload);
@@ -544,17 +528,12 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleUserJoinedAsync(CancellationToken ct)
     {
-        // Format: channel_id(4) + session_id(4) + name_len(1) + name(...)
-        var buf = new byte[9];
-        await ReadExactAsync(buf, ct);
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
         
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
-        uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(4, 4));
-        int nameLen = buf[8];
-
-        var nameBuf = new byte[nameLen];
-        await ReadExactAsync(nameBuf, ct);
-        string name = System.Text.Encoding.UTF8.GetString(nameBuf);
+        var join = UserJoined.Parser.ParseFrom(packet);
+        uint channelId = uint.Parse(join.ChannelId);
+        uint sessionId = join.SessionId;
+        string name = join.DisplayName;
 
         Console.WriteLine($"[AuraClient] UserJoined: {name} (ID: {sessionId}) in Channel {channelId}");
         
@@ -580,13 +559,12 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleUserLeftAsync(CancellationToken ct)
     {
-        // Format: channel_id(4) + session_id(4)
-        var buf = new byte[8];
-        await ReadExactAsync(buf, ct);
-
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
-        uint sessionId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(4, 4));
-
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+        
+        var left = UserLeft.Parser.ParseFrom(packet);
+        uint channelId = uint.Parse(left.ChannelId);
+        uint sessionId = left.SessionId;
+        
         Console.WriteLine($"[AuraClient] UserLeft: ID {sessionId} from Channel {channelId}");
         
         // Remove remote sender from audio decryption
@@ -597,14 +575,7 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleChannelStateAsync(CancellationToken ct)
     {
-        // 1. Read Length (4 bytes)
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
-        
-        // 2. Read Packet
-        var packet = new byte[len];
-        await ReadExactAsync(packet, ct);
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
 
         try
         {
@@ -622,14 +593,7 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private async Task HandleUserStatusUpdateAsync(CancellationToken ct)
     {
-        // 1. Read Length (4 bytes)
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
-        
-        // 2. Read Packet
-        var packet = new byte[len];
-        await ReadExactAsync(packet, ct);
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
 
         try
         {
@@ -637,7 +601,7 @@ public class AuraNetworkClient : IAsyncDisposable
             var update = UserStatusUpdate.Parser.ParseFrom(packet);
             Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}");
             
-            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened);
+            OnStatusChanged?.Invoke($"User {update.SessionId} status updated");
         }
         catch (Exception ex)
         {
@@ -647,175 +611,83 @@ public class AuraNetworkClient : IAsyncDisposable
 
     public async Task SendTextMessageAsync(uint channelId, string content, string messageId, string? replyToId = null)
     {
-        if (_controlStream == null) return;
-        if (_textCrypto == null)
+        if (_controlStream == null || _textCrypto == null || _mlsWrapper == null) return;
+        
+        try
         {
-            Console.WriteLine("[AuraClient] Text crypto not initialized");
-            return;
+            var msg = new TextMessage {
+                SenderUuid = _userUuid ?? "",
+                Timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Content = content,
+                MessageId = messageId,
+                ReplyToId = replyToId ?? "",
+                Type = MediaType.Text
+            };
+            
+            var key = _mlsWrapper.ExportTextKey(channelId);
+            var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: false);
+            var encrypted = _textCrypto.EncryptMessage(msg, key);
+            
+            var packet = new EncryptedTextPacket {
+                SenderSessionId = _userId,
+                ChannelId = channelId.ToString(),
+                Epoch = epoch,
+                MessageId = messageId,
+                Ciphertext = Google.Protobuf.ByteString.CopyFrom(encrypted.Ciphertext),
+                Nonce = Google.Protobuf.ByteString.CopyFrom(encrypted.Nonce),
+                Tag = Google.Protobuf.ByteString.CopyFrom(encrypted.Tag),
+                ReplyToId = replyToId ?? ""
+            };
+            
+            await SendProtoRequestAsync(MSG_TEXT_PACKET, packet, default);
+            Console.WriteLine($"[AuraClient] Sent encrypted text message to channel {channelId}: {content.Substring(0, Math.Min(content.Length, 10))}...");
         }
-        
-        Console.WriteLine($"[AuraClient] Sending encrypted text message to channel {channelId}: {content.Substring(0, Math.Min(30, content.Length))}...");
-        
-        // Determine the current text group epoch from MLS, falling back to 0 if not in group.
-        ulong textEpoch = 0;
-        if (_mlsWrapper != null)
+        catch (Exception ex)
         {
-            try { textEpoch = _mlsWrapper.CurrentEpoch(_currentChannelId, isVoice: false); }
-            catch { /* not in a text group yet — epoch stays 0 */ }
+            Console.WriteLine($"[AuraClient] Failed to send text message: {ex.Message}");
         }
-        
-        // Encrypt the message using DAVE
-        var encryptedPacket = _textCrypto.Encrypt(
-            epoch: textEpoch,
-            channelId: channelId,
-            senderSessionId: UserId,
-            senderUuid: _userUuid ?? $"user-{UserId}",
-            content: content,
-            messageId: messageId,
-            replyToId: replyToId ?? ""
-        );
-        
-        using var ms = new MemoryStream();
-        
-        // Serialize encrypted packet to binary format
-        // Format: sender_session_id(4) + channel_id(4) + epoch(8) + message_id_len(1) + message_id + content_len(4) + ciphertext + nonce(24) + tag(16) + reply_len(1) + reply_id
-        
-        // sender_session_id(4)
-        var senderBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(senderBytes, encryptedPacket.SenderSessionId);
-        ms.Write(senderBytes);
-        
-        // channel_id(4)
-        var chanBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(chanBytes, encryptedPacket.ChannelId);
-        ms.Write(chanBytes);
-        
-        // epoch(8)
-        var epochBytes = new byte[8];
-        BinaryPrimitives.WriteUInt64LittleEndian(epochBytes, encryptedPacket.Epoch);
-        ms.Write(epochBytes);
-        
-        // message_id_len(1) + message_id
-        var msgIdBytes = Encoding.UTF8.GetBytes(messageId);
-        ms.WriteByte((byte)msgIdBytes.Length);
-        ms.Write(msgIdBytes);
-        
-        // ciphertext_len(4) + ciphertext
-        var ciphertextLenBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(ciphertextLenBytes, (uint)encryptedPacket.Ciphertext.Length);
-        ms.Write(ciphertextLenBytes);
-        ms.Write(encryptedPacket.Ciphertext);
-        
-        // nonce(24)
-        ms.Write(encryptedPacket.Nonce);
-        
-        // tag(16)
-        ms.Write(encryptedPacket.Tag);
-        
-        // reply_to(1 + bytes)
-        if (!string.IsNullOrEmpty(replyToId))
-        {
-            var replyBytes = Encoding.UTF8.GetBytes(replyToId);
-            ms.WriteByte((byte)replyBytes.Length);
-            ms.Write(replyBytes);
-        }
-        else
-        {
-            ms.WriteByte(0);
-        }
-        
-        var packet = ms.ToArray();
-        
-        // Send: [type 0x30][len 4][packet]
-        var frame = new byte[1 + 4 + packet.Length];
-        frame[0] = 0x30;
-        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), packet.Length);
-        packet.CopyTo(frame, 5);
-        
-        await _controlStream.WriteAsync(frame);
-        Console.WriteLine($"[AuraClient] Sent encrypted text message ({frame.Length} bytes)");
     }
 
     public event Action<string, uint, uint, string, string?>? OnTextMessage; // msgId, senderId, channelId, content, replyToId
 
     private async Task HandleTextPacketAsync(CancellationToken ct)
     {
+        var packetBuf = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+        
+        try
+        {
+            var packet = EncryptedTextPacket.Parser.ParseFrom(packetBuf);
+            uint channelId = uint.Parse(packet.ChannelId);
+            
+            if (_textCrypto != null && _mlsWrapper != null && _mlsWrapper.IsMember(channelId, isVoice: false))
+            {
+                var decryptedMessage = _textCrypto.Decrypt(packet);
+                Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.Content} from {packet.SenderSessionId}");
+                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content, packet.ReplyToId);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to handle text packet: {ex.Message}");
+        }
+    }
+
+    private async Task<byte[]> ReadHardenedPayloadAsync(int maxLen, CancellationToken ct)
+    {
         // 1. Read Length (4 bytes)
         var lenBuf = new byte[4];
         await ReadExactAsync(lenBuf, ct);
         int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
         
+        if (len < 0 || len > maxLen)
+        {
+            throw new Exception($"Incoming frame too large: {len} bytes (max {maxLen})");
+        }
+        
         // 2. Read Packet
         var packet = new byte[len];
         await ReadExactAsync(packet, ct);
-        
-        // 3. Parse Encrypted Packet
-        int offset = 0;
-        
-        uint senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(offset, 4));
-        offset += 4;
-        
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(packet.AsSpan(offset, 4));
-        offset += 4;
-        
-        ulong epoch = BinaryPrimitives.ReadUInt64LittleEndian(packet.AsSpan(offset, 8));
-        offset += 8;
-        
-        int msgIdLen = packet[offset++];
-        string msgId = Encoding.UTF8.GetString(packet.AsSpan(offset, msgIdLen));
-        offset += msgIdLen;
-        
-        int ciphertextLen = BinaryPrimitives.ReadInt32LittleEndian(packet.AsSpan(offset, 4));
-        offset += 4;
-        
-        var ciphertext = packet.AsSpan(offset, ciphertextLen).ToArray();
-        offset += ciphertextLen;
-        
-        var nonce = packet.AsSpan(offset, 24).ToArray();
-        offset += 24;
-        
-        var tag = packet.AsSpan(offset, 16).ToArray();
-        offset += 16;
-        
-        string? replyToId = null;
-        if (offset < packet.Length)
-        {
-            int replyLen = packet[offset++];
-            if (replyLen > 0)
-            {
-                replyToId = Encoding.UTF8.GetString(packet.AsSpan(offset, replyLen));
-            }
-        }
-        
-        // 4. Decrypt the message
-        if (_textCrypto == null)
-        {
-            Console.WriteLine("[AuraClient] Text crypto not initialized, cannot decrypt");
-            return;
-        }
-        
-        var encryptedPacket = new EncryptedTextPacket
-        {
-            SenderSessionId = senderId,
-            ChannelId = channelId,
-            Epoch = epoch,
-            Ciphertext = ciphertext,
-            Nonce = nonce,
-            Tag = tag,
-            MessageId = msgId,
-            ReplyToId = replyToId ?? ""
-        };
-        
-        try
-        {
-            var decryptedMessage = _textCrypto.Decrypt(encryptedPacket);
-            Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.Content} from {senderId}");
-            OnTextMessage?.Invoke(msgId, senderId, channelId, decryptedMessage.Content, replyToId);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[AuraClient] Failed to decrypt text message: {ex.Message}");
-        }
+        return packet;
     }
 
     private async Task ReadExactAsync(byte[] buf, CancellationToken ct)
@@ -838,12 +710,12 @@ public class AuraNetworkClient : IAsyncDisposable
     /// </summary>
     private async Task HandleMlsCreateGroupAsync(CancellationToken ct)
     {
-        // [channel_id: u32] [is_voice: u8]
-        var buf = new byte[5];
-        await ReadExactAsync(buf, ct);
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(0, 4));
-        bool isVoice = buf[4] != 0;
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
         
+        var envelope = MlsEnvelope.Parser.ParseFrom(packet);
+        uint channelId = uint.Parse(envelope.ChannelId);
+        bool isVoice = envelope.GroupType == MlsGroupType.Voice;
+
         if (_mlsWrapper == null)
         {
             Console.WriteLine("[AuraClient] MLS not initialized");
@@ -872,24 +744,13 @@ public class AuraNetworkClient : IAsyncDisposable
     /// </summary>
     private async Task HandleMlsAddMemberRequestAsync(CancellationToken ct)
     {
-        // [channel_id: u32] [is_voice: u8] [joiner_session_id: u32] [uuid_len: u8] [uuid] [kp_len: u32] [key_package]
-        var headerBuf = new byte[9];
-        await ReadExactAsync(headerBuf, ct);
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
         
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
-        bool isVoice = headerBuf[4] != 0;
-        uint joinerSessionId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(5, 4));
-        
-        var uuidLenBuf = new byte[1];
-        await ReadExactAsync(uuidLenBuf, ct);
-        var uuidBuf = new byte[uuidLenBuf[0]];
-        await ReadExactAsync(uuidBuf, ct);
-        
-        var kpLenBuf = new byte[4];
-        await ReadExactAsync(kpLenBuf, ct);
-        uint kpLen = BinaryPrimitives.ReadUInt32LittleEndian(kpLenBuf);
-        var keyPackage = new byte[kpLen];
-        await ReadExactAsync(keyPackage, ct);
+        var envelope = MlsEnvelope.Parser.ParseFrom(packet);
+        uint channelId = uint.Parse(envelope.ChannelId);
+        bool isVoice = envelope.GroupType == MlsGroupType.Voice;
+        uint joinerSessionId = envelope.TargetSessionId;
+        byte[] keyPackage = envelope.KeyPackage.ToByteArray();
         
         if (_mlsWrapper == null || _controlStream == null)
         {
@@ -904,24 +765,18 @@ public class AuraNetworkClient : IAsyncDisposable
             Console.WriteLine($"[AuraClient] Added member {joinerSessionId} to MLS group, sending commit/welcome");
             
             // Send commit + welcome back to server
-            // [0x51] [channel_id: u32] [is_voice: u8] [new_member_session_id: u32]
-            //        [commit_len: u32] [commit] [welcome_len: u32] [welcome]
-            using var ms = new MemoryStream();
-            ms.WriteByte(MSG_MLS_COMMIT_WELCOME);
-            var buf = new byte[4];
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
-            ms.Write(buf);
-            ms.WriteByte((byte)(isVoice ? 1 : 0));
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, joinerSessionId);
-            ms.Write(buf);
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)result.Commit.Length);
-            ms.Write(buf);
-            ms.Write(result.Commit);
-            BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)result.Welcome.Length);
-            ms.Write(buf);
-            ms.Write(result.Welcome);
+            var envelopeOut = new MlsEnvelope {
+                SenderId = _userId,
+                ChannelId = channelId.ToString(),
+                GroupType = isVoice ? MlsGroupType.Voice : MlsGroupType.Text,
+                CommitWelcome = new MlsCommitWelcome {
+                    Commit = Google.Protobuf.ByteString.CopyFrom(result.Commit),
+                    Welcome = Google.Protobuf.ByteString.CopyFrom(result.Welcome),
+                    NewMemberSessionId = joinerSessionId
+                }
+            };
             
-            await _controlStream.WriteAsync(ms.ToArray(), ct);
+            await SendProtoRequestAsync(MSG_MLS_COMMIT_WELCOME, envelopeOut, ct);
             Console.WriteLine($"[AuraClient] Sent commit/welcome for new member {joinerSessionId}");
             
             // Update audio keys after epoch advance
@@ -941,31 +796,21 @@ public class AuraNetworkClient : IAsyncDisposable
     /// </summary>
     private async Task HandleMlsCommitAsync(CancellationToken ct)
     {
-        // [channel_id: u32] [is_voice: u8] [commit_len: u32] [commit]
-        var headerBuf = new byte[5];
-        await ReadExactAsync(headerBuf, ct);
-        
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
-        bool isVoice = headerBuf[4] != 0;
-        
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        uint commitLen = BinaryPrimitives.ReadUInt32LittleEndian(lenBuf);
-        var commit = new byte[commitLen];
-        await ReadExactAsync(commit, ct);
-        
-        if (_mlsWrapper == null) return;
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
         
         try
         {
-            var newEpoch = _mlsWrapper.ProcessCommit(channelId, isVoice, commit);
-            Console.WriteLine($"[AuraClient] Processed MLS commit, now at epoch {newEpoch}");
+            var envelope = MlsEnvelope.Parser.ParseFrom(packet);
+            uint channelId = uint.Parse(envelope.ChannelId);
+            bool isVoice = envelope.GroupType == MlsGroupType.Voice;
+            byte[] commit = envelope.Commit.ToByteArray();
             
-            // Update audio keys after epoch advance
-            if (isVoice)
-            {
-                UpdateAudioKeysFromMls(channelId);
-            }
+            if (_mlsWrapper == null) return;
+            
+            var newEpoch = _mlsWrapper.ProcessCommit(channelId, isVoice, commit);
+            Console.WriteLine($"[AuraClient] Processed MLS commit from {envelope.SenderId}, now at epoch {newEpoch}");
+            
+            if (isVoice) UpdateAudioKeysFromMls(channelId);
         }
         catch (Exception ex)
         {
@@ -978,31 +823,21 @@ public class AuraNetworkClient : IAsyncDisposable
     /// </summary>
     private async Task HandleMlsWelcomeAsync(CancellationToken ct)
     {
-        // [channel_id: u32] [is_voice: u8] [welcome_len: u32] [welcome]
-        var headerBuf = new byte[5];
-        await ReadExactAsync(headerBuf, ct);
-        
-        uint channelId = BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0, 4));
-        bool isVoice = headerBuf[4] != 0;
-        
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        uint welcomeLen = BinaryPrimitives.ReadUInt32LittleEndian(lenBuf);
-        var welcome = new byte[welcomeLen];
-        await ReadExactAsync(welcome, ct);
-        
-        if (_mlsWrapper == null) return;
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
         
         try
         {
+            var envelope = MlsEnvelope.Parser.ParseFrom(packet);
+            uint channelId = uint.Parse(envelope.ChannelId);
+            bool isVoice = envelope.GroupType == MlsGroupType.Voice;
+            byte[] welcome = envelope.Welcome.ToByteArray();
+            
+            if (_mlsWrapper == null) return;
+            
             _mlsWrapper.JoinGroup(welcome);
             Console.WriteLine($"[AuraClient] Joined MLS {(isVoice ? "voice" : "text")} group via Welcome for channel {channelId}");
             
-            // Update audio keys now that we're in the group
-            if (isVoice)
-            {
-                UpdateAudioKeysFromMls(channelId);
-            }
+            if (isVoice) UpdateAudioKeysFromMls(channelId);
         }
         catch (Exception ex)
         {
@@ -1038,14 +873,23 @@ public class AuraNetworkClient : IAsyncDisposable
             Console.WriteLine($"[AuraClient] Failed to update audio keys: {ex.Message}");
         }
     }
-}
+    /// <summary>
+    /// Send a Protobuf-encoded message over the control stream.
+    /// Format: [Type: u8] [Length: u32] [Payload]
+    /// </summary>
+    private async Task SendProtoRequestAsync<T>(byte msgType, T message, CancellationToken ct) where T : IMessage<T>
+    {
+        if (_controlStream == null) return;
 
-public class AuthenticationException : Exception
-{
-    public AuthenticationException(string message) : base(message) { }
-}
-
-public class ProtocolException : Exception
-{
-    public ProtocolException(string message) : base(message) { }
+        using var ms = new MemoryStream();
+        ms.WriteByte(msgType);
+        
+        var payload = message.ToByteArray();
+        var lenBuf = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(lenBuf, (uint)payload.Length);
+        ms.Write(lenBuf);
+        ms.Write(payload);
+        
+        await _controlStream.WriteAsync(ms.ToArray(), ct);
+    }
 }
