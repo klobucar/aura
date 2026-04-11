@@ -16,6 +16,11 @@
     <RuntimeHostConfigurationOption Include="System.Net.SocketsHttpHandler.Http3Support" Value="true" />
   </ItemGroup>
 
+  <!-- Exclude test files that require xunit — these belong in a separate test project -->
+  <ItemGroup>
+    <Compile Remove="Tests/**/*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="11.1.4" />
     <PackageReference Include="Avalonia.Desktop" Version="11.1.4" />

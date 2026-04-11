@@ -11,6 +11,8 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Aura.V1Alpha1;
+using Google.Protobuf;
+using Google.Protobuf;
 
 namespace Aura.Desktop.Services;
 
@@ -50,7 +52,6 @@ public class AuraNetworkClient : IAsyncDisposable
     
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
-    public event Action<uint, byte[]>? OnAudioReceived;
     public event Action<uint, bool, bool>? OnUserStatusUpdated; // sessionId, isMuted, isDeafened
     
     /// <summary>
@@ -173,7 +174,7 @@ public class AuraNetworkClient : IAsyncDisposable
         StartListening();
     }
     
-    private QuicStream? _audioStream;
+
 
     public async Task SendAudioFrameAsync(short[] pcmData, CancellationToken ct = default)
     {
@@ -412,11 +413,6 @@ public class AuraNetworkClient : IAsyncDisposable
     
     public async ValueTask DisposeAsync()
     {
-        if (_audioStream != null)
-        {
-            await _audioStream.DisposeAsync();
-        }
-        
         if (_controlStream != null)
         {
             await _controlStream.DisposeAsync();
