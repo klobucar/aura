@@ -1,0 +1,36 @@
+# fly.toml configuration for Aura Server
+
+app = "aura-server"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AURA_BIND_ADDRESS = "0.0.0.0:8443"
+  AURA_DATABASE_PATH = "/data/aura.db"
+  AURA_ACME_CACHE_PATH = "/data/acme"
+
+[[mounts]]
+  source = "aura_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8443
+  protocol = "udp"
+  [[services.ports]]
+    port = 8443
+
+[[services]]
+  internal_port = 443
+  protocol = "tcp"
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"] # Handlers for ACME challenges
+
+[checks]
+  [checks.active]
+    type = "tcp"
+    port = 443
+    interval = "30s"
+    timeout = "5s"
