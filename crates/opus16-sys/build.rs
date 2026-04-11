@@ -19,7 +19,7 @@ fn main() {
     build.define("HAVE_LRINTF", None);
     build.define("HAVE_LRINT", None);
     build.define("FLOAT_APPROX", None);
-    build.define("PACKAGE_VERSION", "\"1.6\"");
+    build.define("PACKAGE_VERSION", "\"1.6.1\"");
     
     // DRED and Deep PLC Defines
     build.define("ENABLE_DRED", None);
