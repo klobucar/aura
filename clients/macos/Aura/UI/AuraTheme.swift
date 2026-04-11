@@ -25,6 +25,20 @@ struct AuraTheme {
             })
         }
         
+        static var backgroundGradient: LinearGradient {
+            LinearGradient(
+                colors: [
+                    background,
+                    Color(nsColor: NSColor(name: nil) { appearance in
+                        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        return dark ? NSColor(white: 0.02, alpha: 1.0) : NSColor(red: 0.9, green: 0.92, blue: 0.98, alpha: 1.0)
+                    })
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        
         static var sidebarBackground: Color {
             Color(nsColor: .controlBackgroundColor).opacity(0.3)
         }
@@ -102,14 +116,38 @@ struct AuraTheme {
         static var glassHighlight: Color {
             Color(nsColor: NSColor(name: nil) { appearance in
                 return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
-                    NSColor(white: 1.0, alpha: 0.12) : 
-                    NSColor(white: 1.0, alpha: 0.25)
+                    NSColor(white: 1.0, alpha: 0.16) : 
+                    NSColor(white: 1.0, alpha: 0.45)
             })
+        }
+        
+        static var rimLight: Color {
+            Color.white.opacity(0.3)
         }
         
         /// Subtle overlay tint for Liquid Glass surfaces
         static var liquidOverlay: Color {
-            Color.white.opacity(0.05)
+            Color.white.opacity(0.12)
+        }
+        
+        static var liquidFrosted: Color {
+            Color(nsColor: NSColor(name: nil) { appearance in
+                return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+                    NSColor(white: 1.0, alpha: 0.05) : 
+                    NSColor(red: 0.9, green: 0.95, blue: 1.0, alpha: 0.25)
+            })
+        }
+        
+        static var ultraFrosted: Color {
+            Color.white.opacity(0.02)
+        }
+        
+        static var auraSecondaryGlow: Color {
+            Color(nsColor: .systemPurple).opacity(0.3)
+        }
+        
+        static var auraTertiaryGlow: Color {
+            Color(nsColor: .systemMint).opacity(0.2)
         }
     }
     

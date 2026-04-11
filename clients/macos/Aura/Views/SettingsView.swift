@@ -45,187 +45,170 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     // Appearance Section
-                    settingsSection("Appearance", icon: "paintbrush.fill") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(AuraThemeType.allCases, id: \.self) { theme in
-                                themeRow(theme: theme)
-                            }
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(AuraThemeType.allCases, id: \.self) { theme in
+                            themeRow(theme: theme)
                         }
                     }
+                    .auraGlassSection(title: "Appearance", icon: "paintbrush.fill")
 
                     // Audio Devices Section
-                    settingsSection("Audio Devices", icon: "hifispeaker.2.fill") {
-                        VStack(alignment: .leading, spacing: 16) {
-                            devicePicker(
-                                title: "Input Device",
-                                subtitle: "Select your microphone",
-                                selection: Binding(
-                                    get: { deviceManager.selectedInputDeviceID },
-                                    set: { if let deviceID = $0 { deviceManager.setInputDevice(deviceID) } }
-                                ),
-                                devices: deviceManager.availableInputDevices
-                            )
-                            
-                            devicePicker(
-                                title: "Output Device",
-                                subtitle: "Select your speakers/headphones",
-                                selection: Binding(
-                                    get: { deviceManager.selectedOutputDeviceID },
-                                    set: { if let deviceID = $0 { deviceManager.setOutputDevice(deviceID) } }
-                                ),
-                                devices: deviceManager.availableOutputDevices
-                            )
-                        }
+                    VStack(alignment: .leading, spacing: 16) {
+                        devicePicker(
+                            title: "Input Device",
+                            subtitle: "Select your microphone",
+                            selection: Binding(
+                                get: { deviceManager.selectedInputDeviceID },
+                                set: { if let deviceID = $0 { deviceManager.setInputDevice(deviceID) } }
+                            ),
+                            devices: deviceManager.availableInputDevices
+                        )
+                        
+                        devicePicker(
+                            title: "Output Device",
+                            subtitle: "Select your speakers/headphones",
+                            selection: Binding(
+                                get: { deviceManager.selectedOutputDeviceID },
+                                set: { if let deviceID = $0 { deviceManager.setOutputDevice(deviceID) } }
+                            ),
+                            devices: deviceManager.availableOutputDevices
+                        )
                     }
+                    .auraGlassSection(title: "Audio Devices", icon: "hifispeaker.2.fill")
                     
                     // Transmission Mode Section
-                    settingsSection("Transmission", icon: "wave.3.right") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ForEach(AudioSettings.TransmissionMode.allCases, id: \.self) { mode in
-                                transmissionModeRow(mode: mode)
-                            }
-                            
-                            if settings.transmissionMode == .pushToTalk {
-                                pttSettings.padding(.top, 8)
-                            } else if settings.transmissionMode == .voiceActivation {
-                                vadSettings.padding(.top, 8)
-                            }
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(AudioSettings.TransmissionMode.allCases, id: \.self) { mode in
+                            transmissionModeRow(mode: mode)
+                        }
+                        
+                        if settings.transmissionMode == .pushToTalk {
+                            pttSettings.padding(.top, 8)
+                        } else if settings.transmissionMode == .voiceActivation {
+                            vadSettings.padding(.top, 8)
                         }
                     }
+                    .auraGlassSection(title: "Transmission", icon: "wave.3.right")
                     
                     // Audio Quality Section
-                    settingsSection("Audio Quality", icon: "waveform") {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Toggle(isOn: $noiseSuppressionEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Noise Suppression (RNNoise)")
-                                        .font(.system(size: 14, weight: .medium))
-                                    Text("Neural network-based background noise removal")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .toggleStyle(.switch)
-                            .onChange(of: noiseSuppressionEnabled) { _, newValue in
-                                if newValue && webrtcNsEnabled {
-                                    webrtcNsEnabled = false
-                                }
-                                NotificationCenter.default.post(
-                                    name: .audioSettingsChanged,
-                                    object: ["noiseSuppression": newValue, "webrtcNsEnabled": webrtcNsEnabled]
-                                )
-                            }
-                            
-                            Toggle(isOn: $webrtcNsEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("WebRTC Noise Suppression")
-                                        .font(.system(size: 14, weight: .medium))
-                                    Text("Standard WebRTC NS (Lighter than RNNoise)")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .toggleStyle(.switch)
-                            .onChange(of: webrtcNsEnabled) { _, newValue in
-                                if newValue && noiseSuppressionEnabled {
-                                    noiseSuppressionEnabled = false
-                                }
-                                NotificationCenter.default.post(
-                                    name: .audioSettingsChanged,
-                                    object: ["webrtcNsEnabled": newValue, "noiseSuppression": noiseSuppressionEnabled]
-                                )
-                            }
-                            
-                            Divider().opacity(0.2)
-                            
-                            Toggle(isOn: $aecEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Echo Cancellation (AEC)")
-                                        .font(.system(size: 14, weight: .medium))
-                                    Text("Removes echo from speakers/feedback")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .toggleStyle(.switch)
-                            .onChange(of: aecEnabled) { _, newValue in
-                                NotificationCenter.default.post(
-                                    name: .audioSettingsChanged,
-                                    object: ["aecEnabled": newValue]
-                                )
-                            }
-                            
-                            Toggle(isOn: $webrtcAgcEnabled) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Auto Gain Control (AGC)")
-                                        .font(.system(size: 14, weight: .medium))
-                                    Text("Normalize microphone volume automatically")
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .toggleStyle(.switch)
-                            .onChange(of: webrtcAgcEnabled) { _, newValue in
-                                NotificationCenter.default.post(
-                                    name: .audioSettingsChanged,
-                                    object: ["webrtcAgcEnabled": newValue]
-                                )
-                            }
-                            
-                            Divider().opacity(0.2)
-                            
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("JITTER BUFFER")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text("\(jitterBufferMs)ms")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundStyle(AuraTheme.Colors.primary)
-                                }
-                                
-                                Picker("", selection: $jitterBufferMs) {
-                                    Text("0ms (Instant)").tag(0)
-                                    Text("10ms (Minimal)").tag(10)
-                                    Text("20ms (Ultra Low)").tag(20)
-                                    Text("40ms (Low)").tag(40)
-                                    Text("60ms (Balanced)").tag(60)
-                                    Text("80ms (Stable)").tag(80)
-                                    Text("100ms (Maximum)").tag(100)
-                                }
-                                .labelsHidden()
-                                .onChange(of: jitterBufferMs) { _, newValue in
-                                    NotificationCenter.default.post(
-                                        name: .audioSettingsChanged,
-                                        object: ["jitterBuffer": newValue]
-                                    )
-                                }
-                                
-                                if jitterBufferMs == 0 {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundStyle(.orange)
-                                            .font(.system(size: 10))
-                                        Text("0ms is only for LAN/localhost")
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .padding(.top, 4)
-                                } else {
-                                    Text("Lower = less delay, higher = more stable")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.top, 4)
-                                }
+                    VStack(alignment: .leading, spacing: 16) {
+                        Toggle(isOn: $noiseSuppressionEnabled) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Noise Suppression (RNNoise)")
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Neural network-based background noise removal")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
                             }
                         }
+                        .toggleStyle(.switch)
+                        .onChange(of: noiseSuppressionEnabled) { _, newValue in
+                            if newValue && webrtcNsEnabled {
+                                webrtcNsEnabled = false
+                            }
+                            NotificationCenter.default.post(
+                                name: .audioSettingsChanged,
+                                object: ["noiseSuppression": newValue, "webrtcNsEnabled": webrtcNsEnabled]
+                            )
+                        }
+                        
+                        Toggle(isOn: $webrtcNsEnabled) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("WebRTC Noise Suppression")
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Standard WebRTC NS (Lighter than RNNoise)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: webrtcNsEnabled) { _, newValue in
+                            if newValue && noiseSuppressionEnabled {
+                                noiseSuppressionEnabled = false
+                            }
+                            NotificationCenter.default.post(
+                                name: .audioSettingsChanged,
+                                object: ["webrtcNsEnabled": newValue, "noiseSuppression": noiseSuppressionEnabled]
+                            )
+                        }
+                        
+                        Divider().opacity(0.1)
+                        
+                        Toggle(isOn: $aecEnabled) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Echo Cancellation (AEC)")
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Removes echo from speakers/feedback")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: aecEnabled) { _, newValue in
+                            NotificationCenter.default.post(
+                                name: .audioSettingsChanged,
+                                object: ["aecEnabled": newValue]
+                            )
+                        }
+                        
+                        Toggle(isOn: $webrtcAgcEnabled) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Auto Gain Control (AGC)")
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Normalize microphone volume automatically")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: webrtcAgcEnabled) { _, newValue in
+                            NotificationCenter.default.post(
+                                name: .audioSettingsChanged,
+                                object: ["webrtcAgcEnabled": newValue]
+                            )
+                        }
+                        
+                        Divider().opacity(0.1)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("JITTER BUFFER")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(jitterBufferMs)ms")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(AuraTheme.Colors.primary)
+                            }
+                            
+                            Picker("", selection: $jitterBufferMs) {
+                                Text("0ms").tag(0)
+                                Text("10ms").tag(10)
+                                Text("20ms").tag(20)
+                                Text("40ms").tag(40)
+                                Text("60ms").tag(60)
+                                Text("80ms").tag(80)
+                                Text("100ms").tag(100)
+                            }
+                            .labelsHidden()
+                            .onChange(of: jitterBufferMs) { _, newValue in
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["jitterBuffer": newValue]
+                                )
+                            }
+                            
+                            Text(jitterBufferMs == 0 ? "LAN only" : "Lower delay vs more stability")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 4)
+                        }
                     }
+                    .auraGlassSection(title: "Audio Quality", icon: "waveform")
                     
                     // TTS Settings Section
-                    settingsSection("Text-to-Speech", icon: "bubble.left.and.exclamationmark.bubble.right.fill") {
-                        ttsSettings
-                    }
+                    ttsSettings
+                        .auraGlassSection(title: "Text-to-Speech", icon: "bubble.left.and.exclamationmark.bubble.right.fill")
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
@@ -256,27 +239,8 @@ struct SettingsView: View {
     // MARK: - Components
     
     private func settingsSection<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .foregroundStyle(AuraTheme.Colors.primary)
-                    .font(.system(size: 12, weight: .bold))
-                Text(title.uppercased())
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .kerning(1)
-            }
-            
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(20)
-        .background(Color.white.opacity(0.03))
-        .clipShape(.rect(cornerRadius: AuraTheme.Layout.glassCornerRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: AuraTheme.Layout.glassCornerRadius)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
-        }
+        content()
+            .auraGlassSection(title: title, icon: icon)
     }
     
     private func devicePicker(title: String, subtitle: String, selection: Binding<AudioDeviceID?>, devices: [AudioDeviceManager.AudioDevice]) -> some View {
