@@ -9,17 +9,29 @@ package aura.v1alpha1;
 
 // MLS envelope for all MLS-related signaling
 message MlsEnvelope {
-    uint32 sender_id = 1;  // Session ID of the sender
-    string group_id = 2;
+    uint32 sender_id = 1;      // Session ID of the sender
+    string channel_id = 2;     // Target channel
     MlsGroupType group_type = 3;
     uint64 epoch = 4;
     
+    // Metadata for member management
+    uint32 target_session_id = 5; 
+    string target_uuid = 6;
+
     oneof content {
         bytes key_package = 10;   // Initial KeyPackage for joining
         bytes welcome = 11;       // MLS Welcome for new members
         bytes proposal = 12;      // MLS Proposal (Add, Remove, Update)
         bytes commit = 13;        // MLS Commit (epoch advancement)
+        bool create_group = 14;   // Trigger for group creation
+        MlsCommitWelcome commit_welcome = 15; 
     }
+}
+
+message MlsCommitWelcome {
+    bytes commit = 1;
+    bytes welcome = 2;
+    uint32 new_member_session_id = 3;
 }
 
 // The user's position in 3D space.
@@ -46,6 +58,11 @@ enum UserMode {
     USER_MODE_INVALID = 0;
     USER_MODE_SPEAKER = 1;
     USER_MODE_LISTENER = 2;
+}
+
+enum ChannelType {
+    CHANNEL_TYPE_REGULAR = 0;
+    CHANNEL_TYPE_LOBBY = 1;
 }
 
 // ============================================================================
@@ -98,12 +115,14 @@ message ChannelInfo {
     int32 position = 5;        // For custom ordering
     repeated uint32 user_ids = 6; // Active users in this channel (deprecated)
     repeated ChannelUserStatus users = 7; // Active users with status
+    ChannelType type = 8;
 }
 
 message ChannelUserStatus {
     uint32 session_id = 1;
     bool is_muted = 2;
     bool is_deafened = 3;
+    string display_name = 4;
 }
 
 // Channel icon options
@@ -235,6 +254,12 @@ message ListUsersResponse {
 // ============================================================================
 
 // Plaintext text message (inside the encrypted payload)
+enum MediaType {
+    TEXT = 0;
+    IMAGE = 1;
+    FILE = 2;
+}
+
 message TextMessage {
     string sender_uuid = 1;      // Sender's UUID
     uint64 timestamp = 2;        // Unix timestamp (milliseconds)
@@ -242,12 +267,10 @@ message TextMessage {
     string reply_to_id = 4;      // Optional: message ID being replied to
     string message_id = 5;       // UUID for this message (for replies)
     MediaType type = 6;          // Type of message (text, image, etc.)
-}
-
-enum MediaType {
-    TEXT = 0;
-    IMAGE = 1;
-    FILE = 2;
+    
+    // Attachment metadata (for IMAGE and FILE types)
+    uint64 file_size = 7;        // Size in bytes
+    string sha256_hash = 8;      // Optional checksum
 }
 
 // Encrypted text packet sent over wire
@@ -311,4 +334,21 @@ message UserStatusUpdate {
     uint32 session_id = 1;
     bool is_muted = 2;
     bool is_deafened = 3;
+}
+
+// User visibility updates (replaces manual MSG_USER_JOINED/MSG_USER_LEFT)
+message UserJoined {
+    string channel_id = 1;
+    uint32 session_id = 2;
+    string display_name = 3;
+}
+
+message UserLeft {
+    string channel_id = 1;
+    uint32 session_id = 2;
+}
+
+// Simple request to join a channel (replaces manual MSG_JOIN_CHANNEL)
+message JoinChannelRequest {
+    string channel_id = 1;
 }
