@@ -80,6 +80,23 @@ impl AudioSenderWrapper {
         }
     }
     
+    /// Update encryption key and epoch (called when MLS epoch advances)
+    pub fn update_key(&self, key: Vec<u8>, epoch: u64) -> Result<(), AudioError> {
+        if key.len() != KEY_SIZE {
+            return Err(AudioError::InvalidKeySize);
+        }
+        
+        let mut key_arr = [0u8; KEY_SIZE];
+        key_arr.copy_from_slice(&key);
+        
+        if let Ok(inner) = self.inner.read() {
+            inner.update_key(&key_arr, epoch);
+            Ok(())
+        } else {
+            Err(AudioError::CryptoError)
+        }
+    }
+    
     /// Encode and encrypt PCM audio
     pub fn process(&self, pcm: &[i16]) -> Result<Vec<u8>, AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;

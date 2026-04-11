@@ -1,3 +1,8 @@
+---
+title: DAVE Protocol Deviations
+description: Rationale for Aura's deviations from the standard Discord DAVE protocol.
+agent_intent: technical_reference
+---
 # Aura DAVE Protocol Deviations & Rationale
 
 While Aura shares the same high-level architecture as Discord's DAVE (MLS-based group key exchange with per-packet E2EE), it makes several strategic deviations optimized for its **QUIC-native transport** and **high-assurance security model**.

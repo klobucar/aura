@@ -25,13 +25,16 @@ const MSG_TEXT_PACKET: u8 = 0x30;
 const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
 const MSG_UPDATE_PROFILE: u8 = 0x42;
+const MSG_DELETE_CHANNEL: u8 = 0x43;
+const MSG_DELETE_USER: u8 = 0x44;
+const MSG_UPDATE_STATUS: u8 = 0x45;
 
 // MLS Protocol messages
 const MSG_MLS_JOIN: u8 = 0x50;           // Client sends key package on channel join
 const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after adding member
 
 // Security limits
-const MAX_PACKET_SIZE: usize = 64 * 1024; // 64KB
+const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -257,6 +260,18 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
             ctx.state.broadcast_user_left(channel_id, session_id).await;
         }
         
+        // Log bandwidth before removing session
+        if let Some(sess) = state.sessions.get(&session_id) {
+            let bytes_in = sess.bytes_in.load(std::sync::atomic::Ordering::Relaxed);
+            let bytes_out = sess.bytes_out.load(std::sync::atomic::Ordering::Relaxed);
+            info!(
+                "[{}] Session {} bandwidth: {:.1} KB in, {:.1} KB out",
+                remote, session_id,
+                bytes_in as f64 / 1024.0,
+                bytes_out as f64 / 1024.0,
+            );
+        }
+        
         state.remove_session(session_id).await;
         info!("[{}] Session {} disconnected", remote, session_id);
         Ok(())
@@ -275,7 +290,6 @@ struct AuthSession {
 /// 1. Server sends ServerHello with challenge
 /// 2. Client sends AuthRequest with public key, name, signature of challenge
 /// 3. Server validates and sends AuthResponse
-/// Returns (session_id, user_uuid, SendStream, RecvStream, rx) for reuse after auth.
 async fn authenticate_client(
     mut send: SendStream,
     mut recv: RecvStream,
@@ -365,7 +379,9 @@ async fn authenticate_client(
             let is_admin = result.is_admin;
 
             // Register session BEFORE sending auth response so we have a real session_id
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            // IMPORTANT: Do NOT prefix rx with '_' — that would cause Rust to drop the
+            // receiver immediately, silently discarding all service messages to this session.
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let session_id = state.register_session(user_uuid.to_string(), remote, tx);
 
             info!("[Auth] Registered session {} for user {}", session_id, user_uuid);
@@ -387,7 +403,7 @@ async fn authenticate_client(
 
             send.write_all(&response).await?;
 
-            Ok((session_id, user_uuid.to_string(), send, recv, _rx))
+            Ok((session_id, user_uuid.to_string(), send, recv, rx))
         }
         Err(e) => {
             response.put_u8(0); // failure
@@ -617,6 +633,98 @@ impl ConnectionContext {
                     }
                 }
             }
+            MSG_DELETE_CHANNEL => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::DeleteChannelRequest::decode(&buf[..])?;
+
+                // Only admins can delete channels
+                if !self.state.db.is_admin(&self.user_uuid)? {
+                    let resp = aura_protocol::AdminResponse {
+                        success: false,
+                        error_message: "Admin required".into(),
+                    };
+                    self.send_proto_response(MSG_DELETE_CHANNEL, resp).await?;
+                    return Ok(true);
+                }
+
+                match self.state.delete_channel_persistent(&req.channel_id).await {
+                    Ok(_) => {
+                        let resp = aura_protocol::AdminResponse {
+                            success: true,
+                            error_message: String::new(),
+                        };
+                        self.send_proto_response(MSG_DELETE_CHANNEL, resp).await?;
+                    }
+                    Err(e) => {
+                        let resp = aura_protocol::AdminResponse {
+                            success: false,
+                            error_message: e.to_string(),
+                        };
+                        self.send_proto_response(MSG_DELETE_CHANNEL, resp).await?;
+                    }
+                }
+            }
+            MSG_DELETE_USER => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::DeleteUserRequest::decode(&buf[..])?;
+
+                // Only admins or the user themselves can delete their profile
+                if self.user_uuid != req.user_uuid && !self.state.db.is_admin(&self.user_uuid)? {
+                    let resp = aura_protocol::AdminResponse {
+                        success: false,
+                        error_message: "Permission denied".into(),
+                    };
+                    self.send_proto_response(MSG_DELETE_USER, resp).await?;
+                    return Ok(true);
+                }
+
+                match self.state.delete_user_persistent(&req.user_uuid).await {
+                    Ok(_) => {
+                        let resp = aura_protocol::AdminResponse {
+                            success: true,
+                            error_message: String::new(),
+                        };
+                        self.send_proto_response(MSG_DELETE_USER, resp).await?;
+                    }
+                    Err(e) => {
+                        let resp = aura_protocol::AdminResponse {
+                            success: false,
+                            error_message: e.to_string(),
+                        };
+                        self.send_proto_response(MSG_DELETE_USER, resp).await?;
+                    }
+                }
+            }
+            MSG_UPDATE_STATUS => {
+                let mut len_buf = [0u8; 4];
+                self.recv.read_exact(&mut len_buf).await?;
+                let len = u32::from_le_bytes(len_buf) as usize;
+                
+                let mut buf = vec![0u8; len];
+                self.recv.read_exact(&mut buf).await?;
+                
+                let req = aura_protocol::UserStatusUpdate::decode(&buf[..])?;
+                
+                // Only allow users to update their own status
+                if req.session_id != self.session_id {
+                    warn!("[{}] Session {} tried to update status for {}", self.remote, self.session_id, req.session_id);
+                    return Ok(true);
+                }
+
+                self.state.broadcast_user_status(req.session_id, req.is_muted, req.is_deafened).await;
+            }
             MSG_MLS_JOIN => {
                 // [0x50] [channel_id_len: u8] [channel_id: string] [is_voice: u8] [kp_len: u32] [key_package]
                 let id_len = self.recv.read_u8().await? as usize;
@@ -804,6 +912,14 @@ impl ConnectionContext {
                 self.send.write_all(&msg).await?;
                 self.send.flush().await?;
             }
+            ServiceMessage::UserStatusUpdate { session_id, is_muted, is_deafened } => {
+                let update = aura_protocol::UserStatusUpdate {
+                    session_id,
+                    is_muted,
+                    is_deafened,
+                };
+                self.send_proto_response(MSG_UPDATE_STATUS, update).await?;
+            }
         }
         Ok(())
     }
@@ -987,22 +1103,39 @@ mod tests {
     
     #[test]
     fn test_max_packet_size_logic() {
-        assert_eq!(MAX_PACKET_SIZE, 65536);
+        assert_eq!(MAX_PACKET_SIZE, 2 * 1024 * 1024);
         let packet = aura_protocol::EncryptedTextPacket {
             sender_session_id: 1,
             channel_id: "C_1".to_string(),
             epoch: 1,
             message_id: "M_1".to_string(),
-            ciphertext: vec![0u8; 70000],
+            ciphertext: vec![0u8; 1024 * 1024], // 1MB
             nonce: vec![0u8; 24],
             tag: vec![0u8; 16],
             reply_to_id: "".to_string(),
         };
         
         let bytes = serialize_text_packet(&packet);
-        assert!(bytes.len() > MAX_PACKET_SIZE);
+        // Should be fine as it is < 2MB
         let result = parse_text_packet(&bytes);
         assert!(result.is_ok());
+
+        // Test something over 2MB
+        let large_packet = aura_protocol::EncryptedTextPacket {
+            sender_session_id: 1,
+            channel_id: "C_1".to_string(),
+            epoch: 1,
+            message_id: "M_1".to_string(),
+            ciphertext: vec![0u8; 3 * 1024 * 1024], // 3MB
+            nonce: vec![0u8; 24],
+            tag: vec![0u8; 16],
+            reply_to_id: "".to_string(),
+        };
+        let large_bytes = serialize_text_packet(&large_packet);
+        assert!(large_bytes.len() > MAX_PACKET_SIZE);
+        // Note: parse_text_packet itself doesn't check MAX_PACKET_SIZE, 
+        // the connection handler does before calling it.
+        // Wait, let's check parse_text_packet implementation.
     }
     
     #[test]

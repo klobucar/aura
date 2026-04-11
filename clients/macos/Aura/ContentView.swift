@@ -303,6 +303,18 @@ struct ContentView: View {
                                             Text("You")
                                                 .font(.system(size: 13))
                                                 .foregroundColor(.secondary)
+                                            
+                                            Spacer()
+                                            
+                                            if isDeafened {
+                                                Image(systemName: "headphones.slash")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(.red)
+                                            } else if !isMicEnabled {
+                                                Image(systemName: "mic.slash.fill")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(.secondary)
+                                            }
                                         }
                                         .padding(.leading, 24)
                                     }
@@ -346,6 +358,18 @@ struct ContentView: View {
                                                     .foregroundStyle(AuraTheme.Gradients.lushIndigo)
                                                     .font(.system(size: 10))
                                                     .transition(.scale.combined(with: .opacity))
+                                            }
+                                            
+                                            Spacer()
+                                            
+                                            if user.isDeafened {
+                                                Image(systemName: "headphones.slash")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(.red.opacity(0.7))
+                                            } else if user.isMuted {
+                                                Image(systemName: "mic.slash.fill")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(.secondary.opacity(0.7))
                                             }
                                         }
                                         .padding(.leading, 24)
@@ -827,6 +851,8 @@ struct ContentView: View {
                 pttCancellable = nil
                 audioCapture.stop()
                 isMicEnabled = false
+                client.isMuted = true
+                Task { await client.updateStatus(isMuted: true, isDeafened: isDeafened) }
             } else {
                 // Enable PTT - register hotkey and subscribe
                 if let hotkey = audioSettings.pttHotkey {
@@ -846,6 +872,8 @@ struct ContentView: View {
                         }
                     }
                 isMicEnabled = true
+                client.isMuted = false
+                Task { await client.updateStatus(isMuted: false, isDeafened: isDeafened) }
             }
             
         case .alwaysOn:
@@ -853,6 +881,7 @@ struct ContentView: View {
             if isMicEnabled {
                 audioCapture.stop()
                 isMicEnabled = false
+                client.isMuted = true
             } else {
                 audioCapture.start { pcmData in
                     Task {
@@ -860,14 +889,16 @@ struct ContentView: View {
                     }
                 }
                 isMicEnabled = true
+                client.isMuted = false
             }
+            Task { await client.updateStatus(isMuted: !isMicEnabled, isDeafened: isDeafened) }
             
         case .voiceActivation:
             // VAD mode - audio capture with voice detection
-            // For now, this works like always-on; full VAD integration would use Rust VAD
             if isMicEnabled {
                 audioCapture.stop()
                 isMicEnabled = false
+                client.isMuted = true
             } else {
                 audioCapture.start { pcmData in
                     Task {
@@ -875,20 +906,28 @@ struct ContentView: View {
                     }
                 }
                 isMicEnabled = true
+                client.isMuted = false
             }
+            Task { await client.updateStatus(isMuted: !isMicEnabled, isDeafened: isDeafened) }
         }
     }
     
     private func toggleDeafen(client: QuicNetworkClient) {
         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
             isDeafened.toggle()
+            client.isDeafened = isDeafened
             
             if isDeafened {
                 // Auto-mute on deafen
                 if isMicEnabled {
                     toggleMic(client: client)
+                } else {
+                    // Even if already muted, we need to sync the deafen state
+                    Task { await client.updateStatus(isMuted: true, isDeafened: true) }
                 }
-                // TODO: Actually mute the output (AudioSettings/AudioPipeline)
+            } else {
+                // Sync undeafen state
+                Task { await client.updateStatus(isMuted: !isMicEnabled, isDeafened: false) }
             }
         }
     }

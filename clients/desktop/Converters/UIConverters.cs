@@ -120,3 +120,42 @@ public class SystemMessagePaddingConverter : IValueConverter
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotImplementedException();
 }
+
+public class MicIconConverter : IValueConverter
+{
+    public static readonly MicIconConverter Instance = new();
+
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is bool isEnabled) return isEnabled ? "🎤" : "🎙️"; // Simple toggle for POC
+        return "🎙️";
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+public class DeafenIconConverter : IValueConverter
+{
+    public static readonly DeafenIconConverter Instance = new();
+
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is bool isDeafened) return isDeafened ? "🚫" : "🎧";
+        return "🎧";
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotImplementedException();
+}
+
+public class StatusToBrushConverter : IValueConverter
+{
+    public static readonly StatusToBrushConverter Instance = new();
+
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is bool isSpeaking && isSpeaking) return Brush.Parse("#A6E3A1"); // Green for speaking
+        return Brush.Parse("#A6ADC8"); // Grayish for idle
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotImplementedException();
+}

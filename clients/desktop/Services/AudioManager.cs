@@ -37,7 +37,7 @@ public class AudioManager : IDisposable
             throw new ArgumentException("Key must be 32 bytes", nameof(key));
         
         Console.WriteLine("[AudioManager] Creating AudioSenderWrapper...");
-        _sender = new AudioSenderWrapper(sessionId, key);
+        _sender = new AudioSenderWrapper(sessionId, key.ToList());
         Console.WriteLine("[AudioManager] Creating AudioReceiverWrapper...");
         _receiver = new AudioReceiverWrapper();
         Console.WriteLine("[AudioManager] Wrappers created");
@@ -53,6 +53,22 @@ public class AudioManager : IDisposable
         _sender.SetWebrtcNsEnabled(false);         // WebRTC NS OFF (use RNNoise)
         _sender.SetWebrtcAgcEnabled(true);         // AGC ON (normalize volume)
         Console.WriteLine("[AudioManager] Audio processing configured");
+    }
+
+    /// <summary>
+    /// Update the local sender's encryption key without reinitializing the receiver.
+    /// </summary>
+    public void UpdateSenderKey(byte[] key, ulong epoch)
+    {
+        _sender?.UpdateKey(key.ToList(), epoch);
+    }
+
+    /// <summary>
+    /// Update a remote sender's decryption key.
+    /// </summary>
+    public void UpdateRemoteSenderKey(uint sessionId, byte[] key, ushort epochHint)
+    {
+        _receiver?.UpdateSenderKey(sessionId, key.ToList(), epochHint);
     }
     
     /// <summary>

@@ -12,6 +12,7 @@
     
     <Window.Resources>
         <converters:BoolToColorConverter x:Key="BoolToColorConverter"/>
+        <converters:StatusToBrushConverter x:Key="StatusToBrushConverter"/>
     </Window.Resources>
     
     <Design.DataContext>
@@ -174,11 +175,20 @@
                                                       Margin="40,4,0,0">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate x:DataType="vm:User">
-                                                    <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,6">
-                                                        <Ellipse Width="8" Height="8" Fill="{Binding IsMuted, Converter={StaticResource BoolToColorConverter}}"/>
+                                                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4">
+                                                        <Grid Width="16" Height="16">
+                                                            <Ellipse Fill="#313244"/>
+                                                            <TextBlock Text="🎙️" IsVisible="{Binding IsSpeaking}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            <TextBlock Text="🔇" IsVisible="{Binding IsMuted}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            <TextBlock Text="🚫" IsVisible="{Binding IsDeafened}" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        </Grid>
                                                         <TextBlock Text="{Binding Name}" 
                                                                    FontSize="14"
-                                                                   Foreground="#A6ADC8"/>
+                                                                   Foreground="{Binding IsSpeaking, Converter={StaticResource StatusToBrushConverter}}"/>
+                                                        
+                                                        <StackPanel Orientation="Horizontal" Spacing="4" IsVisible="{Binding IsDeafened}">
+                                                            <TextBlock Text="🎧" FontSize="10" Opacity="0.5"/>
+                                                        </StackPanel>
                                                     </StackPanel>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
@@ -193,20 +203,41 @@
                 <!-- Voice Controls -->
                 <Border Grid.Row="3" Padding="20">
                     <StackPanel Spacing="12">
-                        <ToggleButton IsChecked="{Binding IsMicEnabled}"
-                                      Command="{Binding ToggleMicrophoneCommand}"
-                                      Background="#313244"
-                                      Foreground="#CDD6F4"
-                                      CornerRadius="10"
-                                      Padding="15,12"
-                                      HorizontalAlignment="Stretch"
-                                      HorizontalContentAlignment="Center"
-                                      IsEnabled="{Binding IsAuthenticated}">
-                            <StackPanel Orientation="Horizontal" Spacing="10">
-                                <TextBlock Text="🎤" FontSize="16"/>
-                                <TextBlock Text="Microphone" FontSize="14" FontWeight="SemiBold"/>
-                            </StackPanel>
-                        </ToggleButton>
+                        <Grid ColumnDefinitions="*,*">
+                            <ToggleButton Grid.Column="0"
+                                          IsChecked="{Binding IsMicEnabled}"
+                                          Command="{Binding ToggleMicrophoneAsyncCommand}"
+                                          Background="#313244"
+                                          Foreground="#CDD6F4"
+                                          CornerRadius="10"
+                                          Padding="10,12"
+                                          Margin="0,0,5,0"
+                                          HorizontalAlignment="Stretch"
+                                          HorizontalContentAlignment="Center"
+                                          IsEnabled="{Binding IsAuthenticated}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}" FontSize="14"/>
+                                    <TextBlock Text="Mic" FontSize="13" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </ToggleButton>
+                            
+                            <ToggleButton Grid.Column="1"
+                                          IsChecked="{Binding IsDeafened}"
+                                          Command="{Binding ToggleDeafenAsyncCommand}"
+                                          Background="#313244"
+                                          Foreground="#CDD6F4"
+                                          CornerRadius="10"
+                                          Padding="10,12"
+                                          Margin="5,0,0,0"
+                                          HorizontalAlignment="Stretch"
+                                          HorizontalContentAlignment="Center"
+                                          IsEnabled="{Binding IsAuthenticated}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}" FontSize="14"/>
+                                    <TextBlock Text="Deafen" FontSize="13" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </ToggleButton>
+                        </Grid>
                         
                         <!-- Audio Settings Button -->
                         <Button Command="{Binding ToggleAudioSettingsCommand}"
