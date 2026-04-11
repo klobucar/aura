@@ -423,3 +423,8 @@ mod tests {
         assert_eq!(client.text_epoch.load(Ordering::Relaxed), 500);
     }
 }
+
+#[cfg(test)]
+mod tests_audio;
+#[cfg(test)]
+mod tests_crypto;

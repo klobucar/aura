@@ -24,7 +24,7 @@ pub struct VoiceSession {
     /// Our session ID (assigned by server)
     session_id: u32,
     /// Our identity name
-    identity: String,
+    _identity: String,
 }
 
 /// Voice session errors
@@ -63,7 +63,7 @@ impl VoiceSession {
             receiver,
             group_id: RwLock::new(None),
             session_id,
-            identity: identity.to_string(),
+            _identity: identity.to_string(),
         })
     }
     
@@ -365,7 +365,7 @@ mod tests {
         // Add Bob - epoch advances to 1
         let bob = VoiceSession::new("bob", 2).expect("Create bob");
         let bob_kp = bob.get_key_package().expect("Get bob KP");
-        let (commit1, welcome1) = alice.add_member(&bob_kp).expect("Add bob");
+        let (_commit1, welcome1) = alice.add_member(&bob_kp).expect("Add bob");
         bob.join_channel(&welcome1).expect("Bob join");
         
         // Both at epoch 1
