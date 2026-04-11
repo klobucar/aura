@@ -4,7 +4,7 @@
 //! with ring buffers for thread-safe audio processing.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Stream, StreamConfig, SampleFormat};
+use cpal::{Stream, StreamConfig};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

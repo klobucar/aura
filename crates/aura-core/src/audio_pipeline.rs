@@ -5,11 +5,11 @@
 
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::collections::HashMap;
 
 use crate::opus::{OpusCodec, OpusError};
-use crate::crypto::{DaveCrypto, CryptoError, NONCE_SIZE};
+use crate::crypto::{DaveCrypto, CryptoError};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
 use crate::noise_suppression::NoiseSuppressor;
 #[cfg(feature = "webrtc-audio")]
@@ -186,7 +186,7 @@ impl AudioSender {
     /// Encode and encrypt f32 PCM audio
     /// 
     /// `reference`: Optional playback audio for AEC (only needed if WebRTC AEC is enabled)
-    pub fn process_float_with_reference(&self, pcm: &[f32], reference: Option<&[f32]>) -> Result<Bytes, AudioPipelineError> {
+    pub fn process_float_with_reference(&self, pcm: &[f32], _reference: Option<&[f32]>) -> Result<Bytes, AudioPipelineError> {
         let mut processed = pcm.to_vec();
         
         // 1. WebRTC processing (AEC/NS/AGC)
