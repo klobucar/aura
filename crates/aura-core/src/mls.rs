@@ -172,7 +172,8 @@ impl MlsClient {
     /// Returns the group_id of the joined group
     pub fn process_welcome(&mut self, welcome_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
         // Deserialize the Welcome message using tls_codec
-        let mls_message_in = MlsMessageIn::tls_deserialize_exact(welcome_bytes)
+        let mut welcome_slice = welcome_bytes;
+        let mls_message_in = MlsMessageIn::tls_deserialize(&mut welcome_slice)
             .map_err(|e| MlsError::Serialization(format!("Welcome deserialize error: {:?}", e)))?;
         
         // Extract the body and get the Welcome variant
@@ -216,7 +217,8 @@ impl MlsClient {
             .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
         
         // Deserialize the KeyPackage
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(key_package_bytes)
+        let mut kp_slice = key_package_bytes;
+        let key_package_in = KeyPackageIn::tls_deserialize(&mut kp_slice)
             .map_err(|e| MlsError::Serialization(format!("KeyPackage deserialize error: {:?}", e)))?;
         
         // Validate the KeyPackage
@@ -253,7 +255,8 @@ impl MlsClient {
             .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
         
         // Deserialize the commit message
-        let message_in = MlsMessageIn::tls_deserialize_exact(commit_bytes)
+        let mut commit_slice = commit_bytes;
+        let message_in = MlsMessageIn::tls_deserialize(&mut commit_slice)
             .map_err(|e| MlsError::Serialization(format!("Commit deserialize error: {:?}", e)))?;
         
         // Process the incoming message
