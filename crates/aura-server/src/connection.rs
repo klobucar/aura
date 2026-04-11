@@ -8,11 +8,14 @@ use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_acme::{AcmeConfig, caches::DirCache};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, info, warn};
+use tokio_stream::StreamExt;
+use tracing::{debug, error, info, warn};
 
 // Protocol message types
 const MSG_CHALLENGE_REQUEST: u8 = 0x01;
@@ -43,10 +46,18 @@ pub struct QuicServer {
 }
 
 impl QuicServer {
-    /// Create a new QUIC server with self-signed certificate.
+    /// Create a new QUIC server based on the provided configuration.
     pub fn new(bind_addr: SocketAddr, state: Arc<ServerState>) -> Result<Self> {
-        info!("Generating self-signed TLS certificate...");
-        let server_config = Self::generate_server_config()?;
+        let server_config = if let Some(domain) = &state.config.server.acme_domain {
+            info!("Configuring automated TLS via ACME (Let's Encrypt) for {}...", domain);
+            Self::configure_acme(domain, &state)?
+        } else if let (Some(cert_path), Some(key_path)) = (&state.config.server.cert_path, &state.config.server.key_path) {
+            info!("Loading custom TLS certificates from {:?}...", cert_path);
+            Self::configure_manual_tls(cert_path, key_path)?
+        } else {
+            info!("No TLS certificates provided. Generating self-signed fallback...");
+            Self::generate_self_signed_config()?
+        };
         
         info!("Creating QUIC endpoint on {}...", bind_addr);
         let endpoint = Endpoint::server(server_config, bind_addr)
@@ -56,36 +67,120 @@ impl QuicServer {
             .map_err(|e| anyhow!("Failed to get local address: {}", e))?;
         
         info!("✓ QUIC server bound to UDP socket: {}", local_addr);
-        info!("✓ TLS certificate generated (self-signed)");
         info!("✓ ALPN protocol: 'aura-dave'");
         
         Ok(Self { endpoint, state })
     }
     
-    /// Generate self-signed TLS certificate for QUIC.
-    fn generate_server_config() -> Result<ServerConfig> {
-        // Generate self-signed certificate using rcgen 0.13
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "aura.local".into()])?;
+    /// Configure ACME (Let's Encrypt) for automated certificate management.
+    fn configure_acme(domain: &str, state: &Arc<ServerState>) -> Result<ServerConfig> {
+        let contact = state.config.server.acme_contact.clone()
+            .unwrap_or_else(|| "admin@aura.local".to_string());
+        let cache_path = state.config.server.acme_cache_path.clone()
+            .unwrap_or_else(|| Path::new("data/acme").to_path_buf());
+            
+        // Ensure cache directory exists
+        std::fs::create_dir_all(&cache_path)?;
         
+        // Define ALPN for Aura
+        let alpn = vec![b"aura-dave".to_vec()];
+        
+        // Build ACME config
+        let mut acme_state = AcmeConfig::new([domain])
+            .contact([format!("mailto:{}", contact)])
+            .cache_with_boxed_err(DirCache::new(cache_path))
+            .state();
+            
+        let resolver = acme_state.resolver();
+        let bind_addr: SocketAddr = state.config.server.bind_address.parse()
+            .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
+        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), 443);
+        
+        // Drive the ACME state via a background TCP listener for ALPN challenges
+        // Required because QUIC (UDP) cannot serve the TLS-ALPN-01 challenge directly.
+        tokio::spawn(async move {
+            info!("[ACME] Driving ACME state via TCP/443 (for ALPN challenges)...");
+            let listener = match tokio::net::TcpListener::bind(tcp_bind_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("[ACME] Failed to bind TCP listener for ALPN: {}", e);
+                    return;
+                }
+            };
+            
+            let mut incoming = acme_state.tokio_incoming(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                vec![b"aura-dave".to_vec()]
+            );
+            
+            while let Some(res) = incoming.next().await {
+                if let Err(e) = res {
+                    debug!("[ACME] ALPN challenge or TLS error: {:?}", e);
+                }
+            }
+        });
+        
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+            
+        server_crypto.alpn_protocols = alpn;
+        
+        let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+            .map_err(|e| anyhow!("Failed to convert rustls config for ACME: {}", e))?;
+            
+        Ok(Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))?)
+    }
+    
+    /// Configure manual TLS using certificates from the filesystem.
+    fn configure_manual_tls(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
+        let cert_file = std::fs::File::open(cert_path)
+            .map_err(|e| anyhow!("Failed to open certificate file: {}", e))?;
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let cert_chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<std::io::Result<Vec<_>>>()?;
+            
+        let key_file = std::fs::File::open(key_path)
+            .map_err(|e| anyhow!("Failed to open private key file: {}", e))?;
+        let mut key_reader = std::io::BufReader::new(key_file);
+        let key = rustls_pemfile::private_key(&mut key_reader)?
+            .ok_or_else(|| anyhow!("No private key found in {:?}", key_path))?;
+            
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)?;
+            
+        server_crypto.alpn_protocols = vec![b"aura-dave".to_vec()];
+        
+        let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
+            .map_err(|e| anyhow!("Failed to convert manual TLS config: {}", e))?;
+            
+        Ok(Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))?)
+    }
+    
+    /// Generate self-signed TLS certificate for QUIC.
+    fn generate_self_signed_config() -> Result<ServerConfig> {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into(), "aura.local".into()])?;
         let cert_der = cert.cert.der().to_vec();
         let key_der = cert.signing_key.serialize_der();
         
         let cert_chain = vec![CertificateDer::from(cert_der)];
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into();
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
 
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?;
         
-        
         server_crypto.alpn_protocols = vec![b"aura-dave".to_vec()];
         
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .map_err(|e| anyhow!("Failed to convert rustls config: {}", e))?;
+            .map_err(|e| anyhow!("Failed to convert self-signed config: {}", e))?;
             
-        let mut server_config = ServerConfig::with_crypto(Arc::new(quinn_crypto));
-        
-        // Configure transport for low-latency voice
+        Ok(Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))?)
+    }
+    
+    /// Apply common transport settings for low-latency voice.
+    fn apply_transport_config(mut server_config: ServerConfig) -> Result<ServerConfig> {
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?));
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
