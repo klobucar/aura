@@ -17,6 +17,7 @@ struct LoginView: View {
     @State private var serverPassword: String = ""
     @State private var isConnecting = false
     @State private var errorMessage: String?
+    @State private var logoRingScale: CGFloat = 1.0
     
     // Management views
     @State private var showingServerManagement = false
@@ -30,35 +31,46 @@ struct LoginView: View {
         VStack(spacing: 32) {
             // Logo / Header
             VStack(spacing: 12) {
-                Image(systemName: "wave.3.right.circle.fill")
-                    .font(.system(size: 80))
-                    .foregroundStyle(AuraTheme.Gradients.lushIndigo)
-                    .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+                ZStack {
+                    // Animated ring
+                    Circle()
+                        .stroke(AuraTheme.Gradients.primary, lineWidth: 2)
+                        .frame(width: 100, height: 100)
+                        .opacity(0.3)
+                        .scaleEffect(logoRingScale)
+                        .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true), value: logoRingScale)
+                    
+                    Image(systemName: "wave.3.right.circle.fill")
+                        .font(.system(size: 70))
+                        .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                        .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+                }
                 
                 VStack(spacing: 4) {
                     Text("Aura")
                         .font(.system(size: 32, weight: .bold))
                     Text("Zero-Trust Voice")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.top, 48)
+            .onAppear { logoRingScale = 1.12 }
             
             VStack(alignment: .leading, spacing: 8) {
                 Text("YOUR IDENTITY")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .kerning(1)
                 
                 HStack(spacing: 10) {
                     Image(systemName: "key.fill")
                         .font(.system(size: 14))
-                        .foregroundColor(AuraTheme.Colors.primary)
+                        .foregroundStyle(AuraTheme.Colors.primary)
                     
                     Text(identity.publicKeyHex.isEmpty ? "Generating..." : "\(identity.publicKeyHex.prefix(16))...")
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundColor(.primary)
+                        .foregroundStyle(.primary)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -71,7 +83,7 @@ struct LoginView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("SERVER ADDRESS")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .kerning(1)
                     
                     HStack(spacing: 12) {
@@ -95,7 +107,7 @@ struct LoginView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("DISPLAY NAME")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .kerning(1)
                     
                     TextField("How others see you", text: $displayName)
@@ -109,7 +121,7 @@ struct LoginView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("SERVER PASSWORD")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .kerning(1)
                     
                     SecureField("Optional", text: $serverPassword)
@@ -134,7 +146,7 @@ struct LoginView: View {
                     Text(isConnecting ? "Connecting..." : "Enter Aura")
                         .font(.system(size: 16, weight: .bold))
                 }
-                .foregroundColor(.white)
+                .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 16)
                 .background(
@@ -154,13 +166,13 @@ struct LoginView: View {
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
-                    .foregroundColor(.red)
+                    .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
             } else if !client.connectionStatus.isEmpty && client.connectionStatus != "Disconnected" {
                 Text(client.connectionStatus)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             
             // Management buttons
@@ -183,7 +195,7 @@ struct LoginView: View {
             
         }
         .padding(.bottom, 48)
-        .auraGlass(material: .hudWindow)
+        .liquidGlass()
         .sheet(isPresented: $showingServerManagement) {
             ServerListView()
         }

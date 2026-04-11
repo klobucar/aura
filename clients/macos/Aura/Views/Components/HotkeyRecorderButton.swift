@@ -11,21 +11,23 @@ struct HotkeyRecorderButton: View {
             Button(action: toggleRecording) {
                 HStack {
                     Image(systemName: isRecording ? "record.circle.fill" : "keyboard")
-                        .foregroundColor(isRecording ? .red : .blue)
+                        .accessibilityLabel(isRecording ? "Stop Recording" : "Record Hotkey")
+                        .foregroundStyle(isRecording ? .red : .blue)
                     Text(isRecording ? "Press any key..." : (hotkey?.displayString ?? "Click to set"))
                         .font(.system(.body, design: .monospaced))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(isRecording ? Color.red.opacity(0.1) : Color.blue.opacity(0.1))
-                .cornerRadius(6)
+                .clipShape(.rect(cornerRadius: 6))
             }
             .buttonStyle(.plain)
             
             if hotkey != nil {
                 Button(action: clearHotkey) {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+                        .accessibilityLabel("Close")
+                        .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
             }

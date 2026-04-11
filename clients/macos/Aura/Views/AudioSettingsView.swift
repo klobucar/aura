@@ -17,7 +17,7 @@ struct AudioSettingsView: View {
                 
                 Text("Neural network-based background noise removal")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             
             Section {
@@ -42,13 +42,13 @@ struct AudioSettingsView: View {
                         Text("0ms is only for LAN/localhost. Internet connections will sound choppy due to packet reordering.")
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
+                            .foregroundStyle(.orange)
                     }
                     .font(.caption)
                 } else {
                     Text("Lower = less delay, higher = more stable on poor connections")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
             } header: {
                 Text("Latency")

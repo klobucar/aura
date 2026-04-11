@@ -26,13 +26,14 @@ struct SettingsView: View {
                         .font(.system(size: 24, weight: .bold))
                     Text("Customize your Aura experience")
                         .font(.subheadline)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(action: { dismiss() }) {
                     Image(systemName: "xmark")
+                        .accessibilityLabel("Close")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                         .padding(8)
                         .background(Circle().fill(Color.white.opacity(0.1)))
                 }
@@ -101,7 +102,7 @@ struct SettingsView: View {
                                         .font(.system(size: 14, weight: .medium))
                                     Text("Neural network-based background noise removal")
                                         .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .toggleStyle(.switch)
@@ -121,7 +122,7 @@ struct SettingsView: View {
                                         .font(.system(size: 14, weight: .medium))
                                     Text("Standard WebRTC NS (Lighter than RNNoise)")
                                         .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .toggleStyle(.switch)
@@ -143,7 +144,7 @@ struct SettingsView: View {
                                         .font(.system(size: 14, weight: .medium))
                                     Text("Removes echo from speakers/feedback")
                                         .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .toggleStyle(.switch)
@@ -160,7 +161,7 @@ struct SettingsView: View {
                                         .font(.system(size: 14, weight: .medium))
                                     Text("Normalize microphone volume automatically")
                                         .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             .toggleStyle(.switch)
@@ -177,11 +178,11 @@ struct SettingsView: View {
                                 HStack {
                                     Text("JITTER BUFFER")
                                         .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                     Spacer()
                                     Text("\(jitterBufferMs)ms")
                                         .font(.system(size: 11, weight: .bold))
-                                        .foregroundColor(AuraTheme.Colors.primary)
+                                        .foregroundStyle(AuraTheme.Colors.primary)
                                 }
                                 
                                 Picker("", selection: $jitterBufferMs) {
@@ -204,17 +205,17 @@ struct SettingsView: View {
                                 if jitterBufferMs == 0 {
                                     HStack(spacing: 6) {
                                         Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundColor(.orange)
+                                            .foregroundStyle(.orange)
                                             .font(.system(size: 10))
                                         Text("0ms is only for LAN/localhost")
                                             .font(.system(size: 11))
-                                            .foregroundColor(.secondary)
+                                            .foregroundStyle(.secondary)
                                     }
                                     .padding(.top, 4)
                                 } else {
                                     Text("Lower = less delay, higher = more stable")
                                         .font(.system(size: 11))
-                                        .foregroundColor(.secondary)
+                                        .foregroundStyle(.secondary)
                                         .padding(.top, 4)
                                 }
                             }
@@ -240,8 +241,8 @@ struct SettingsView: View {
                 .padding(.vertical, 10)
                 .padding(.horizontal, 28)
                 .background(AuraTheme.Gradients.lushIndigo)
-                .cornerRadius(12)
-                .foregroundColor(.white)
+                .clipShape(.rect(cornerRadius: 12))
+                .foregroundStyle(.white)
                 .font(.system(size: 14, weight: .bold))
                 .modifier(AuraTheme.Shadows.soft())
                 .auraFluidHover()
@@ -258,11 +259,11 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
                     .font(.system(size: 12, weight: .bold))
                 Text(title.uppercased())
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                     .kerning(1)
             }
             
@@ -271,11 +272,11 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
         .background(Color.white.opacity(0.03))
-        .cornerRadius(AuraTheme.Layout.glassCornerRadius)
-        .overlay(
+        .clipShape(.rect(cornerRadius: AuraTheme.Layout.glassCornerRadius))
+        .overlay {
             RoundedRectangle(cornerRadius: AuraTheme.Layout.glassCornerRadius)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
-        )
+        }
     }
     
     private func devicePicker(title: String, subtitle: String, selection: Binding<AudioDeviceID?>, devices: [AudioDeviceManager.AudioDevice]) -> some View {
@@ -284,7 +285,7 @@ struct SettingsView: View {
                 .font(.system(size: 14, weight: .medium))
             Text(subtitle)
                 .font(.system(size: 12))
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
             
             Picker("", selection: selection) {
                 Text("System Default").tag(nil as AudioDeviceID?)
@@ -303,12 +304,12 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(theme.displayName)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(isSelected ? .primary : .secondary)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
             }
             Spacer()
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
                     .font(.title3)
             } else {
                 Circle()
@@ -318,7 +319,7 @@ struct SettingsView: View {
         }
         .padding(10)
         .background(isSelected ? AuraTheme.Colors.primary.opacity(0.1) : Color.clear)
-        .cornerRadius(8)
+        .clipShape(.rect(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             withAnimation(.spring()) {
@@ -335,15 +336,15 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(mode.displayName)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(isSelected ? .primary : .secondary)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
                 Text(transmissionModeDescription(mode))
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
                     .font(.title2)
             } else {
                 Circle()
@@ -353,7 +354,7 @@ struct SettingsView: View {
         }
         .padding(10)
         .background(isSelected ? AuraTheme.Colors.primary.opacity(0.1) : Color.clear)
-        .cornerRadius(8)
+        .clipShape(.rect(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture {
             withAnimation(.spring()) {
@@ -367,14 +368,14 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("PTT HOTKEY")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+                .foregroundStyle(.secondary)
             
             HotkeyRecorderButton(hotkey: $settings.pttHotkey)
             
             if !hotkeyManager.hasAccessibilityPermission {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.orange)
                     Text("Accessibility Permission Required")
                         .font(.system(size: 11, weight: .semibold))
                     Spacer()
@@ -386,12 +387,12 @@ struct SettingsView: View {
                 }
                 .padding(8)
                 .background(Color.orange.opacity(0.1))
-                .cornerRadius(6)
+                .clipShape(.rect(cornerRadius: 6))
             }
         }
         .padding(12)
         .background(Color.black.opacity(0.1))
-        .cornerRadius(10)
+        .clipShape(.rect(cornerRadius: 10))
     }
     
     private var vadSettings: some View {
@@ -399,11 +400,11 @@ struct SettingsView: View {
             HStack {
                 Text("VAD SENSITIVITY")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Text("\(Int(settings.vadSensitivity * 100))%")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
             }
             
             Slider(value: $settings.vadSensitivity, in: 0.0...1.0)
@@ -411,7 +412,7 @@ struct SettingsView: View {
         }
         .padding(12)
         .background(Color.black.opacity(0.1))
-        .cornerRadius(10)
+        .clipShape(.rect(cornerRadius: 10))
     }
     
     private var ttsSettings: some View {
@@ -422,7 +423,7 @@ struct SettingsView: View {
                         .font(.system(size: 14, weight: .medium))
                     Text("Hear messages spoken aloud")
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 }
             }
             .toggleStyle(.switch)
@@ -455,9 +456,9 @@ struct SettingsView: View {
                 Spacer()
                 Text("\(Int(value.wrappedValue * 100))%")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(AuraTheme.Colors.primary)
+                    .foregroundStyle(AuraTheme.Colors.primary)
             }
-            .foregroundColor(.secondary)
+            .foregroundStyle(.secondary)
             
             Slider(value: value, in: 0.0...1.0)
                 .accentColor(AuraTheme.Colors.primary)
