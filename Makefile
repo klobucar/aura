@@ -28,7 +28,7 @@ generate-swift: build-core
 	@echo "🍎 Generating Swift bindings..."
 	@mkdir -p $(SWIFT_OUT_DIR)
 	cargo run -p aura-core --bin uniffi-bindgen generate \
-		$(UDL_FILE) \
+		--library $(RUST_TARGET_DIR)/libaura_core.dylib \
 		--language swift \
 		--out-dir $(SWIFT_OUT_DIR)
 	@echo "✅ Swift bindings: $(SWIFT_OUT_DIR)/aura_core.swift"
@@ -38,11 +38,9 @@ generate-swift: build-core
 generate-csharp: build-core
 	@echo "🪟 Generating C# bindings..."
 	@mkdir -p $(CSHARP_OUT_DIR)
-	cargo run -p aura-core --bin uniffi-bindgen generate \
-		$(UDL_FILE) \
-		--language csharp \
+	uniffi-bindgen-cs --library $(RUST_TARGET_DIR)/libaura_core.dylib \
 		--out-dir $(CSHARP_OUT_DIR)
-	@echo "✅ C# bindings: $(CSHARP_OUT_DIR)/AuraCore.cs"
+	@echo "✅ C# bindings: $(CSHARP_OUT_DIR)/aura_core.cs"
 	
 	# Copy the dynamic library
 	@cp $(RUST_TARGET_DIR)/libaura_core.dylib $(CSHARP_OUT_DIR)/ 2>/dev/null || \

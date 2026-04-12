@@ -5,6 +5,7 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Security.Authentication;
 using Aura.Desktop.Services;
 using Aura.V1Alpha1;
 using Avalonia.Threading;
@@ -144,17 +145,8 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ConnectionStatus = $"Error loading identity: {ex.Message}";
         }
         
-        // Initialize with default channel
-        Channels = new ObservableCollection<Channel>
-        {
-            new Channel 
-            { 
-                Id = "1", 
-                Name = "General", 
-                IsExpanded = true,
-                Users = new ObservableCollection<User>()
-            }
-        };
+        // Start with empty channels - server will sync them on connect
+        Channels = new ObservableCollection<Channel>();
     }
     
     // ==========================================================================
@@ -296,7 +288,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             SelectedChannel = channel;
             channel.IsExpanded = true;
             
-            await _client.JoinChannelAsync(uint.Parse(channel.Id));
+            await _client.JoinChannelAsync(channel.Id);
             
             Messages.Add(new ChatMessage 
             { 
@@ -395,7 +387,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         try 
         {
-            uint channelId = uint.Parse(SelectedChannel.Id);
+            string channelId = SelectedChannel.Id;
             string msgId = Guid.NewGuid().ToString();
 
             // Optimistic Add
@@ -415,7 +407,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private void HandleTextMessage(string msgId, uint senderId, uint channelId, string content, string? replyToId)
+    private void HandleTextMessage(string msgId, uint senderId, string channelId, string content, string? replyToId)
     {
         // Don't show own messages again
         if (_client != null && senderId == _client.UserId) return;
@@ -426,7 +418,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         string senderName = $"User {senderId}";
         
         // Try to find name in channel
-        var channel = Channels.FirstOrDefault(c => c.Id == channelId.ToString());
+        var channel = Channels.FirstOrDefault(c => c.Id == channelId);
         if (channel != null)
         {
             var user = channel.Users.FirstOrDefault(u => u.Id == senderId);
@@ -462,7 +454,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _identity?.Dispose();
         GC.SuppressFinalize(this);
     }
-    private void HandleUserJoined(uint channelId, uint sessionId, string name)
+    private void HandleUserJoined(string channelId, uint sessionId, string name)
     {
         var channel = GetOrCreateChannel(channelId);
         
@@ -478,9 +470,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         Messages.Add(new ChatMessage { Content = $"{name} joined {channel.Name}", System = true });
     }
     
-    private void HandleUserLeft(uint channelId, uint sessionId)
+    private void HandleUserLeft(string channelId, uint sessionId)
     {
-        var channel = Channels.FirstOrDefault(c => c.Id == channelId.ToString());
+        var channel = Channels.FirstOrDefault(c => c.Id == channelId);
         if (channel == null) return;
         
         var user = channel.Users.FirstOrDefault(u => u.Id == sessionId);
@@ -507,7 +499,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             var channel = new Channel 
             { 
-                Id = chanInfo.ChannelId.ToString(), 
+                Id = chanInfo.ChannelId, 
                 Name = chanInfo.Name,
                 IsExpanded = true
             };
@@ -550,9 +542,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
     
-    private Channel GetOrCreateChannel(uint channelId)
+    private Channel GetOrCreateChannel(string channelId)
     {
-        var idStr = channelId.ToString();
+        var idStr = channelId;
         var channel = Channels.FirstOrDefault(c => c.Id == idStr);
         if (channel == null)
         {
