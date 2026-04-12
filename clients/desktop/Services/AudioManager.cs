@@ -60,8 +60,7 @@ public class AudioManager : IDisposable
     /// </summary>
     public void UpdateSenderKey(byte[] key, ulong epoch)
     {
-        // Note: UpdateKey might have been renamed or removed in recent UniFFI bindings. 
-        // _sender?.UpdateKey(key.ToList(), epoch);
+        _sender?.UpdateKey(key, epoch);
     }
 
     /// <summary>

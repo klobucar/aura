@@ -39,18 +39,18 @@ public class MlsProtocolTests
         var wrapper = new MlsWrapper("founder-user");
         
         // Create voice and text groups for channel 1
-        wrapper.CreateGroup(channelId: 1, isVoice: true);
-        wrapper.CreateGroup(channelId: 1, isVoice: false);
+        wrapper.CreateGroup(channelId: "1", isVoice: true);
+        wrapper.CreateGroup(channelId: "1", isVoice: false);
         
         // Should be able to export audio key
-        var audioKey = wrapper.ExportAudioKey(channelId: 1, senderSessionId: 1);
+        var audioKey = wrapper.ExportAudioKey(channelId: "1", senderSessionId: 1);
         Assert.Equal(32, audioKey.Length); // ChaCha20 key size
         
         // Should be member of group
-        Assert.True(wrapper.IsMember(channelId: 1, isVoice: true));
+        Assert.True(wrapper.IsMember(channelId: "1", isVoice: true));
         
         // Epoch should be 0 for new group
-        var epoch = wrapper.CurrentEpoch(channelId: 1, isVoice: true);
+        var epoch = wrapper.CurrentEpoch(channelId: "1", isVoice: true);
         Assert.Equal(0UL, epoch);
     }
     
@@ -62,13 +62,13 @@ public class MlsProtocolTests
         var joiner = new MlsWrapper("bob");
         
         // 1. Founder creates group
-        founder.CreateGroup(channelId: 1, isVoice: true);
+        founder.CreateGroup(channelId: "1", isVoice: true);
         
         // 2. Joiner generates key package
         var keyPackage = joiner.CreateKeyPackage();
         
         // 3. Founder adds joiner, gets commit + welcome
-        var result = founder.AddMember(channelId: 1, isVoice: true, keyPackage);
+        var result = founder.AddMember(channelId: "1", isVoice: true, keyPackage);
         Assert.True(result.Commit.Length > 0);
         Assert.True(result.Welcome.Length > 0);
         
@@ -80,12 +80,12 @@ public class MlsProtocolTests
         Assert.True(joiner.IsMember(channelId: 1, isVoice: true));
         
         // 6. Founder epoch should have advanced
-        var founderEpoch = founder.CurrentEpoch(channelId: 1, isVoice: true);
+        var founderEpoch = founder.CurrentEpoch(channelId: "1", isVoice: true);
         Assert.Equal(1UL, founderEpoch);
         
         // 7. Both should be able to derive the same group key
-        var founderKey = founder.ExportAudioKey(channelId: 1, senderSessionId: 1);
-        var joinerKey = joiner.ExportAudioKey(channelId: 1, senderSessionId: 1);
+        var founderKey = founder.ExportAudioKey(channelId: "1", senderSessionId: 1);
+        var joinerKey = joiner.ExportAudioKey(channelId: "1", senderSessionId: 1);
         Assert.Equal(founderKey, joinerKey);
         
         Console.WriteLine("[Test] Two-party MLS group established successfully");
@@ -100,34 +100,34 @@ public class MlsProtocolTests
         var charlie = new MlsWrapper("charlie");
         
         // 1. Alice creates group
-        alice.CreateGroup(channelId: 1, isVoice: true);
+        alice.CreateGroup(channelId: "1", isVoice: true);
         
         // 2. Bob joins
         var bobKp = bob.CreateKeyPackage();
-        var addBob = alice.AddMember(channelId: 1, isVoice: true, bobKp);
+        var addBob = alice.AddMember(channelId: "1", isVoice: true, bobKp);
         bob.JoinGroup(addBob.Welcome);
         
         // 3. Charlie joins - Bob processes Alice's commit, then Alice adds Charlie
-        bob.ProcessCommit(channelId: 1, isVoice: true, addBob.Commit);
+        bob.ProcessCommit(channelId: "1", isVoice: true, addBob.Commit);
         
         var charlieKp = charlie.CreateKeyPackage();
-        var addCharlie = alice.AddMember(channelId: 1, isVoice: true, charlieKp);
+        var addCharlie = alice.AddMember(channelId: "1", isVoice: true, charlieKp);
         charlie.JoinGroup(addCharlie.Welcome);
-        bob.ProcessCommit(channelId: 1, isVoice: true, addCharlie.Commit);
+        bob.ProcessCommit(channelId: "1", isVoice: true, addCharlie.Commit);
         
         // 4. All three should be at the same epoch
-        var aliceEpoch = alice.CurrentEpoch(channelId: 1, isVoice: true);
-        var bobEpoch = bob.CurrentEpoch(channelId: 1, isVoice: true);
-        var charlieEpoch = charlie.CurrentEpoch(channelId: 1, isVoice: true);
+        var aliceEpoch = alice.CurrentEpoch(channelId: "1", isVoice: true);
+        var bobEpoch = bob.CurrentEpoch(channelId: "1", isVoice: true);
+        var charlieEpoch = charlie.CurrentEpoch(channelId: "1", isVoice: true);
         
         Assert.Equal(2UL, aliceEpoch);
         Assert.Equal(2UL, bobEpoch);
         Assert.Equal(2UL, charlieEpoch);
         
         // 5. All three should derive consistent keys
-        var aliceKey = alice.ExportAudioKey(channelId: 1, senderSessionId: 42);
-        var bobKey = bob.ExportAudioKey(channelId: 1, senderSessionId: 42);
-        var charlieKey = charlie.ExportAudioKey(channelId: 1, senderSessionId: 42);
+        var aliceKey = alice.ExportAudioKey(channelId: "1", senderSessionId: 42);
+        var bobKey = bob.ExportAudioKey(channelId: "1", senderSessionId: 42);
+        var charlieKey = charlie.ExportAudioKey(channelId: "1", senderSessionId: 42);
         
         Assert.Equal(aliceKey, bobKey);
         Assert.Equal(bobKey, charlieKey);
@@ -142,16 +142,16 @@ public class MlsProtocolTests
     {
         // Test that different sender IDs produce different keys
         var wrapper = new MlsWrapper("test-user");
-        wrapper.CreateGroup(channelId: 1, isVoice: true);
+        wrapper.CreateGroup(channelId: "1", isVoice: true);
         
-        var key1 = wrapper.ExportAudioKey(channelId: 1, senderSessionId: 1);
-        var key2 = wrapper.ExportAudioKey(channelId: 1, senderSessionId: 2);
+        var key1 = wrapper.ExportAudioKey(channelId: "1", senderSessionId: 1);
+        var key2 = wrapper.ExportAudioKey(channelId: "1", senderSessionId: 2);
         
         // Keys for different senders should be different
         Assert.NotEqual(key1, key2);
         
         // Same sender should produce same key
-        var key1Again = wrapper.ExportAudioKey(channelId: 1, senderSessionId: 1);
+        var key1Again = wrapper.ExportAudioKey(channelId: "1", senderSessionId: 1);
         Assert.Equal(key1, key1Again);
     }
     
@@ -161,16 +161,16 @@ public class MlsProtocolTests
         // Test that voice and text groups are independent
         var wrapper = new MlsWrapper("test-user");
         
-        wrapper.CreateGroup(channelId: 1, isVoice: true);
-        wrapper.CreateGroup(channelId: 1, isVoice: false);
+        wrapper.CreateGroup(channelId: "1", isVoice: true);
+        wrapper.CreateGroup(channelId: "1", isVoice: false);
         
         // Both voice and text groups should exist for same channel
-        Assert.True(wrapper.IsMember(channelId: 1, isVoice: true));
-        Assert.True(wrapper.IsMember(channelId: 1, isVoice: false));
+        Assert.True(wrapper.IsMember(channelId: "1", isVoice: true));
+        Assert.True(wrapper.IsMember(channelId: "1", isVoice: false));
         
         // Keys should be different between voice and text
-        var voiceKey = wrapper.ExportAudioKey(channelId: 1, senderSessionId: 1);
-        var textKey = wrapper.ExportTextKey(channelId: 1, senderSessionId: 1);
+        var voiceKey = wrapper.ExportAudioKey(channelId: "1", senderSessionId: 1);
+        var textKey = wrapper.ExportTextKey(channelId: "1", senderSessionId: 1);
         
         Assert.NotEqual(voiceKey, textKey);
     }
@@ -181,17 +181,18 @@ public class MlsProtocolTests
     public void TestMlsJoinMessageFormat()
     {
         // Test the binary format of MLS_JOIN message
-        uint channelId = 42;
+        string channelId = "42";
         bool isVoice = true;
         byte[] keyPackage = new byte[] { 0x01, 0x02, 0x03, 0x04 };
         
-        // Build message manually
+        // Build message manually (Simplified string ID test)
         using var ms = new MemoryStream();
         ms.WriteByte(0x50); // MSG_MLS_JOIN
-        var buf = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
-        ms.Write(buf);
+        var idBytes = System.Text.Encoding.UTF8.GetBytes(channelId);
+        ms.WriteByte((byte)idBytes.Length);
+        ms.Write(idBytes);
         ms.WriteByte((byte)(isVoice ? 1 : 0));
+        var buf = new byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)keyPackage.Length);
         ms.Write(buf);
         ms.Write(keyPackage);
@@ -203,10 +204,11 @@ public class MlsProtocolTests
         Assert.Equal(1 + 4 + 1 + 4 + keyPackage.Length, msg.Length); // 14 bytes total
         
         // Parse it back
-        var parsedChannelId = BinaryPrimitives.ReadUInt32LittleEndian(msg.AsSpan(1, 4));
+        var idLen = msg[1];
+        var parsedChannelId = System.Text.Encoding.UTF8.GetString(msg, 2, idLen);
         Assert.Equal(channelId, parsedChannelId);
         
-        var parsedIsVoice = msg[5] != 0;
+        var parsedIsVoice = msg[2 + idLen] != 0;
         Assert.Equal(isVoice, parsedIsVoice);
     }
     
@@ -214,7 +216,7 @@ public class MlsProtocolTests
     public void TestMlsCommitWelcomeMessageFormat()
     {
         // Test the binary format of MLS_COMMIT_WELCOME message
-        uint channelId = 1;
+        string channelId = "1";
         bool isVoice = true;
         uint newMemberSessionId = 42;
         byte[] commit = new byte[] { 0x11, 0x22, 0x33 };
@@ -223,10 +225,11 @@ public class MlsProtocolTests
         // Build message
         using var ms = new MemoryStream();
         ms.WriteByte(0x51); // MSG_MLS_COMMIT_WELCOME
-        var buf = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(buf, channelId);
-        ms.Write(buf);
+        var idBytes = System.Text.Encoding.UTF8.GetBytes(channelId);
+        ms.WriteByte((byte)idBytes.Length);
+        ms.Write(idBytes);
         ms.WriteByte((byte)(isVoice ? 1 : 0));
+        var buf = new byte[4];
         BinaryPrimitives.WriteUInt32LittleEndian(buf, newMemberSessionId);
         ms.Write(buf);
         BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)commit.Length);
@@ -252,8 +255,8 @@ public class MlsProtocolTests
 public class MlsWrapper
 {
     private readonly string _identity;
-    private readonly Dictionary<(uint, bool), byte[]> _groups = new();
-    private readonly Dictionary<(uint, bool), ulong> _epochs = new();
+    private readonly Dictionary<(string, bool), byte[]> _groups = new();
+    private readonly Dictionary<(string, bool), ulong> _epochs = new();
     
     public MlsWrapper(string identityName)
     {
@@ -268,7 +271,7 @@ public class MlsWrapper
         return kp;
     }
     
-    public void CreateGroup(uint channelId, bool isVoice)
+    public void CreateGroup(string channelId, bool isVoice)
     {
         var key = (channelId, isVoice);
         _groups[key] = new byte[32];
@@ -276,7 +279,7 @@ public class MlsWrapper
         _epochs[key] = 0;
     }
     
-    public MlsCommitWelcome AddMember(uint channelId, bool isVoice, byte[] keyPackage)
+    public MlsCommitWelcome AddMember(string channelId, bool isVoice, byte[] keyPackage)
     {
         var key = (channelId, isVoice);
         _epochs[key]++;
@@ -292,37 +295,37 @@ public class MlsWrapper
         // Mock: just accept
     }
     
-    public ulong ProcessCommit(uint channelId, bool isVoice, byte[] commitBytes)
+    public ulong ProcessCommit(string channelId, bool isVoice, byte[] commitBytes)
     {
         var key = (channelId, isVoice);
         _epochs[key]++;
         return _epochs[key];
     }
     
-    public bool IsMember(uint channelId, bool isVoice)
+    public bool IsMember(string channelId, bool isVoice)
     {
         return _groups.ContainsKey((channelId, isVoice));
     }
     
-    public ulong CurrentEpoch(uint channelId, bool isVoice)
+    public ulong CurrentEpoch(string channelId, bool isVoice)
     {
         return _epochs.GetValueOrDefault((channelId, isVoice), 0);
     }
     
-    public byte[] ExportAudioKey(uint channelId, uint senderSessionId)
+    public byte[] ExportAudioKey(string channelId, uint senderSessionId)
     {
         var key = new byte[32];
         // Deterministic based on channel + sender
-        var seed = (int)(channelId * 1000 + senderSessionId);
+        var seed = channelId.GetHashCode() + (int)senderSessionId;
         new Random(seed).NextBytes(key);
         return key;
     }
     
-    public byte[] ExportTextKey(uint channelId, uint senderSessionId)
+    public byte[] ExportTextKey(string channelId, uint senderSessionId)
     {
         var key = new byte[32];
         // Different seed for text keys
-        var seed = (int)(channelId * 1000 + senderSessionId + 500000);
+        var seed = channelId.GetHashCode() + (int)senderSessionId + 500000;
         new Random(seed).NextBytes(key);
         return key;
     }

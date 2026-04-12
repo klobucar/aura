@@ -763,27 +763,33 @@ impl ServerState {
 
         let mut group = group_lock.write().await;
 
-        if group.founder_session_id.is_none() {
-            // First joiner becomes founder - tell them to create the group
+        // Check if founder is set AND active
+        let founder_is_active = if let Some(founder_id) = group.founder_session_id {
+            self.sessions.contains_key(&founder_id)
+        } else {
+            false
+        };
+
+        if !founder_is_active {
+            // No active founder - this client takes over
             group.founder_session_id = Some(session_id);
             group.members.insert(session_id);
-            info!("[MLS] Session {} is founder of voice group {}", session_id, channel_id);
+            group.pending_joins.clear(); // Clear any stale joins from previous dead founder
+            info!("[MLS] Session {} is the new founder of voice group {}", session_id, channel_id);
 
             let _ = sender.send(ServiceMessage::MlsCreateGroup {
                 channel_id: channel_id.clone(),
                 is_voice: true,
             });
         } else {
-            // Not the first - queue key package and notify founder
+            // Active founder exists - queue key package and notify them
+            let founder_id = group.founder_session_id.unwrap();
             let pending = PendingMlsJoin {
                 joiner_session_id: session_id,
                 joiner_uuid: user_uuid.clone(),
                 key_package: key_package.clone(),
             };
             group.pending_joins.push(pending);
-
-            let founder_id = group.founder_session_id.unwrap();
-            drop(group); // Release lock before sending
 
             if let Some(founder_session) = self.sessions.get(&founder_id) {
                 info!("[MLS] Forwarding key package from {} to founder {} for voice group {}",
@@ -826,25 +832,31 @@ impl ServerState {
 
         let mut group = group_lock.write().await;
 
-        if group.founder_session_id.is_none() {
+        // Check if founder is set AND active
+        let founder_is_active = if let Some(founder_id) = group.founder_session_id {
+            self.sessions.contains_key(&founder_id)
+        } else {
+            false
+        };
+
+        if !founder_is_active {
             group.founder_session_id = Some(session_id);
             group.members.insert(session_id);
-            info!("[MLS] Session {} is founder of text group {}", session_id, channel_id);
+            group.pending_joins.clear();
+            info!("[MLS] Session {} is the new founder of text group {}", session_id, channel_id);
 
             let _ = sender.send(ServiceMessage::MlsCreateGroup {
                 channel_id: channel_id.clone(),
                 is_voice: false,
             });
         } else {
+            let founder_id = group.founder_session_id.unwrap();
             let pending = PendingMlsJoin {
                 joiner_session_id: session_id,
                 joiner_uuid: user_uuid.clone(),
                 key_package: key_package.clone(),
             };
             group.pending_joins.push(pending);
-
-            let founder_id = group.founder_session_id.unwrap();
-            drop(group);
 
             if let Some(founder_session) = self.sessions.get(&founder_id) {
                 let _ = founder_session.sender.send(ServiceMessage::MlsAddMemberRequest {
