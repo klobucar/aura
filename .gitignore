@@ -29,6 +29,9 @@ clients/desktop/Generated/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 aura.db*
 
 # TLS Certificates (generated)
@@ -56,6 +59,7 @@ coverage/
 *.profdata
 *.profraw
 out.txt
+test_output*.txt
 
 # Local Environment
 .local/
@@ -68,4 +72,5 @@ crates/opus16-sys/vendor/opus/dnn/*_data.c
 crates/opus16-sys/vendor/opus/dnn/*_data.h
 crates/opus16-sys/vendor/opus/dnn/plc_data.c
 crates/opus16-sys/vendor/opus/dnn/plc_data.h
+crates/opus16-sys/vendor/opus/dnn/models/
 crates/opus16-sys/vendor/opus/opus_data-*.tar.gz
