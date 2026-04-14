@@ -58,6 +58,22 @@ pub struct ServerConfig {
     /// Useful for running as non-root behind a proxy (e.g., Fly.io).
     #[serde(default)]
     pub acme_bind_port: Option<u16>,
+
+    /// Maximum new handshake attempts permitted per source IP per minute.
+    #[serde(default = "default_handshake_per_minute")]
+    pub handshake_per_minute: u32,
+
+    /// Instantaneous burst capacity for the per-IP handshake limiter.
+    #[serde(default = "default_handshake_burst")]
+    pub handshake_burst: u32,
+}
+
+fn default_handshake_per_minute() -> u32 {
+    60
+}
+
+fn default_handshake_burst() -> u32 {
+    20
 }
 
 /// Database configuration.
@@ -101,6 +117,8 @@ impl Default for Config {
                 acme_cache_path: Some(PathBuf::from("data/acme")),
                 acme_directory_url: None,
                 acme_bind_port: Some(443),
+                handshake_per_minute: default_handshake_per_minute(),
+                handshake_burst: default_handshake_burst(),
             },
             database: DatabaseConfig {
                 path: PathBuf::from("aura.db"),
@@ -154,7 +172,17 @@ impl Config {
                 config.server.acme_bind_port = Some(port);
             }
         }
-        
+        if let Ok(v) = std::env::var("AURA_HANDSHAKE_PER_MINUTE") {
+            if let Ok(n) = v.parse() {
+                config.server.handshake_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("AURA_HANDSHAKE_BURST") {
+            if let Ok(n) = v.parse() {
+                config.server.handshake_burst = n;
+            }
+        }
+
         Ok(config)
     }
 

@@ -42,3 +42,7 @@ openmls_basic_credential = "0.5.0"
 
 hex = "0.4.3"
 uuid = { version = "1.23.0", features = ["v4"] }
+
+# Rate limiting (per-IP handshake throttle)
+governor = "0.10.4"
+nonzero_ext = "0.3.0"
