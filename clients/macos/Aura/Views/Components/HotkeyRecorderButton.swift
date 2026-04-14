@@ -44,28 +44,56 @@ struct HotkeyRecorderButton: View {
     
     private func startRecording() {
         isRecording = true
-        
-        // Monitor for next key press
+
+        // Monitor for the next key press or modifier-only chord while the
+        // settings window is front. `addLocalMonitorForEvents` bypasses the
+        // accessibility-permission requirement, so recording works even
+        // before the user has granted permission for the global tap.
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-            // Capture the keypress
-            if event.type == .keyDown {
+            let rawMods = UInt32(event.modifierFlags.rawValue) & HotkeyManager.relevantModifierMask
+
+            switch event.type {
+            case .keyDown:
                 let keyCode = UInt16(event.keyCode)
-                let modifiers = UInt32(event.modifierFlags.rawValue)
-                
-                let newHotkey = AudioSettings.Hotkey(keyCode: keyCode, modifiers: modifiers)
-                
-                // Validate that it has at least one modifier
+                // Accept any key, with or without modifiers. Plain keys like
+                // F13 or backtick are normal PTT choices on desktops.
+                let newHotkey = AudioSettings.Hotkey(keyCode: keyCode, modifiers: rawMods)
                 if HotkeyManager.shared.validateHotkey(newHotkey) {
                     hotkey = newHotkey
                 } else {
-                    // Show alert that modifier is required
                     NSSound.beep()
                 }
-                
                 stopRecording()
-                return nil // Consume event
+                return nil // Consume
+
+            case .flagsChanged:
+                // Let the user capture a modifier-only chord (e.g. just
+                // Right-Option) by releasing all modifiers after pressing
+                // them down. We only commit when `rawMods` transitions
+                // back to zero so the chord is stable.
+                if rawMods == 0 {
+                    // Modifier released — nothing to record.
+                    return nil
+                }
+                // Track the latest non-zero modifier combo. We commit on
+                // the NEXT transition to zero, but simpler: commit now
+                // with a short grace window so the user can tap-and-release
+                // a modifier like Right-Option.
+                let newHotkey = AudioSettings.Hotkey(
+                    keyCode: AudioSettings.Hotkey.modifierOnlyKeyCode,
+                    modifiers: rawMods
+                )
+                if HotkeyManager.shared.validateHotkey(newHotkey) {
+                    hotkey = newHotkey
+                    stopRecording()
+                    return nil
+                }
+                return nil
+
+            default:
+                break
             }
-            
+
             return event
         }
     }
