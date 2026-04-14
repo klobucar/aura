@@ -261,6 +261,11 @@ struct SenderState {
     jitter: JitterBuffer,
     /// Last processed sequence number (for replay protection)
     last_sequence: u16,
+    /// Local playback gain multiplier (1.0 = unchanged, 0.0..4.0 permitted)
+    gain: f32,
+    /// Local-only mute — audio still decodes (to keep Opus state healthy)
+    /// but is dropped during mixing.
+    muted: bool,
 }
 
 impl AudioReceiver {
@@ -297,15 +302,42 @@ impl AudioReceiver {
         let mut key_store = HashMap::new();
         key_store.insert(epoch_hint, crypto);
         
-        let state = SenderState { 
-            codec, 
-            key_store, 
+        let state = SenderState {
+            codec,
+            key_store,
             current_epoch: epoch_hint,
             jitter,
             last_sequence: 0,
+            gain: 1.0,
+            muted: false,
         };
         self.senders.write().unwrap().insert(session_id, state);
         Ok(())
+    }
+
+    /// Set per-sender local playback gain. Returns `true` if the sender was
+    /// known. Clamped to `[0.0, 4.0]` so a runaway value can't blow speakers.
+    pub fn set_sender_gain(&self, session_id: u32, gain: f32) -> bool {
+        let mut senders = self.senders.write().unwrap();
+        if let Some(state) = senders.get_mut(&session_id) {
+            state.gain = gain.clamp(0.0, 4.0);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle local-only mute for a sender. Audio continues to decode so
+    /// the Opus decoder's internal state stays consistent, but the mixer
+    /// drops the samples on the floor.
+    pub fn set_sender_muted(&self, session_id: u32, muted: bool) -> bool {
+        let mut senders = self.senders.write().unwrap();
+        if let Some(state) = senders.get_mut(&session_id) {
+            state.muted = muted;
+            true
+        } else {
+            false
+        }
     }
     
     /// Remove a sender (e.g., when they leave the channel)
@@ -436,26 +468,50 @@ impl AudioReceiver {
         if frames.is_empty() {
             return None;
         }
-        
+
+        // Snapshot per-sender gain/mute in a single read-lock acquisition
+        // so the mixing loop below doesn't re-lock for every frame.
+        let sender_cfg: HashMap<u32, (f32, bool)> = {
+            let senders = self.senders.read().unwrap();
+            senders
+                .iter()
+                .map(|(id, s)| (*id, (s.gain, s.muted)))
+                .collect()
+        };
+
         let frame_size = 960; // 20ms at 48kHz
         let mut mixed = vec![0i32; frame_size];
         let mut active_speakers = Vec::new();
-        
+
         for (session_id, pcm) in &frames {
-            // Track this session as an active speaker
+            let (gain, muted) = sender_cfg
+                .get(session_id)
+                .copied()
+                .unwrap_or((1.0, false));
+
+            if muted {
+                continue;
+            }
+
             active_speakers.push(*session_id);
-            
-            // Mix the audio
-            for (i, &sample) in pcm.iter().enumerate().take(frame_size) {
-                mixed[i] += sample as i32;
+
+            if (gain - 1.0).abs() < f32::EPSILON {
+                // Fast path — no floating-point multiply when gain is unchanged.
+                for (i, &sample) in pcm.iter().enumerate().take(frame_size) {
+                    mixed[i] += sample as i32;
+                }
+            } else {
+                for (i, &sample) in pcm.iter().enumerate().take(frame_size) {
+                    mixed[i] += (sample as f32 * gain) as i32;
+                }
             }
         }
-        
+
         // Clip to i16 range
         let pcm = mixed.iter()
             .map(|&s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
             .collect();
-        
+
         Some(MixedAudio {
             pcm,
             active_speakers,
