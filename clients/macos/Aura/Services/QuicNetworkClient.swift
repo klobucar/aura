@@ -71,6 +71,14 @@ public class QuicNetworkClient {
     
     /// Track which users are currently speaking (for UI indicators)
     public var activeSpeakers: Set<UInt32> = []
+
+    /// Local-only per-user playback gain, keyed by session id.
+    /// 1.0 = unchanged, 0.0..2.0 is the UI-allowed range.
+    /// Nothing about this is sent to the server or to other clients.
+    public var userVolumes: [UInt32: Float] = [:]
+
+    /// Session ids of users the local user has muted for themselves only.
+    public var locallyMutedUsers: Set<UInt32> = []
     
     /// Last detected untrusted certificate fingerprint for TOFU prompt
     public var lastUntrustedFingerprint: String?
@@ -645,6 +653,55 @@ public class QuicNetworkClient {
         }
     }
     
+    // MARK: - Local Mixer Controls (per-user volume / local mute)
+
+    /// Set a local-only volume multiplier for a single remote user.
+    /// `volume` is clamped to `[0.0, 2.0]`; 1.0 is unchanged. Nothing
+    /// about this is sent to the server — it only affects what this
+    /// client hears.
+    @MainActor
+    public func setLocalVolume(sessionId: UInt32, volume: Float) {
+        let clamped = max(0.0, min(2.0, volume))
+        if abs(clamped - 1.0) < 0.001 {
+            userVolumes.removeValue(forKey: sessionId)
+        } else {
+            userVolumes[sessionId] = clamped
+        }
+        audioReceiver?.setSenderGain(sessionId: sessionId, gain: clamped)
+    }
+
+    /// Toggle whether a given remote user is locally muted for this
+    /// client only. The server and the other user are not told.
+    @MainActor
+    public func toggleLocalMute(sessionId: UInt32) {
+        if locallyMutedUsers.contains(sessionId) {
+            locallyMutedUsers.remove(sessionId)
+            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: false)
+        } else {
+            locallyMutedUsers.insert(sessionId)
+            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: true)
+        }
+    }
+
+    /// Whether the given session id is currently locally muted.
+    public func isLocallyMuted(sessionId: UInt32) -> Bool {
+        locallyMutedUsers.contains(sessionId)
+    }
+
+    /// Push any persisted local volume / mute choices into the Rust
+    /// mixer for the given session id. Must be called right after a
+    /// successful `receiver.addSender(...)` so that re-joining a
+    /// channel or key rotation doesn't silently reset prefs.
+    fileprivate func applyLocalMixerPrefs(sessionId: UInt32) {
+        guard let receiver = audioReceiver else { return }
+        if let vol = userVolumes[sessionId] {
+            receiver.setSenderGain(sessionId: sessionId, gain: vol)
+        }
+        if locallyMutedUsers.contains(sessionId) {
+            receiver.setSenderMuted(sessionId: sessionId, muted: true)
+        }
+    }
+
     /// Update user profile
     public func updateProfile(bio: String, avatarData: Data) async {
         guard let sessionId = self.sessionId else { return }
@@ -995,6 +1052,7 @@ public class QuicNetworkClient {
                                 let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
                                 keyData = Data(keyBytes)
                                 try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: UInt16(epoch & 0xFFFF))
+                                self.applyLocalMixerPrefs(sessionId: sessionId)
                                 print("[QuicClient] Added audio sender \(sessionId) with MLS key")
                             } catch {
                                 print("[QuicClient] Failed to derive MLS key for new user \(sessionId): \(error)")
@@ -1122,6 +1180,7 @@ public class QuicNetworkClient {
                                     let keyBytes = try mls.exportAudioKey(channelId: c.channelId, senderSessionId: sid)
                                     let epoch = try mls.currentEpoch(channelId: c.channelId, isVoice: true)
                                     try receiver.addSender(sessionId: sid, key: Data(keyBytes), epochHint: UInt16(epoch & 0xFFFF))
+                                    self.applyLocalMixerPrefs(sessionId: sid)
                                     print("[QuicClient] Added receiver key for user \(sid) from snapshot")
                                 } catch {
                                     print("[QuicClient] Failed to derive snapshot key for \(sid): \(error)")
@@ -1420,6 +1479,7 @@ public class QuicNetworkClient {
                             // If update failed, it's a new sender we missed during the initial Join race
                             print("[QuicClient] New user \(user.id) found during key rotation, adding sender...")
                             try receiver.addSender(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
+                            self.applyLocalMixerPrefs(sessionId: user.id)
                         }
                     } catch {
                         print("[QuicClient] Failed to update/add audio key for user \(user.id): \(error)")

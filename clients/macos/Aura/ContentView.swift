@@ -357,7 +357,32 @@ struct ContentView: View {
         .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .withinWindow))
     }
     
+    /// Compact round-trip latency indicator.
+    /// `nil` latency (haven't heard back yet) reads as "…",
+    /// <80ms = green, <200ms = yellow, >=200ms = red.
     @ViewBuilder
+    private func latencyPill(client: QuicNetworkClient) -> some View {
+        let ms = client.latencyMs
+        let color: Color = {
+            guard let ms = ms else { return .secondary }
+            if ms < 80 { return .green }
+            if ms < 200 { return .yellow }
+            return .red
+        }()
+        HStack(spacing: 4) {
+            Image(systemName: "network")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(color)
+            Text(ms.map { "\($0) ms" } ?? "… ms")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(Color.white.opacity(0.05)))
+        .help("Round-trip to server")
+    }
+
     private func voiceStatusPanel(client: QuicNetworkClient) -> some View {
         VStack(spacing: 24) {
             Spacer()
@@ -403,25 +428,29 @@ struct ContentView: View {
                 Text(isDeafened ? "Deafened" : (isMicEnabled ? "Transmitting" : "Muted"))
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(isDeafened ? Color.secondary : Color.primary)
-                
-                if isMicEnabled && !isDeafened {
-                    HStack(spacing: 4) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("\(audioCapture.packetsSent) packets sent")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    if isMicEnabled && !isDeafened {
+                        HStack(spacing: 4) {
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
+                            Text("\(audioCapture.packetsSent) pkts")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.white.opacity(0.05)))
+                    } else if isDeafened {
+                        Text("You cannot hear or speak")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary.opacity(0.7))
+                    } else {
+                        Text("Your audio is currently private")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary.opacity(0.7))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.white.opacity(0.05)))
-                } else if isDeafened {
-                    Text("You cannot hear or speak")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary.opacity(0.7))
-                } else {
-                    Text("Your audio is currently private")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary.opacity(0.7))
+
+                    latencyPill(client: client)
                 }
             }
             
@@ -986,7 +1015,7 @@ struct ContentView: View {
                                     
                                     // Show other users
                                     ForEach(users) { user in
-                                        UserRowView(user: user, isActiveSpeaker: client.activeSpeakers.contains(user.id))
+                                        UserRowView(user: user, isActiveSpeaker: client.activeSpeakers.contains(user.id), client: client)
                                     }
                                 }
                                 .padding(.top, 2)
@@ -1228,7 +1257,16 @@ struct MarkdownText: View {
 struct UserRowView: View {
     let user: ChannelUser
     let isActiveSpeaker: Bool
-    
+    let client: QuicNetworkClient
+
+    private var isLocallyMuted: Bool {
+        client.locallyMutedUsers.contains(user.id)
+    }
+
+    private var localVolume: Float {
+        client.userVolumes[user.id] ?? 1.0
+    }
+
     var body: some View {
     HStack(spacing: 8) {
         // Avatar
@@ -1249,7 +1287,7 @@ struct UserRowView: View {
                             .foregroundStyle(.white)
                     )
             }
-            
+
             if user.isDisconnected {
                 Circle()
                     .fill(.black.opacity(0.3))
@@ -1259,12 +1297,12 @@ struct UserRowView: View {
                     .foregroundStyle(.white)
             }
         }
-        
+
         VStack(alignment: .leading, spacing: 0) {
             Text(user.displayName)
                 .font(.system(size: 13))
                 .foregroundStyle(user.isDisconnected ? Color.secondary.opacity(0.5) : (isActiveSpeaker ? AuraTheme.Colors.accent : Color.secondary))
-            
+
             if !user.bio.isEmpty && !user.isDisconnected {
                 Text(user.bio)
                     .font(.system(size: 9))
@@ -1272,17 +1310,29 @@ struct UserRowView: View {
                     .lineLimit(1)
             }
         }
-        
-        if isActiveSpeaker && !user.isDisconnected {
+
+        if isActiveSpeaker && !user.isDisconnected && !isLocallyMuted {
             Image(systemName: "waves.at.tail")
                 .foregroundStyle(AuraTheme.Gradients.lushIndigo)
                 .font(.system(size: 10))
                 .transition(.scale.combined(with: .opacity))
         }
-        
+
         Spacer()
-        
-        if user.isDisconnected {
+
+        // Local-only volume indicator so users know why someone sounds loud/quiet
+        if !user.isDisconnected && abs(localVolume - 1.0) >= 0.01 {
+            Text("\(Int(localVolume * 100))%")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary.opacity(0.7))
+        }
+
+        if isLocallyMuted && !user.isDisconnected {
+            Image(systemName: "speaker.slash.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange.opacity(0.8))
+                .help("Muted locally")
+        } else if user.isDisconnected {
             Text("LEFT")
                 .font(.system(size: 8, weight: .bold))
                 .foregroundStyle(.red.opacity(0.6))
@@ -1301,6 +1351,20 @@ struct UserRowView: View {
     .grayscale(user.isDisconnected ? 1.0 : 0.0)
     .opacity(user.isDisconnected ? 0.5 : 1.0)
     .help(user.bio.isEmpty ? user.displayName : "\(user.displayName): \(user.bio)")
+    .contextMenu {
+        if !user.isDisconnected {
+            Button(isLocallyMuted ? "Unmute Locally" : "Mute Locally") {
+                client.toggleLocalMute(sessionId: user.id)
+            }
+            Menu("Volume") {
+                ForEach([0, 25, 50, 75, 100, 125, 150, 200], id: \.self) { pct in
+                    Button("\(pct)%\(Int(localVolume * 100) == pct ? " ✓" : "")") {
+                        client.setLocalVolume(sessionId: user.id, volume: Float(pct) / 100.0)
+                    }
+                }
+            }
+        }
+    }
     }
 }
 

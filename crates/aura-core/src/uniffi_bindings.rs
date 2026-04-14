@@ -236,6 +236,22 @@ impl AudioReceiverWrapper {
             inner.remove_sender(session_id);
         }
     }
+
+    /// Set local playback gain for a specific sender.
+    /// `gain` is clamped to `[0.0, 4.0]`; 1.0 is "unchanged".
+    pub fn set_sender_gain(&self, session_id: u32, gain: f32) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_sender_gain(session_id, gain);
+        }
+    }
+
+    /// Mute or unmute a specific sender locally. The audio still decodes
+    /// so the Opus state stays consistent, but the mixer drops the samples.
+    pub fn set_sender_muted(&self, session_id: u32, muted: bool) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_sender_muted(session_id, muted);
+        }
+    }
     
     /// Process a received packet
     pub fn on_packet(&self, data: &[u8]) -> Result<(), AudioError> {
