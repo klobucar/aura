@@ -49,6 +49,15 @@ pub struct ServerConfig {
     /// Optional path for the ACME certificate cache.
     #[serde(default)]
     pub acme_cache_path: Option<PathBuf>,
+
+    /// Optional custom ACME directory URL (e.g., for Let's Encrypt staging or Pebble).
+    #[serde(default)]
+    pub acme_directory_url: Option<String>,
+
+    /// Optional bind port for ACME ALPN challenges (defaults to 443).
+    /// Useful for running as non-root behind a proxy (e.g., Fly.io).
+    #[serde(default)]
+    pub acme_bind_port: Option<u16>,
 }
 
 /// Database configuration.
@@ -90,6 +99,8 @@ impl Default for Config {
                 acme_domain: None,
                 acme_contact: None,
                 acme_cache_path: Some(PathBuf::from("data/acme")),
+                acme_directory_url: None,
+                acme_bind_port: Some(443),
             },
             database: DatabaseConfig {
                 path: PathBuf::from("aura.db"),
@@ -134,6 +145,14 @@ impl Config {
         }
         if let Ok(cache_path) = std::env::var("AURA_ACME_CACHE_PATH") {
             config.server.acme_cache_path = Some(PathBuf::from(cache_path));
+        }
+        if let Ok(dir_url) = std::env::var("AURA_ACME_DIRECTORY_URL") {
+            config.server.acme_directory_url = Some(dir_url);
+        }
+        if let Ok(port_str) = std::env::var("AURA_ACME_BIND_PORT") {
+            if let Ok(port) = port_str.parse() {
+                config.server.acme_bind_port = Some(port);
+            }
         }
         
         Ok(config)
