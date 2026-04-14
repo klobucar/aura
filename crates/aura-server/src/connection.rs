@@ -3,6 +3,7 @@
 //! Handles incoming QUIC connections, authentication, and stream routing.
 
 use crate::auth::AuthService;
+use crate::rate_limit::HandshakeRateLimiter;
 use crate::state::{ServerState, ServiceMessage};
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
@@ -48,6 +49,7 @@ const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct QuicServer {
     endpoint: Endpoint,
     state: Arc<ServerState>,
+    rate_limiter: HandshakeRateLimiter,
 }
 
 impl QuicServer {
@@ -77,7 +79,16 @@ impl QuicServer {
         info!("✓ QUIC server bound to UDP socket: {}", local_addr);
         info!("✓ ALPN protocol: 'aura-dave'");
 
-        Ok(Self { endpoint, state })
+        let rate_limiter = HandshakeRateLimiter::new(
+            state.config.server.handshake_per_minute,
+            state.config.server.handshake_burst,
+        );
+
+        Ok(Self {
+            endpoint,
+            state,
+            rate_limiter,
+        })
     }
 
     #[allow(dead_code)]
@@ -261,8 +272,17 @@ impl QuicServer {
         while let Some(connecting) = self.endpoint.accept().await {
             let state = Arc::clone(&self.state);
             let remote = connecting.remote_address();
+
+            // Per-IP handshake rate limit — reject before paying TLS or
+            // Ed25519 CPU cost. Loopback is always allowed.
+            if let Err(e) = self.rate_limiter.check(remote.ip()) {
+                warn!("[QUIC] Rejecting connection from {}: {}", remote, e);
+                drop(connecting);
+                continue;
+            }
+
             info!("[QUIC] Incoming connection from {}", remote);
-            
+
             tokio::spawn(async move {
                 info!("[QUIC] Awaiting TLS handshake from {}", remote);
                 match connecting.await {
