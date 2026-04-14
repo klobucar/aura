@@ -926,11 +926,12 @@ impl ConnectionContext {
                     self.send.flush().await?;
                 }
             }
-            ServiceMessage::UserJoined { channel_id, session_id, display_name } => {
+            ServiceMessage::UserJoined { channel_id, session_id, display_name, user_uuid } => {
                 let msg = aura_protocol::UserJoined {
                     channel_id,
                     session_id,
                     display_name,
+                    user_uuid,
                 };
                 self.send_proto_response(0x11, msg).await?;
             }

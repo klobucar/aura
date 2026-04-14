@@ -1260,11 +1260,11 @@ struct UserRowView: View {
     let client: QuicNetworkClient
 
     private var isLocallyMuted: Bool {
-        client.locallyMutedUsers.contains(user.id)
+        client.isLocallyMuted(sessionId: user.id)
     }
 
     private var localVolume: Float {
-        client.userVolumes[user.id] ?? 1.0
+        client.localVolume(for: user.id)
     }
 
     var body: some View {
