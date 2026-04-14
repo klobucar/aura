@@ -1517,10 +1517,12 @@ mod tests {
 
         // 1. Submit valid COMMIT for Voice Group
         let commit_msg = MlsEnvelope {
-            group_id: aura_protocol::make_mls_group_id(&channel_id, true),
+            channel_id: aura_protocol::make_mls_group_id(&channel_id, true),
             group_type: MlsGroupType::Voice as i32,
             epoch: 0, // Current epoch
             sender_id: 12345,
+            target_session_id: 0,
+            target_uuid: String::new(),
             content: Some(mls_envelope::Content::Commit(vec![1, 2, 3])),
         };
 
@@ -1539,10 +1541,12 @@ mod tests {
         // So sending epoch 2 when current is 1 will fail as Stale/Mismatch.
         // Let's verify that behavior.
         let future_msg = MlsEnvelope {
-            group_id: aura_protocol::make_mls_group_id(&channel_id, true),
+            channel_id: aura_protocol::make_mls_group_id(&channel_id, true),
             group_type: MlsGroupType::Voice as i32,
             epoch: 2, 
             sender_id: 12345,
+            target_session_id: 0,
+            target_uuid: String::new(),
             content: Some(mls_envelope::Content::Commit(vec![4,5,6])),
         };
         let res_future = state.handle_mls_message(future_msg).await.unwrap();
@@ -1551,10 +1555,12 @@ mod tests {
         
         // 4. Unknown Group
         let unknown_msg = MlsEnvelope {
-            group_id: "C_UNKNOWN".to_string(),
+            channel_id: "C_UNKNOWN".to_string(),
             group_type: MlsGroupType::Voice as i32,
             epoch: 0,
             sender_id: 12345,
+            target_session_id: 0,
+            target_uuid: String::new(),
             content: Some(mls_envelope::Content::Commit(vec![])),
         };
         assert!(state.handle_mls_message(unknown_msg).await.is_err());
