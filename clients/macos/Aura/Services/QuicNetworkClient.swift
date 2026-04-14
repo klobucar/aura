@@ -4,6 +4,7 @@ import Network
 import Observation
 import UserNotifications
 import SwiftUI
+import CryptoKit
 
 /// Native QUIC client for Aura server using Apple's Network framework.
 /// Uses NWConnectionGroup to handle server-initiated streams for Apple/Quinn interop.
@@ -70,6 +71,9 @@ public class QuicNetworkClient {
     
     /// Track which users are currently speaking (for UI indicators)
     public var activeSpeakers: Set<UInt32> = []
+    
+    /// Last detected untrusted certificate fingerprint for TOFU prompt
+    public var lastUntrustedFingerprint: String?
     
     /// Timeout tasks for clearing speakers who stop sending audio
     private var speakerTimeouts: [UInt32: Task<Void, Never>] = [:]
@@ -219,10 +223,52 @@ public class QuicNetworkClient {
         quicOptions.isDatagram = true
         quicOptions.maxDatagramFrameSize = 1200
         
-        // Accept self-signed certificates
-        sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { _, trust, completeHandler in
-            print("[QuicClient] TLS verify - accepting self-signed cert")
+        // Strict certificate verification in release, TOFU in dev
+        sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { [weak self] _, trust, completeHandler in
+            guard let self = self else {
+                completeHandler(false)
+                return
+            }
+            
+#if DEBUG
+            print("[QuicClient] DEBUG: TLS verify - accepting all certificates")
             completeHandler(true)
+#else
+            let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
+            var error: CFError?
+            let isValid = SecTrustEvaluateWithError(trustRef, &error)
+            
+            if isValid {
+                print("[QuicClient] TLS verify - system trust valid")
+                completeHandler(true)
+                return
+            }
+            
+            // Standard trust failed - perform TOFU check
+            guard let cert = SecTrustGetCertificateAtIndex(trustRef, 0) else {
+                print("[QuicClient] TLS verify - no certificate found")
+                completeHandler(false)
+                return
+            }
+            
+            let data = SecCertificateCopyData(cert) as Data
+            let hash = SHA256.hash(data: data)
+            let fingerprint = hash.compactMap { String(format: "%02x", $0) }.joined()
+            
+            print("[QuicClient] TLS verify failure - fingerprint: \(fingerprint)")
+            
+            // Check if user has already trusted this fingerprint for this host
+            if AppSettings.shared.isFingerprintTrusted(host: host, fingerprint: fingerprint) {
+                print("[QuicClient] Fingerprint matches known trusted list. Proceeding.")
+                completeHandler(true)
+            } else {
+                print("[QuicClient] Untrusted certificate. Blocking connection.")
+                Task { @MainActor in
+                    self.lastUntrustedFingerprint = fingerprint
+                }
+                completeHandler(false)
+            }
+#endif
         }, .global())
         
         sec_protocol_options_set_min_tls_protocol_version(quicOptions.securityProtocolOptions, .TLSv13)
@@ -1806,6 +1852,7 @@ public enum QuicClientError: Error, LocalizedError {
     case protocolError(String)
     case authenticationFailed(String)
     case connectionClosed
+    case untrustedCertificate(host: String, fingerprint: String)
     
     public var errorDescription: String? {
         switch self {
@@ -1815,6 +1862,8 @@ public enum QuicClientError: Error, LocalizedError {
         case .protocolError(let msg): return "Protocol error: \(msg)"
         case .authenticationFailed(let msg): return "Authentication failed: \(msg)"
         case .connectionClosed: return "Connection closed"
+        case .untrustedCertificate(let host, let fingerprint):
+            return "Untrusted certificate from \(host)\n\nSHA256: \(fingerprint)"
         }
     }
 }

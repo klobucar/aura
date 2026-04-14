@@ -19,6 +19,10 @@ struct LoginView: View {
     @State private var errorMessage: String?
     @State private var logoRingScale: CGFloat = 1.0
     
+    // TLS / TOFU
+    @State private var showingCertAlert = false
+    @State private var pendingFingerprint: String?
+    
     // Management views
     @State private var showingServerManagement = false
     @State private var showingProfileManagement = false
@@ -202,6 +206,21 @@ struct LoginView: View {
         .sheet(isPresented: $showingProfileManagement) {
             ProfileListView()
         }
+        .alert("Untrusted Certificate", isPresented: $showingCertAlert, actions: {
+            Button("Trust and Connect") {
+                if let fingerprint = pendingFingerprint {
+                    AppSettings.shared.trustFingerprint(host: serverAddress, fingerprint: fingerprint)
+                    connect()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                isConnecting = false
+            }
+        }, message: {
+            if let fingerprint = pendingFingerprint {
+                Text("The server at \(serverAddress) is using an unknown certificate.\n\nSHA256: \(fingerprint)\n\nDo you want to trust this server?")
+            }
+        })
         .onAppear {
             identity.loadOrGenerate()
         }
@@ -230,7 +249,12 @@ struct LoginView: View {
                 onConnected?(client, identity)
                 
             } catch {
-                errorMessage = error.localizedDescription
+                if let fingerprint = client.lastUntrustedFingerprint {
+                    pendingFingerprint = fingerprint
+                    showingCertAlert = true
+                } else {
+                    errorMessage = error.localizedDescription
+                }
                 print("[LoginView] Connection error: \(error)")
             }
             

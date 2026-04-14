@@ -100,6 +100,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private bool _showAudioSettings = false;
     
+    [ObservableProperty]
+    private bool _showingCertWarning = false;
+    
+    [ObservableProperty]
+    private string _certFingerprint = "";
+    
+    [ObservableProperty]
+    private string _certHost = "";
+    
     partial void OnRnnoiseEnabledChanged(bool value) => _audioManager?.SetNoiseSuppressionEnabled(value);
     partial void OnAecEnabledChanged(bool value) => _audioManager?.SetWebrtcAecEnabled(value);
     partial void OnWebrtcNsEnabledChanged(bool value)
@@ -230,6 +239,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             
             Console.WriteLine("[ViewModel] Connection complete!");
         }
+        catch (UntrustedCertificateException ex)
+        {
+            Console.WriteLine($"[ViewModel] UNTRUSTED CERTIFICATE: {ex.Fingerprint}");
+            CertFingerprint = ex.Fingerprint;
+            CertHost = ex.Host;
+            ShowingCertWarning = true;
+            ConnectionStatus = "Certificate Verification Failed";
+            await DisconnectInternalAsync();
+        }
         catch (AuthenticationException ex)
         {
             Console.WriteLine($"[ViewModel] AUTH EXCEPTION: {ex.Message}");
@@ -249,6 +267,24 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ConnectionStatus = $"Connection failed: {ex.Message}";
             await DisconnectInternalAsync();
         }
+    }
+
+    [RelayCommand]
+    private async Task TrustAndConnectAsync()
+    {
+        if (string.IsNullOrEmpty(CertHost) || string.IsNullOrEmpty(CertFingerprint)) return;
+        
+        Console.WriteLine($"[ViewModel] Adding {CertHost} to trusted fingerprints: {CertFingerprint}");
+        KnownServers.Trust(CertHost, CertFingerprint);
+        
+        ShowingCertWarning = false;
+        await ConnectAsync();
+    }
+
+    [RelayCommand]
+    private void DismissCertWarning()
+    {
+        ShowingCertWarning = false;
     }
 
     [RelayCommand]

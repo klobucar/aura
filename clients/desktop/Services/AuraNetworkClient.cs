@@ -23,6 +23,21 @@ public class ProtocolException : Exception
     public ProtocolException(string message) : base(message) { }
 }
 
+public class UntrustedCertificateException : Exception
+{
+    public string Host { get; }
+    public string Fingerprint { get; }
+    public X509Certificate Certificate { get; }
+    
+    public UntrustedCertificateException(string host, string fingerprint, X509Certificate certificate) 
+        : base($"Untrusted certificate from {host} (SHA256: {fingerprint})")
+    {
+        Host = host;
+        Fingerprint = fingerprint;
+        Certificate = certificate;
+    }
+}
+
 /// <summary>
 /// QUIC-based client for Aura server communication.
 /// </summary>
@@ -99,11 +114,37 @@ public class AuraNetworkClient : IAsyncDisposable
             {
                 ApplicationProtocols = [new SslApplicationProtocol("aura-dave")],
                 TargetHost = host,
-                // Accept self-signed certificates for POC
                 RemoteCertificateValidationCallback = (sender, cert, chain, errors) => 
                 {
-                    Console.WriteLine($"[AuraClient] TLS cert validation: errors={errors}");
-                    return true; // Accept all certs for dev
+#if DEBUG
+                    Console.WriteLine($"[AuraClient] DEBUG: TLS cert validation: errors={errors} (Accepting all)");
+                    return true;
+#else
+                    if (errors == SslPolicyErrors.None)
+                    {
+                        return true;
+                    }
+
+                    if (cert == null) return false;
+
+                    // Calculate SHA256 fingerprint
+                    using var cert2 = new X509Certificate2(cert);
+                    var fingerprint = cert2.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256);
+                    
+                    Console.WriteLine($"[AuraClient] TLS cert validation failure: errors={errors}");
+                    Console.WriteLine($"[AuraClient] Fingerprint (SHA256): {fingerprint}");
+
+                    // Check if trusted via TOFU
+                    if (KnownServers.IsTrusted(host, fingerprint))
+                    {
+                        Console.WriteLine("[AuraClient] Fingerprint matches known trusted list. Proceeding.");
+                        return true;
+                    }
+
+                    // Not trusted - we throw an exception that the UI can catch
+                    // Note: This callback is inside QuicConnection.ConnectAsync
+                    throw new UntrustedCertificateException(host, fingerprint, cert);
+#endif
                 }
             }
         };
