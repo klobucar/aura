@@ -13,4 +13,7 @@ extension Notification.Name {
     static let activeSpeakersChanged = Notification.Name("activeSpeakersChanged")
     static let audioSettingsChanged = Notification.Name("audioSettingsChanged")
     static let connectionRestored = Notification.Name("connectionRestored")
+    /// Posted when another user's profile (bio / avatar / display name)
+    /// was updated. Object: UInt32 session id of the affected profile.
+    static let profileUpdated = Notification.Name("profileUpdated")
 }

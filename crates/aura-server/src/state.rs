@@ -107,6 +107,9 @@ pub enum ServiceMessage {
         is_muted: bool,
         is_deafened: bool,
     },
+    /// A user's profile (bio, avatar, display name) changed - broadcast to everyone
+    /// so other clients can refresh their local caches without a full snapshot.
+    ProfileUpdated(UserProfile),
 }
 
 /// Static metadata for a channel (persisted in DB)
@@ -1109,18 +1112,26 @@ impl ServerState {
     pub async fn update_profile_persistent(&self, session_id: u32, profile: UserProfile) -> Result<()> {
         let session = self.sessions.get(&session_id).ok_or_else(|| anyhow!("Session not found"))?;
         let user_uuid = session.user_uuid.clone();
-        
+        drop(session);
+
         // Update DB
         self.db.upsert_user_profile(
-            &session.user_uuid, 
-            &profile.bio, 
-            &profile.avatar_data, 
-            &profile.signature, 
+            &user_uuid,
+            &profile.bio,
+            &profile.avatar_data,
+            &profile.signature,
             &profile.signing_key
         )?;
 
         // Update in-memory cache
-        self.profiles.insert(user_uuid, profile);
+        self.profiles.insert(user_uuid, profile.clone());
+
+        // Broadcast the delta to every connected session (including the
+        // originator, so their own in-memory view reflects what the server
+        // persisted). Cheap compared to shipping a full ServerSnapshot.
+        for sess in self.sessions.iter() {
+            let _ = sess.sender.send(ServiceMessage::ProfileUpdated(profile.clone()));
+        }
 
         Ok(())
     }

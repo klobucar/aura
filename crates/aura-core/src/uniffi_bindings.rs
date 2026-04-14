@@ -657,12 +657,29 @@ pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
         signature: profile.signature.into(),
         signing_key: profile.signing_key.into(),
     };
-    
+
     let req = ProtoUpdateProfile {
         profile: Some(proto_profile),
     };
-    
+
     req.encode_to_vec()
+}
+
+/// Decode a standalone `UserProfile` protobuf payload as broadcast by the
+/// server on MSG_PROFILE_UPDATED (0x46). Note: this is the bare profile
+/// struct, not an `UpdateProfile` request wrapper.
+#[uniffi::export]
+pub fn decode_user_profile(data: Vec<u8>) -> Result<UserProfileRecord, AudioError> {
+    use prost::Message;
+    let proto = ProtoProfile::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    Ok(UserProfileRecord {
+        user_id: proto.user_id.parse().unwrap_or(0),
+        display_name: proto.display_name,
+        bio: proto.bio,
+        avatar_data: proto.avatar_data.to_vec(),
+        signature: proto.signature.to_vec(),
+        signing_key: proto.signing_key.to_vec(),
+    })
 }
 
 #[uniffi::export]
