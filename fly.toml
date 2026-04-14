@@ -1,36 +1,53 @@
-# fly.toml configuration for Aura Server
+# fly.toml app configuration file generated for aura-server on 2026-04-11T20:17:44-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "aura-server"
-primary_region = "ord"
+app = 'aura-server'
+primary_region = 'ord'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  AURA_BIND_ADDRESS = "0.0.0.0:8443"
-  AURA_DATABASE_PATH = "/data/aura.db"
-  AURA_ACME_CACHE_PATH = "/data/acme"
+  AURA_ACME_DOMAIN = '<PLACEHOLDER>'
+  AURA_ACME_CONTACT = '<PLACEHOLDER>'
+  AURA_ACME_BIND_PORT = '8080'
+  AURA_ACME_CACHE_PATH = '/data/acme'
+  AURA_BIND_ADDRESS = '0.0.0.0:8443'
+  AURA_DATABASE_PATH = '/data/aura.db'
+  AURA_ACME_DIRECTORY_URL = 'https://acme-staging-v02.api.letsencrypt.org/directory'
 
 [[mounts]]
-  source = "aura_data"
-  destination = "/data"
+  source = 'aura_data'
+  destination = '/data'
 
 [[services]]
+  protocol = 'udp'
   internal_port = 8443
-  protocol = "udp"
   [[services.ports]]
     port = 8443
 
 [[services]]
-  internal_port = 443
-  protocol = "tcp"
+  protocol = 'tcp'
+  internal_port = 8080
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    # force_https = true  # Disabled for ACME HTTP-01 challenges
+
   [[services.ports]]
     port = 443
-    handlers = ["tls", "http"] # Handlers for ACME challenges
+    handlers = [] # Raw TCP for internal management if needed
 
 [checks]
   [checks.active]
-    type = "tcp"
-    port = 443
-    interval = "30s"
-    timeout = "5s"
+    port = 8080
+    type = 'tcp'
+    interval = '30s'
+    timeout = '5s'
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+  memory_mb = 256
