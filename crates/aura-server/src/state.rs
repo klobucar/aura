@@ -63,6 +63,7 @@ pub enum ServiceMessage {
         channel_id: String,
         session_id: u32,
         display_name: String,
+        user_uuid: String,
     },
     /// User left a channel - broadcast to ALL connected users
     UserLeft {
@@ -470,6 +471,7 @@ impl ServerState {
                             is_muted: sess.is_muted,
                             is_deafened: sess.is_deafened,
                             display_name,
+                            user_uuid: sess.user_uuid.clone(),
                         });
                     } else {
                         users.push(aura_protocol::ChannelUserStatus {
@@ -477,6 +479,7 @@ impl ServerState {
                             is_muted: false,
                             is_deafened: false,
                             display_name: format!("User {}", *id),
+                            user_uuid: String::new(),
                         });
                     }
                 }
@@ -516,6 +519,12 @@ impl ServerState {
 
     /// Broadcast that a user joined a channel to ALL connected users.
     pub async fn broadcast_user_joined(&self, channel_id: String, session_id: u32, display_name: String) {
+        let user_uuid = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.user_uuid.clone())
+            .unwrap_or_default();
+
         // Broadcast UserJoined to ALL connected users
         for sess in self.sessions.iter() {
             if *sess.key() != session_id {
@@ -523,6 +532,7 @@ impl ServerState {
                     channel_id: channel_id.clone(),
                     session_id,
                     display_name: display_name.clone(),
+                    user_uuid: user_uuid.clone(),
                 });
             }
         }
@@ -1395,7 +1405,7 @@ mod tests {
         state.broadcast_user_joined(channel_id.clone(), s2, "User 2".into()).await;
 
         // Check s1 received UserJoined
-        if let Some(ServiceMessage::UserJoined { channel_id: c, session_id: s, display_name: n }) = rx1.recv().await {
+        if let Some(ServiceMessage::UserJoined { channel_id: c, session_id: s, display_name: n, user_uuid: _ }) = rx1.recv().await {
             assert_eq!(c, channel_id);
             assert_eq!(s, s2);
             assert_eq!(n, "User 2");

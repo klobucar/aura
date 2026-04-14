@@ -123,6 +123,11 @@ message ChannelUserStatus {
     bool is_muted = 2;
     bool is_deafened = 3;
     string display_name = 4;
+    // Stable per-user identifier (UUID). Added so clients can key
+    // local-only state (volume / mute / known-users list) against
+    // something that survives reconnects — ephemeral session_ids
+    // do not.
+    string user_uuid = 5;
 }
 
 // Channel icon options
@@ -341,6 +346,9 @@ message UserJoined {
     string channel_id = 1;
     uint32 session_id = 2;
     string display_name = 3;
+    // Stable per-user UUID so clients can map this ephemeral session
+    // back to a known user across reconnects.
+    string user_uuid = 4;
 }
 
 message UserLeft {

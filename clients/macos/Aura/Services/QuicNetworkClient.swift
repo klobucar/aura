@@ -72,13 +72,24 @@ public class QuicNetworkClient {
     /// Track which users are currently speaking (for UI indicators)
     public var activeSpeakers: Set<UInt32> = []
 
-    /// Local-only per-user playback gain, keyed by session id.
+    /// Local-only per-user playback gain, keyed by stable user UUID.
     /// 1.0 = unchanged, 0.0..2.0 is the UI-allowed range.
-    /// Nothing about this is sent to the server or to other clients.
-    public var userVolumes: [UInt32: Float] = [:]
+    /// Persists across reconnects via UserDefaults. Nothing about this
+    /// is sent to the server or to other clients.
+    public var userVolumes: [String: Float] = [:]
 
-    /// Session ids of users the local user has muted for themselves only.
-    public var locallyMutedUsers: Set<UInt32> = []
+    /// User UUIDs that the local user has muted for themselves only.
+    /// Persists across reconnects via UserDefaults.
+    public var locallyMutedUsers: Set<String> = []
+
+    /// Ephemeral session-id → user-uuid index. Populated from UserJoined
+    /// broadcasts and from ServerSnapshot channel user lists, torn down
+    /// when a user leaves. Used to translate between the wire-level
+    /// session identity and the stable UUID-keyed local state above.
+    private var sessionToUuid: [UInt32: String] = [:]
+
+    private static let localVolumesDefaultsKey = "AuraLocalVolumes"
+    private static let locallyMutedDefaultsKey = "AuraLocallyMutedUsers"
     
     /// Last detected untrusted certificate fingerprint for TOFU prompt
     public var lastUntrustedFingerprint: String?
@@ -182,6 +193,8 @@ public class QuicNetworkClient {
     private var savedPassword: String?
     
     public init() {
+        loadLocalMixerPrefs()
+
         // Listen for audio settings changes
         NotificationCenter.default.addObserver(
             forName: .audioSettingsChanged,
@@ -658,47 +671,120 @@ public class QuicNetworkClient {
     /// Set a local-only volume multiplier for a single remote user.
     /// `volume` is clamped to `[0.0, 2.0]`; 1.0 is unchanged. Nothing
     /// about this is sent to the server — it only affects what this
-    /// client hears.
+    /// client hears. Stored per-UUID so it survives reconnects.
     @MainActor
     public func setLocalVolume(sessionId: UInt32, volume: Float) {
         let clamped = max(0.0, min(2.0, volume))
-        if abs(clamped - 1.0) < 0.001 {
-            userVolumes.removeValue(forKey: sessionId)
-        } else {
-            userVolumes[sessionId] = clamped
-        }
         audioReceiver?.setSenderGain(sessionId: sessionId, gain: clamped)
+
+        guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else {
+            // No stable identity yet — apply to this session only,
+            // don't persist. Will snap back on next reconnect.
+            return
+        }
+        if abs(clamped - 1.0) < 0.001 {
+            userVolumes.removeValue(forKey: uuid)
+        } else {
+            userVolumes[uuid] = clamped
+        }
+        saveLocalMixerPrefs()
     }
 
     /// Toggle whether a given remote user is locally muted for this
     /// client only. The server and the other user are not told.
+    /// Stored per-UUID so it survives reconnects.
     @MainActor
     public func toggleLocalMute(sessionId: UInt32) {
-        if locallyMutedUsers.contains(sessionId) {
-            locallyMutedUsers.remove(sessionId)
+        guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else {
+            // Can't persist without a stable id; fall back to a
+            // session-scoped toggle via the Rust mixer directly.
+            let nowMuted = !(audioReceiverIsMuted(sessionId: sessionId))
+            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: nowMuted)
+            return
+        }
+
+        if locallyMutedUsers.contains(uuid) {
+            locallyMutedUsers.remove(uuid)
             audioReceiver?.setSenderMuted(sessionId: sessionId, muted: false)
         } else {
-            locallyMutedUsers.insert(sessionId)
+            locallyMutedUsers.insert(uuid)
             audioReceiver?.setSenderMuted(sessionId: sessionId, muted: true)
         }
+        saveLocalMixerPrefs()
     }
 
     /// Whether the given session id is currently locally muted.
     public func isLocallyMuted(sessionId: UInt32) -> Bool {
-        locallyMutedUsers.contains(sessionId)
+        guard let uuid = sessionToUuid[sessionId] else { return false }
+        return locallyMutedUsers.contains(uuid)
     }
 
+    /// Current local playback gain (1.0 = unchanged) for a given session.
+    public func localVolume(for sessionId: UInt32) -> Float {
+        guard let uuid = sessionToUuid[sessionId] else { return 1.0 }
+        return userVolumes[uuid] ?? 1.0
+    }
+
+    /// Best-effort check: the Rust mixer has no reader for the mute
+    /// flag, so we fall back to `false` when there's no UUID mapping.
+    /// Only reached in the "no stable id yet" path of toggleLocalMute.
+    private func audioReceiverIsMuted(sessionId: UInt32) -> Bool { false }
+
     /// Push any persisted local volume / mute choices into the Rust
-    /// mixer for the given session id. Must be called right after a
-    /// successful `receiver.addSender(...)` so that re-joining a
-    /// channel or key rotation doesn't silently reset prefs.
+    /// mixer for the given session id. Called right after every
+    /// `receiver.addSender(...)` so that re-joining a channel or key
+    /// rotation doesn't silently reset prefs, and when the session-to
+    /// -UUID mapping is first learned (so a user who is muted by UUID
+    /// gets muted immediately after they register in the current
+    /// connection).
     fileprivate func applyLocalMixerPrefs(sessionId: UInt32) {
         guard let receiver = audioReceiver else { return }
-        if let vol = userVolumes[sessionId] {
+        guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else { return }
+        if let vol = userVolumes[uuid] {
             receiver.setSenderGain(sessionId: sessionId, gain: vol)
         }
-        if locallyMutedUsers.contains(sessionId) {
+        if locallyMutedUsers.contains(uuid) {
             receiver.setSenderMuted(sessionId: sessionId, muted: true)
+        }
+    }
+
+    /// Register the session → UUID mapping the server just told us
+    /// about and immediately honour any previously-persisted local
+    /// volume / mute for that user.
+    fileprivate func registerSessionIdentity(sessionId: UInt32, userUuid: String) {
+        guard !userUuid.isEmpty else { return }
+        sessionToUuid[sessionId] = userUuid
+        applyLocalMixerPrefs(sessionId: sessionId)
+    }
+
+    /// Forget a session mapping on UserLeft. Local preferences stay
+    /// in the UUID-keyed dicts so they re-apply on the user's next
+    /// reconnect.
+    fileprivate func forgetSessionIdentity(sessionId: UInt32) {
+        sessionToUuid.removeValue(forKey: sessionId)
+    }
+
+    // MARK: Local Mixer Persistence
+
+    private func loadLocalMixerPrefs() {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: Self.localVolumesDefaultsKey),
+           let decoded = try? JSONDecoder().decode([String: Float].self, from: data) {
+            userVolumes = decoded
+        }
+        if let data = defaults.data(forKey: Self.locallyMutedDefaultsKey),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            locallyMutedUsers = Set(decoded)
+        }
+    }
+
+    private func saveLocalMixerPrefs() {
+        let defaults = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(userVolumes) {
+            defaults.set(data, forKey: Self.localVolumesDefaultsKey)
+        }
+        if let data = try? JSONEncoder().encode(Array(locallyMutedUsers)) {
+            defaults.set(data, forKey: Self.locallyMutedDefaultsKey)
         }
     }
 
@@ -1012,11 +1098,17 @@ public class QuicNetworkClient {
             let channelId = join.channelId
             let sessionId = join.sessionId
             let displayName = join.displayName
+            let userUuid = join.userUuid
 
             let user = ChannelUser(sessionId: sessionId, displayName: displayName)
-            
+
             // Add to channel's user list (@Observable tracks this automatically)
             await MainActor.run {
+                // Learn the session → UUID mapping and re-apply any
+                // persisted local-mixer prefs for this user before they
+                // start streaming audio.
+                self.registerSessionIdentity(sessionId: sessionId, userUuid: userUuid)
+
                 // Get our saved display name
                 let myDisplayName = UserDefaults.standard.string(forKey: "AuraDisplayName") ?? ""
                 
@@ -1078,9 +1170,15 @@ public class QuicNetworkClient {
             
             let channelId = left.channelId
             let sessionId = left.sessionId
-            
+
             // Remove from audio receiver
             audioReceiver?.removeSender(sessionId: sessionId)
+
+            // Drop the session → UUID mapping. Local prefs stay in
+            // the UUID-keyed dicts so they re-apply on reconnect.
+            await MainActor.run {
+                self.forgetSessionIdentity(sessionId: sessionId)
+            }
             
             // Global cleanup across ALL channels to prevent state drift
             await MainActor.run {
@@ -1166,11 +1264,17 @@ public class QuicNetworkClient {
                     var usersList: [ChannelUser] = []
                     for userStatus in c.users {
                         let sid = userStatus.sessionId
+
+                        // Learn session → UUID for every user in the
+                        // snapshot — including ourselves — so local-only
+                        // prefs attach to stable identities.
+                        self.registerSessionIdentity(sessionId: sid, userUuid: userStatus.userUuid)
+
                         guard sid != self.sessionId else { continue }
                         usersList.append(ChannelUser(sessionId: sid, displayName: userStatus.displayName))
                     }
                     newUserMapping[c.channelId] = usersList
-                    
+
                     // Add listeners for decryption
                     if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
                         for userStatus in c.users {

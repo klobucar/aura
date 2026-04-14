@@ -544,6 +544,9 @@ pub struct ChannelUserStatusRecord {
     pub is_muted: bool,
     pub is_deafened: bool,
     pub display_name: String,
+    /// Stable per-user identifier. May be an empty string if the server
+    /// hasn't resolved the session (transient ghost case).
+    pub user_uuid: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -574,6 +577,9 @@ pub struct UserJoinedRecord {
     pub channel_id: String,
     pub session_id: u32,
     pub display_name: String,
+    /// Stable per-user identifier so clients can persist local-only
+    /// state (volume / mute) across reconnects.
+    pub user_uuid: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -640,6 +646,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
                 is_muted: u.is_muted,
                 is_deafened: u.is_deafened,
                 display_name: u.display_name,
+                user_uuid: u.user_uuid,
             }).collect(),
             channel_type: match c.r#type {
                 1 => ChannelType::Lobby,
@@ -728,6 +735,7 @@ pub fn decode_user_joined(data: Vec<u8>) -> Result<UserJoinedRecord, AudioError>
         channel_id: proto.channel_id,
         session_id: proto.session_id,
         display_name: proto.display_name,
+        user_uuid: proto.user_uuid,
     })
 }
 
