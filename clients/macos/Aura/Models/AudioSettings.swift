@@ -23,31 +23,38 @@ class AudioSettings: ObservableObject {
     
     struct Hotkey: Codable, Equatable {
         let keyCode: UInt16
-        let modifiers: UInt32 // CGEventFlags rawValue
-        
+        let modifiers: UInt32 // masked CGEventFlags rawValue
+
+        /// Sentinel used when the hotkey is modifier-only (e.g. Right-Option).
+        /// 0xFFFF is outside the valid macOS virtual key-code range.
+        static let modifierOnlyKeyCode: UInt16 = 0xFFFF
+
+        var isModifierOnly: Bool { keyCode == Self.modifierOnlyKeyCode }
+
         var displayString: String {
             var parts: [String] = []
-            
-            if modifiers & UInt32(CGEventFlags.maskCommand.rawValue) != 0 {
-                parts.append("⌘")
-            }
-            if modifiers & UInt32(CGEventFlags.maskShift.rawValue) != 0 {
-                parts.append("⇧")
+
+            if modifiers & UInt32(CGEventFlags.maskControl.rawValue) != 0 {
+                parts.append("⌃")
             }
             if modifiers & UInt32(CGEventFlags.maskAlternate.rawValue) != 0 {
                 parts.append("⌥")
             }
-            if modifiers & UInt32(CGEventFlags.maskControl.rawValue) != 0 {
-                parts.append("⌃")
+            if modifiers & UInt32(CGEventFlags.maskShift.rawValue) != 0 {
+                parts.append("⇧")
             }
-            
-            // Convert keyCode to character
-            if let keyChar = keyCodeToString(keyCode) {
+            if modifiers & UInt32(CGEventFlags.maskCommand.rawValue) != 0 {
+                parts.append("⌘")
+            }
+
+            if isModifierOnly {
+                if parts.isEmpty { parts.append("(unset)") }
+            } else if let keyChar = keyCodeToString(keyCode) {
                 parts.append(keyChar)
             } else {
                 parts.append("Key \(keyCode)")
             }
-            
+
             return parts.joined()
         }
         

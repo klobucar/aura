@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var showingChannelEditor = false
     @State private var editingChannel: ChannelModel?
     @State private var pttCancellable: AnyCancellable?
+    @State private var pttErrorMessage: String?
     
     // Chat state
     @State private var messageText = ""
@@ -44,6 +45,18 @@ struct ContentView: View {
             } else {
                 loginView
             }
+        }
+        .alert(
+            "Push-to-Talk",
+            isPresented: Binding(
+                get: { pttErrorMessage != nil },
+                set: { if !$0 { pttErrorMessage = nil } }
+            ),
+            presenting: pttErrorMessage
+        ) { _ in
+            Button("OK", role: .cancel) { pttErrorMessage = nil }
+        } message: { msg in
+            Text(msg)
         }
     }
     
@@ -702,14 +715,26 @@ struct ContentView: View {
                 // Disable PTT
                 pttCancellable?.cancel()
                 pttCancellable = nil
+                hotkeyManager.unregisterHotkey()
                 audioCapture.stop()
                 isMicEnabled = false
                 client.isMuted = true
                 Task { await client.updateStatus(isMuted: true, isDeafened: isDeafened) }
             } else {
-                // Enable PTT - register hotkey and subscribe
-                if let hotkey = audioSettings.pttHotkey {
-                    hotkeyManager.registerHotkey(hotkey)
+                // Enable PTT — reject up front if prerequisites are missing
+                // instead of silently installing a subscription that will
+                // never fire.
+                guard let hotkey = audioSettings.pttHotkey else {
+                    pttErrorMessage = "Set a Push-to-Talk hotkey in Settings → Audio before enabling this mode."
+                    return
+                }
+                hotkeyManager.registerHotkey(hotkey)
+                if !hotkeyManager.hasAccessibilityPermission {
+                    // registerHotkey has already queued the pending
+                    // registration and prompted for permission; tell the
+                    // user so they know where to go.
+                    pttErrorMessage = "Aura needs Accessibility permission to detect your Push-to-Talk key. Grant it in System Settings → Privacy & Security → Accessibility, then press Enable again."
+                    return
                 }
                 pttCancellable = hotkeyManager.$isPTTActive
                     .receive(on: DispatchQueue.main)
