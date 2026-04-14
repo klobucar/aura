@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  pebble:
+    image: letsencrypt/pebble:latest
+    command: pebble -config /test/config/pebble-config.json -strict
+    ports:
+      - "14000:14000" # ACME directory
+      - "15000:15000" # Management
+    environment:
+      - PEBBLE_VA_NOSLEEP=1
+      - PEBBLE_VA_ALWAYS_VALID=1
+    volumes:
+      - ./tests/pebble-config.json:/test/config/pebble-config.json
+    networks:
+      - aura-test
+
+networks:
+  aura-test:
+    driver: bridge

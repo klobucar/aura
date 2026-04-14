@@ -61,7 +61,16 @@ install-libs:
 # Run tests
 test:
 	@echo "🧪 Running tests..."
-	cargo test --workspace
+	PROTOC=/opt/homebrew/bin/protoc cargo test --workspace
+
+# Run ACME integration tests (requires docker-compose/Pebble)
+test-acme:
+	@echo "🧪 Starting Pebble ACME server..."
+	docker-compose -f docker-compose.test.yml up -d
+	@echo "🧪 Running ACME integration tests..."
+	PROTOC=/opt/homebrew/bin/protoc cargo test -p aura-server --test acme_tests -- --nocapture
+	@echo "🧹 Cleaning up Pebble..."
+	docker-compose -f docker-compose.test.yml down
 
 # Clean build artifacts
 clean:

@@ -9,12 +9,11 @@ use bytes::{BufMut, BytesMut};
 use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_acme::{AcmeConfig, caches::DirCache};
+use rustls_acme::{AcmeConfig, UseChallenge, caches::DirCache};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, info, warn};
 
 // Protocol message types
@@ -49,88 +48,140 @@ pub struct QuicServer {
 impl QuicServer {
     /// Create a new QUIC server based on the provided configuration.
     pub fn new(bind_addr: SocketAddr, state: Arc<ServerState>) -> Result<Self> {
-        let server_config = if let Some(domain) = &state.config.server.acme_domain {
-            info!("Configuring automated TLS via ACME (Let's Encrypt) for {}...", domain);
-            Self::configure_acme(domain, &state)?
-        } else if let (Some(cert_path), Some(key_path)) = (&state.config.server.cert_path, &state.config.server.key_path) {
+        // We're bypassing ACME for now due to JSON parsing issues with Let's Encrypt Staging ("missing field token").
+        // Falling back to self-signed or manual TLS as requested.
+        
+        // Still start the health-check listener so Fly.io doesn't think we're dead
+        Self::start_health_check_listener(&state);
+
+        let server_config = if let (Some(cert_path), Some(key_path)) = (&state.config.server.cert_path, &state.config.server.key_path) {
             info!("Loading custom TLS certificates from {:?}...", cert_path);
             Self::configure_manual_tls(cert_path, key_path)?
         } else {
-            info!("No TLS certificates provided. Generating self-signed fallback...");
+            info!("ACME disabled or bypassed. Generating self-signed fallback...");
             Self::generate_self_signed_config()?
         };
-        
+
         info!("Creating QUIC endpoint on {}...", bind_addr);
         let endpoint = Endpoint::server(server_config, bind_addr)
             .map_err(|e| anyhow!("Failed to bind QUIC endpoint to {}: {}", bind_addr, e))?;
-        
+
         let local_addr = endpoint.local_addr()
             .map_err(|e| anyhow!("Failed to get local address: {}", e))?;
-        
+
         info!("✓ QUIC server bound to UDP socket: {}", local_addr);
         info!("✓ ALPN protocol: 'aura-dave'");
-        
+
         Ok(Self { endpoint, state })
     }
-    
+
+    #[allow(dead_code)]
     /// Configure ACME (Let's Encrypt) for automated certificate management.
     fn configure_acme(domain: &str, state: &Arc<ServerState>) -> Result<ServerConfig> {
         let contact = state.config.server.acme_contact.clone()
             .unwrap_or_else(|| "admin@aura.local".to_string());
         let cache_path = state.config.server.acme_cache_path.clone()
             .unwrap_or_else(|| Path::new("data/acme").to_path_buf());
-            
+
         // Ensure cache directory exists
         std::fs::create_dir_all(&cache_path)?;
-        
+
         // Define ALPN for Aura
         let alpn = vec![b"aura-dave".to_vec()];
-        
-        // Build ACME config
-        let acme_state = AcmeConfig::new([domain])
+
+        // Build ACME config — must set challenge_type to Http01
+        let mut acme_builder = AcmeConfig::new([domain])
             .contact([format!("mailto:{}", contact)])
             .cache_with_boxed_err(DirCache::new(cache_path))
-            .state();
-            
+            .challenge_type(UseChallenge::Http01);
+
+        if let Some(url) = &state.config.server.acme_directory_url {
+            info!("[ACME] Using custom directory URL: {}", url);
+            acme_builder = acme_builder.directory(url);
+        }
+
+        let mut acme_state = acme_builder.state();
         let resolver = acme_state.resolver();
-        let bind_addr: SocketAddr = state.config.server.bind_address.parse()
+
+        // Get the Tower service that automatically responds to HTTP-01 challenges.
+        // This handles token lookup and key authorization computation internally.
+        let challenge_service = acme_state.http01_challenge_tower_service();
+
+        let bind_addr_str = &state.config.server.bind_address;
+        let bind_addr: SocketAddr = bind_addr_str.parse()
             .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
-        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), 443);
-        
-        // Drive the ACME state via a background TCP listener for ALPN challenges
-        // Required because QUIC (UDP) cannot serve the TLS-ALPN-01 challenge directly.
+        let acme_port = state.config.server.acme_bind_port.unwrap_or(8080);
+        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), acme_port);
+
+        // Drive the ACME event loop in a background task
         tokio::spawn(async move {
-            info!("[ACME] Driving ACME state via TCP/443 (for ALPN challenges)...");
+            use tokio_stream::StreamExt;
+            loop {
+                match acme_state.next().await {
+                    Some(Ok(ok)) => info!("[ACME] Event: {:?}", ok),
+                    Some(Err(err)) => error!("[ACME] Error: {:?}", err),
+                    None => break,
+                }
+            }
+        });
+
+        // Serve HTTP-01 challenges + health check via Axum on a background task
+        tokio::spawn(async move {
+            use axum::{Router, routing::get};
+            
+            let app = Router::new()
+                .route_service("/.well-known/acme-challenge/{challenge_token}", challenge_service)
+                .route("/", get(|| async { "Aura Server ACME/Health-check OK" }));
+
+            info!("[ACME] Driving HTTP-01 challenges via Axum on port {}...", acme_port);
             let listener = match tokio::net::TcpListener::bind(tcp_bind_addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    error!("[ACME] Failed to bind TCP listener for ALPN: {}", e);
+                    error!("[ACME] Failed to bind Axum listener on port {}: {}", acme_port, e);
                     return;
                 }
             };
             
-            let mut incoming = acme_state.tokio_incoming(
-                tokio_stream::wrappers::TcpListenerStream::new(listener),
-                vec![b"aura-dave".to_vec()]
-            );
-            
-            while let Some(res) = incoming.next().await {
-                if let Err(e) = res {
-                    debug!("[ACME] ALPN challenge or TLS error: {:?}", e);
-                }
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("[ACME] Axum server error on port {}: {}", acme_port, e);
             }
         });
-        
+
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(resolver);
-            
+
         server_crypto.alpn_protocols = alpn;
-        
+
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert rustls config for ACME: {}", e))?;
-            
+
         Ok(Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))?)
+    }
+
+    /// Minimal TCP listener for Fly.io health checks when ACME is disabled.
+    fn start_health_check_listener(state: &Arc<ServerState>) {
+        let bind_addr_str = &state.config.server.bind_address;
+        let bind_addr: SocketAddr = bind_addr_str.parse()
+            .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
+        let acme_port = state.config.server.acme_bind_port.unwrap_or(443);
+        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), acme_port);
+
+        tokio::spawn(async move {
+            info!("[Network] Starting health-check TCP listener on port {}...", acme_port);
+            let listener = match tokio::net::TcpListener::bind(tcp_bind_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("[Network] Failed to bind health-check listener: {}", e);
+                    return;
+                }
+            };
+
+            while let Ok((stream, _)) = listener.accept().await {
+                // Just keep the port open to satisfy the health check
+                drop(stream);
+            }
+        });
     }
     
     /// Configure manual TLS using certificates from the filesystem.
