@@ -17,9 +17,11 @@ enum AuraThemeType: String, CaseIterable, Codable {
 
 class AppSettings: ObservableObject {
     @Published var theme: AuraThemeType = .zenith
+    @Published var trustedFingerprints: [String: String] = [:]
     
     private let defaults = UserDefaults.standard
     private let themeKey = "AuraThemeSelection"
+    private let fingerprintsKey = "AuraTrustedFingerprints"
     
     static let shared = AppSettings()
     
@@ -32,9 +34,23 @@ class AppSettings: ObservableObject {
            let savedTheme = AuraThemeType(rawValue: themeString) {
             theme = savedTheme
         }
+        
+        if let savedFingerprints = defaults.dictionary(forKey: fingerprintsKey) as? [String: String] {
+            trustedFingerprints = savedFingerprints
+        }
     }
     
     func saveSettings() {
         defaults.set(theme.rawValue, forKey: themeKey)
+        defaults.set(trustedFingerprints, forKey: fingerprintsKey)
+    }
+    
+    func trustFingerprint(host: String, fingerprint: String) {
+        trustedFingerprints[host.lowercased()] = fingerprint
+        saveSettings()
+    }
+    
+    func isFingerprintTrusted(host: String, fingerprint: String) -> Bool {
+        return trustedFingerprints[host.lowercased()] == fingerprint
     }
 }
