@@ -13,7 +13,9 @@ use rustls_acme::{AcmeConfig, UseChallenge, caches::DirCache};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 // Protocol message types
@@ -37,7 +39,10 @@ const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after 
 
 // Security limits
 const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
-const MAX_CONTROL_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2MB for signaling/metadata
+const MAX_CONTROL_PACKET_SIZE: usize = 256 * 1024; // 256KB for signaling/metadata/MLS welcomes
+// Hard ceiling on how long a single control frame body may take to arrive.
+// Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -987,13 +992,35 @@ impl ConnectionContext {
         let mut len_buf = [0u8; 4];
         self.recv.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
-        
+
         if len > MAX_CONTROL_PACKET_SIZE {
-            return Err(anyhow!("Incoming frame too large: {} bytes (max {})", len, MAX_CONTROL_PACKET_SIZE));
+            return Err(anyhow!(
+                "Incoming frame too large: {} bytes (max {})",
+                len,
+                MAX_CONTROL_PACKET_SIZE
+            ));
         }
-        
-        let mut buf = vec![0u8; len];
-        self.recv.read_exact(&mut buf).await?;
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Do NOT pre-allocate based on the attacker-controlled length prefix:
+        // that lets a client claim 256KB and then send nothing, pinning one
+        // buffer per connection. take() caps the upper bound, read_to_end
+        // grows the Vec only as bytes actually arrive, and the timeout
+        // bounds how long a single frame may remain in flight.
+        let mut buf = Vec::new();
+        let read = timeout(
+            FRAME_READ_TIMEOUT,
+            (&mut self.recv).take(len as u64).read_to_end(&mut buf),
+        )
+        .await
+        .map_err(|_| anyhow!("Frame read timed out after {:?}", FRAME_READ_TIMEOUT))??;
+
+        if read != len {
+            return Err(anyhow!("Incomplete frame: got {} of {} bytes", read, len));
+        }
         Ok(buf)
     }
 
