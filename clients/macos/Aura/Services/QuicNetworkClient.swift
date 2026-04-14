@@ -74,6 +74,23 @@ public class QuicNetworkClient {
     
     /// Last detected untrusted certificate fingerprint for TOFU prompt
     public var lastUntrustedFingerprint: String?
+
+    /// Rolling round-trip latency to the server, in milliseconds.
+    /// `nil` until the first datagram pong has been received (or after a
+    /// reset). Driven by the datagram ping loop below.
+    public var latencyMs: Int?
+
+    /// Monotonic-clock timestamps of outstanding ping nonces, keyed by the
+    /// 8-byte nonce we sent. Pruned on pong receipt or when older than
+    /// `pingTimeoutSeconds`.
+    private var pendingPings: [UInt64: DispatchTime] = [:]
+
+    /// Consecutive ping losses; if this exceeds `pingLossThreshold` we
+    /// assume the server is gone and trigger a reconnect.
+    private var consecutivePingLosses: Int = 0
+
+    /// Task running the datagram RTT probe loop.
+    private var pingTask: Task<Void, Never>?
     
     /// Timeout tasks for clearing speakers who stop sending audio
     private var speakerTimeouts: [UInt32: Task<Void, Never>] = [:]
@@ -95,6 +112,7 @@ public class QuicNetworkClient {
     private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
     private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
     private static let MSG_UPDATE_STATUS: UInt8 = 0x45
+    private static let MSG_PROFILE_UPDATED: UInt8 = 0x46 // Server → clients broadcast
     
     // MLS Protocol message types
     private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
@@ -113,6 +131,11 @@ public class QuicNetworkClient {
     
     // Keepalive interval (must be < server timeout of 30s)
     private static let keepaliveInterval: TimeInterval = 10.0
+
+    // Datagram RTT probe cadence and loss policy.
+    private static let pingInterval: TimeInterval = 5.0
+    private static let pingTimeoutSeconds: TimeInterval = 15.0
+    private static let pingLossThreshold: Int = 3
     
     /// Timer for sending keepalive pings
     private var keepaliveTask: Task<Void, Never>?
@@ -294,21 +317,26 @@ public class QuicNetworkClient {
             }
         }
         
-        // Set up handler for incoming datagrams (audio packets)
+        // Set up handler for incoming datagrams (audio packets + ping echoes)
         group.setReceiveHandler(maximumMessageSize: 1220, rejectOversizedMessages: true) { [weak self] _, content, _ in
             guard let self = self, let data = content, !data.isEmpty else { return }
-            
-            print("[QuicClient] Received datagram: \(data.count) bytes - First byte: 0x\(String(format: "%02X", data[0]))")
-            
-            // Parse datagram type
-            if data.count == 1 {
-                print("[QuicClient] Ignoring 1-byte datagram (likely keepalive)")
+
+            // Ping echo from the server: [0x00][8-byte nonce]. A bare
+            // 1-byte 0x00 is a legacy server-initiated keepalive; ignore.
+            if data[0] == 0x00 {
+                if data.count >= 9 {
+                    let nonce = data.subdata(in: 1..<9).withUnsafeBytes {
+                        $0.load(as: UInt64.self)
+                    }
+                    Task { @MainActor in
+                        self.recordPingEcho(nonce: nonce)
+                    }
+                }
                 return
             }
-            
+
             if data[0] == 0x01 {  // Audio datagram
                 let audioData = data.subdata(in: 1..<data.count)
-                print("[QuicClient] Processing audio datagram: \(audioData.count) bytes")
                 Task { @MainActor in
                     self.processIncomingAudioPacket(audioData)
                 }
@@ -700,37 +728,125 @@ public class QuicNetworkClient {
     /// Start periodic keepalive pings to prevent session timeout
     private func startKeepalive() {
         stopKeepalive()
-        
+
         keepaliveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(Self.keepaliveInterval * 1_000_000_000))
-                
+
                 guard let self = self, self.isAuthenticated else { break }
-                
+
                 await self.sendKeepalivePing()
             }
         }
-        
+
+        startPingProbe()
+
         print("[QuicClient] Keepalive timer started (every \(Self.keepaliveInterval)s)")
     }
-    
+
     /// Stop the keepalive timer
     private func stopKeepalive() {
         keepaliveTask?.cancel()
         keepaliveTask = nil
+        stopPingProbe()
     }
-    
-    /// Send a keepalive ping via control stream
+
+    /// Send a keepalive ping via control stream.
+    /// A repeated send failure here is our earliest signal that the server
+    /// has vanished, so we hand off to the reconnect path immediately
+    /// instead of just logging and looping forever.
     private func sendKeepalivePing() async {
         guard let stream = controlStream else { return }
-        
-        // Send keepalive ping (0x00 byte)
+
         let ping = Data([0x00])
         do {
             try await send(data: ping, on: stream)
         } catch {
             print("[QuicClient] Keepalive ping failed: \(error)")
+            if self.isAuthenticated && !self.isIntentionalDisconnect {
+                await MainActor.run { self.handleConnectionLoss() }
+            }
         }
+    }
+
+    // MARK: - Datagram RTT Probe
+
+    /// Start the datagram ping loop that measures round-trip latency.
+    /// Runs in parallel with the reliable keepalive; pings are unreliable
+    /// by design so a single loss does not trip the reconnect path.
+    private func startPingProbe() {
+        stopPingProbe()
+        pendingPings.removeAll()
+        consecutivePingLosses = 0
+
+        pingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.pingInterval * 1_000_000_000))
+                guard let self = self, self.isAuthenticated else { break }
+                await self.sendPingProbe()
+            }
+        }
+    }
+
+    private func stopPingProbe() {
+        pingTask?.cancel()
+        pingTask = nil
+        pendingPings.removeAll()
+        consecutivePingLosses = 0
+    }
+
+    /// Fire one datagram probe and prune any stale pending entries.
+    /// Format: `[0x00][8-byte random nonce]`.
+    private func sendPingProbe() async {
+        guard let group = quicGroup else { return }
+
+        // Drop any pending probes older than the timeout window and count
+        // them as losses. Three in a row = assume the server is gone.
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let windowNs = UInt64(Self.pingTimeoutSeconds * 1_000_000_000)
+        let cutoff: UInt64 = nowNs > windowNs ? nowNs - windowNs : 0
+        let stale = await MainActor.run { () -> Int in
+            let before = self.pendingPings.count
+            self.pendingPings = self.pendingPings.filter { $0.value.uptimeNanoseconds >= cutoff }
+            let expired = before - self.pendingPings.count
+            if expired > 0 {
+                self.consecutivePingLosses += expired
+            }
+            return self.consecutivePingLosses
+        }
+
+        if stale >= Self.pingLossThreshold {
+            print("[QuicClient] \(stale) consecutive ping losses — treating server as gone")
+            if self.isAuthenticated && !self.isIntentionalDisconnect {
+                await MainActor.run { self.handleConnectionLoss() }
+            }
+            return
+        }
+
+        let nonce = UInt64.random(in: UInt64.min...UInt64.max)
+        var datagram = Data([0x00])
+        withUnsafeBytes(of: nonce) { datagram.append(contentsOf: $0) }
+
+        await MainActor.run {
+            self.pendingPings[nonce] = DispatchTime.now()
+        }
+
+        group.send(content: datagram) { error in
+            if let error = error {
+                print("[QuicClient] Ping datagram send failed: \(error)")
+            }
+        }
+    }
+
+    /// Called from the datagram receive handler when the server echoes a
+    /// ping back. Computes RTT and clears the loss counter.
+    @MainActor
+    fileprivate func recordPingEcho(nonce: UInt64) {
+        guard let sentAt = pendingPings.removeValue(forKey: nonce) else { return }
+        let rttNs = DispatchTime.now().uptimeNanoseconds &- sentAt.uptimeNanoseconds
+        let rttMs = Int(rttNs / 1_000_000)
+        latencyMs = rttMs
+        consecutivePingLosses = 0
     }
     
     // MARK: - Server Message Listening
@@ -820,7 +936,10 @@ public class QuicNetworkClient {
             
         case Self.MSG_UPDATE_STATUS: // 0x45
             await handleUserStatusUpdate(stream: stream)
-            
+
+        case Self.MSG_PROFILE_UPDATED: // 0x46 - Server broadcasts a user's profile change
+            await handleProfileUpdated(stream: stream)
+
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
             break
@@ -1512,6 +1631,50 @@ public class QuicNetworkClient {
         }
     }
     
+    /// Handle an incoming profile broadcast (bio / avatar / display name)
+    /// that the server forwarded from another connected client.
+    private func handleProfileUpdated(stream: NWConnection) async {
+        do {
+            let lenData = try await receive(on: stream, minimumLength: 4, maximumLength: 4)
+            let length = lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+
+            if length == 0 || Int(length) > Self.MAX_CONTROL_PACKET_SIZE {
+                print("[QuicClient] Profile broadcast rejected: length \(length) out of bounds")
+                return
+            }
+
+            let payload = try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
+            let profile = try decodeUserProfile(data: payload)
+
+            await MainActor.run {
+                self.profiles[profile.userId] = profile
+
+                // Propagate display-name / bio / avatar into the per-channel
+                // user lists so speaker labels and avatar thumbnails update
+                // without waiting for a full ServerSnapshot round-trip.
+                for channelId in self.usersByChannel.keys {
+                    if let idx = self.usersByChannel[channelId]?.firstIndex(where: { $0.id == profile.userId }),
+                       let existing = self.usersByChannel[channelId]?[idx] {
+                        self.usersByChannel[channelId]?[idx] = ChannelUser(
+                            sessionId: existing.id,
+                            displayName: profile.displayName,
+                            bio: profile.bio,
+                            avatarData: profile.avatarData.isEmpty ? nil : profile.avatarData,
+                            isMuted: existing.isMuted,
+                            isDeafened: existing.isDeafened,
+                            isDisconnected: existing.isDisconnected
+                        )
+                    }
+                }
+
+                print("[QuicClient] Profile updated for user \(profile.userId) (bio: \(profile.bio.count)B, avatar: \(profile.avatarData.count)B)")
+                NotificationCenter.default.post(name: .profileUpdated, object: profile.userId)
+            }
+        } catch {
+            print("[QuicClient] Failed to parse profile update: \(error)")
+        }
+    }
+
     private func handleUserStatusUpdate(stream: NWConnection) async {
         do {
             // Read length (4 bytes)

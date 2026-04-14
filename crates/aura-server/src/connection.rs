@@ -30,6 +30,7 @@ const MSG_TEXT_PACKET: u8 = 0x30;
 const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
 const MSG_UPDATE_PROFILE: u8 = 0x42;
+const MSG_PROFILE_UPDATED: u8 = 0x46;
 const MSG_DELETE_CHANNEL: u8 = 0x43;
 const MSG_DELETE_USER: u8 = 0x44;
 const MSG_UPDATE_STATUS: u8 = 0x45;
@@ -368,8 +369,12 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                                             ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                         }
                                     }
-                                    0x00 => { // Keepalive
-                                        let _ = ctx.conn.send_datagram(bytes::Bytes::from_static(&[0x00]));
+                                    0x00 => {
+                                        // Keepalive / RTT probe. Echo the full
+                                        // datagram so a client-supplied nonce
+                                        // (any trailing bytes) can be used to
+                                        // measure round-trip latency.
+                                        let _ = ctx.conn.send_datagram(data.clone());
                                     }
                                     _ => {}
                                 }
@@ -1003,6 +1008,9 @@ impl ConnectionContext {
                     is_deafened,
                 };
                 self.send_proto_response(MSG_UPDATE_STATUS, update).await?;
+            }
+            ServiceMessage::ProfileUpdated(profile) => {
+                self.send_proto_response(MSG_PROFILE_UPDATED, profile).await?;
             }
         }
         Ok(())
