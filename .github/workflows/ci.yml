@@ -54,13 +54,8 @@ jobs:
       - run: cargo test --workspace --no-fail-fast
 
   clippy:
-    # Advisory until the existing warning backlog is cleaned up.
-    # Once the workspace is clippy-clean, replace `cargo clippy ...` with
-    # `cargo clippy --workspace --all-targets -- -D warnings` and remove
-    # `continue-on-error` so it gates merges.
-    name: cargo clippy (advisory)
+    name: cargo clippy
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
@@ -83,4 +78,4 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
