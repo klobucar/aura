@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - run: cargo test --workspace --no-fail-fast
+
+  clippy:
+    # Advisory until the existing warning backlog is cleaned up.
+    # Once the workspace is clippy-clean, replace `cargo clippy ...` with
+    # `cargo clippy --workspace --all-targets -- -D warnings` and remove
+    # `continue-on-error` so it gates merges.
+    name: cargo clippy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - run: cargo clippy --workspace --all-targets
