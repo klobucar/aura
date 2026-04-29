@@ -138,7 +138,7 @@ impl Config {
     /// Load configuration from `server.toml` with environment variable overrides.
     pub fn load() -> anyhow::Result<Self> {
         let mut config = Self::load_from("server.toml")?;
-        
+
         // Environment variable overrides
         if let Ok(addr) = std::env::var("AURA_BIND_ADDRESS") {
             config.server.bind_address = addr;

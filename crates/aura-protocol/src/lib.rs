@@ -18,7 +18,7 @@ pub use fast_header::*;
 pub fn make_mls_group_id(channel_id: &str, is_voice: bool) -> String {
     let group_type = if is_voice { "voice" } else { "text" };
     let prefix = format!("{}-v1-", group_type);
-    
+
     if channel_id.starts_with(&prefix) {
         channel_id.to_string()
     } else {
@@ -28,9 +28,8 @@ pub fn make_mls_group_id(channel_id: &str, is_voice: bool) -> String {
 
 impl Position {
     pub fn distance(&self, other: &Position) -> f32 {
-        ((self.x - other.x).powi(2) + 
-         (self.y - other.y).powi(2) + 
-         (self.z - other.z).powi(2)).sqrt()
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2) + (self.z - other.z).powi(2))
+            .sqrt()
     }
 }
 
@@ -60,11 +59,11 @@ mod tests {
         assert_eq!(decoded.sender_id, original.sender_id);
         assert_eq!(decoded.channel_id, original.channel_id);
         assert_eq!(decoded.epoch, original.epoch);
-        
+
         match decoded.content {
             Some(mls_envelope::Content::Commit(data)) => {
                 assert_eq!(data, vec![10, 20, 30]);
-            },
+            }
             _ => panic!("Wrong content type"),
         }
     }

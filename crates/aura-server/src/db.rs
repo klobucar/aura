@@ -97,11 +97,9 @@ impl Database {
 
         // Check schema version
         let version: i64 = conn
-            .query_row(
-                "SELECT version FROM schema_version LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap_or(0);
 
         if version == 0 {
@@ -474,16 +472,26 @@ impl Database {
 
     /// Create bootstrap admin from public key.
     /// This is used for first-time server setup via environment variable.
-    pub fn create_bootstrap_admin(&self, public_key: &[u8; 32], display_name: &str) -> Result<String> {
+    pub fn create_bootstrap_admin(
+        &self,
+        public_key: &[u8; 32],
+        display_name: &str,
+    ) -> Result<String> {
         let user_uuid = self.create_user(public_key, display_name)?;
         self.grant_admin(&user_uuid, &AdminPermissions::full(), None)?;
         self.set_user_verified(&user_uuid, true)?;
-        tracing::info!("Created bootstrap admin: uuid={}, name={}", user_uuid, display_name);
+        tracing::info!(
+            "Created bootstrap admin: uuid={}, name={}",
+            user_uuid,
+            display_name
+        );
         Ok(user_uuid)
     }
 
     /// Get all channels from the database.
-    pub fn get_all_channels(&self) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32, i32)>> {
+    pub fn get_all_channels(
+        &self,
+    ) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32, i32)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT channel_id, name, comment, icon_type, icon_data, position, channel_type 
@@ -508,7 +516,16 @@ impl Database {
     }
 
     /// Upsert a channel.
-    pub fn upsert_channel(&self, id: Option<String>, name: &str, comment: &str, icon_type: i32, icon_data: &[u8], position: i32, channel_type: i32) -> Result<String> {
+    pub fn upsert_channel(
+        &self,
+        id: Option<String>,
+        name: &str,
+        comment: &str,
+        icon_type: i32,
+        icon_data: &[u8],
+        position: i32,
+        channel_type: i32,
+    ) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         if let Some(id) = id {
             conn.execute(
@@ -531,12 +548,18 @@ impl Database {
     /// Delete a channel.
     pub fn delete_channel(&self, channel_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM channels WHERE channel_id = ?", params![channel_id])?;
+        conn.execute(
+            "DELETE FROM channels WHERE channel_id = ?",
+            params![channel_id],
+        )?;
         Ok(())
     }
 
     /// Get a user profile.
-    pub fn get_user_profile(&self, user_uuid: &str) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+    pub fn get_user_profile(
+        &self,
+        user_uuid: &str,
+    ) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>)>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT bio, avatar_data, signature, signing_key FROM user_profiles WHERE user_uuid = ?",
@@ -548,7 +571,14 @@ impl Database {
     }
 
     /// Update a user profile.
-    pub fn upsert_user_profile(&self, user_uuid: &str, bio: &str, avatar_data: &[u8], signature: &[u8], signing_key: &[u8]) -> Result<()> {
+    pub fn upsert_user_profile(
+        &self,
+        user_uuid: &str,
+        bio: &str,
+        avatar_data: &[u8],
+        signature: &[u8],
+        signing_key: &[u8],
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO user_profiles (user_uuid, bio, avatar_data, signature, signing_key)
@@ -561,7 +591,10 @@ impl Database {
     /// Delete a user and their profile.
     pub fn delete_user(&self, user_uuid: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM user_profiles WHERE user_uuid = ?", params![user_uuid])?;
+        conn.execute(
+            "DELETE FROM user_profiles WHERE user_uuid = ?",
+            params![user_uuid],
+        )?;
         conn.execute("DELETE FROM admins WHERE user_uuid = ?", params![user_uuid])?;
         conn.execute("DELETE FROM users WHERE user_uuid = ?", params![user_uuid])?;
         Ok(())
@@ -591,7 +624,7 @@ mod tests {
         // Find by name (case insensitive)
         let user = db.find_user_by_name("alice").unwrap().unwrap();
         assert_eq!(user.user_uuid, user_uuid);
-        
+
         // Find by UUID
         let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
         assert_eq!(user.display_name, "Alice");

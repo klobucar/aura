@@ -3,24 +3,23 @@
 //! These wrapper types are used by the UDL-defined interfaces.
 //! They provide a simpler API that works with UniFFI's scaffolding.
 
-use std::sync::{Mutex, RwLock};
 use bytes::Bytes;
+use std::sync::{Mutex, RwLock};
 
-use aura_protocol::{
-    UserProfile as ProtoProfile, 
-    ServerState as ProtoState, ChannelIcon as ProtoIcon, channel_icon,
-    CreateChannelRequest as ProtoCreateChannel, UpdateChannelRequest as ProtoUpdateChannel,
-    UpdateProfile as ProtoUpdateProfile, UserStatusUpdate as ProtoUserStatusUpdate,
-};
-use prost::Message;
-use crate::audio_pipeline::{
-    AudioSender as InternalSender,
-    AudioReceiver as InternalReceiver,
-    AudioPipelineError as InternalError,
-};
 #[cfg(feature = "native-audio")]
 use crate::audio_io::AudioDevice;
+use crate::audio_pipeline::{
+    AudioPipelineError as InternalError, AudioReceiver as InternalReceiver,
+    AudioSender as InternalSender,
+};
 use crate::crypto::KEY_SIZE;
+use aura_protocol::{
+    channel_icon, ChannelIcon as ProtoIcon, CreateChannelRequest as ProtoCreateChannel,
+    ServerState as ProtoState, UpdateChannelRequest as ProtoUpdateChannel,
+    UpdateProfile as ProtoUpdateProfile, UserProfile as ProtoProfile,
+    UserStatusUpdate as ProtoUserStatusUpdate,
+};
+use prost::Message;
 
 /// Audio error type for UniFFI
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -61,34 +60,33 @@ impl AudioSenderWrapper {
         if key.len() != KEY_SIZE {
             return Err(AudioError::InvalidKeySize);
         }
-        
+
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(key);
-        
-        let inner = InternalSender::new(session_id, &key_arr)
-            .map_err(convert_error)?;
-        
+
+        let inner = InternalSender::new(session_id, &key_arr).map_err(convert_error)?;
+
         Ok(Self {
             inner: RwLock::new(inner),
         })
     }
-    
+
     /// Set current MLS epoch
     pub fn set_epoch(&self, epoch: u64) {
         if let Ok(inner) = self.inner.read() {
             inner.set_epoch(epoch);
         }
     }
-    
+
     /// Update encryption key and epoch (called when MLS epoch advances)
     pub fn update_key(&self, key: Vec<u8>, epoch: u64) -> Result<(), AudioError> {
         if key.len() != KEY_SIZE {
             return Err(AudioError::InvalidKeySize);
         }
-        
+
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(&key);
-        
+
         if let Ok(inner) = self.inner.read() {
             inner.update_key(&key_arr, epoch);
             Ok(())
@@ -96,7 +94,7 @@ impl AudioSenderWrapper {
             Err(AudioError::CryptoError)
         }
     }
-    
+
     /// Encode and encrypt PCM audio.
     ///
     /// Returns `Ok(None)` when VAD is enabled and the frame is silence — callers
@@ -112,17 +110,19 @@ impl AudioSenderWrapper {
     /// Returns `Ok(None)` when VAD is enabled and the (post-NS) frame is silence.
     pub fn process_float(&self, pcm: Vec<f32>) -> Result<Option<Vec<u8>>, AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        let maybe = inner.process_float_with_reference(&pcm, None).map_err(convert_error)?;
+        let maybe = inner
+            .process_float_with_reference(&pcm, None)
+            .map_err(convert_error)?;
         Ok(maybe.map(|b| b.to_vec()))
     }
-    
+
     /// Set DRED duration in 10ms frames (0 to 100)
     pub fn set_dred_duration(&self, duration: i32) {
         if let Ok(inner) = self.inner.read() {
             let _ = inner.set_dred_duration(duration);
         }
     }
-    
+
     /// Enable or disable noise suppression (RNNoise)
     pub fn set_noise_suppression_enabled(&self, enabled: bool) {
         if let Ok(inner) = self.inner.read() {
@@ -146,7 +146,7 @@ impl AudioSenderWrapper {
             inner.set_vad_threshold_db(threshold_db);
         }
     }
-    
+
     /// Enable or disable WebRTC AEC (Echo Cancellation)
     /// Note: Only works if compiled with --features webrtc-audio
     pub fn set_webrtc_aec_enabled(&self, enabled: bool) {
@@ -157,7 +157,7 @@ impl AudioSenderWrapper {
         #[cfg(not(feature = "webrtc-audio"))]
         let _ = enabled; // Suppress unused warning
     }
-    
+
     /// Enable or disable WebRTC NS (Noise Suppression)
     /// Note: Only works if compiled with --features webrtc-audio
     pub fn set_webrtc_ns_enabled(&self, enabled: bool) {
@@ -168,7 +168,7 @@ impl AudioSenderWrapper {
         #[cfg(not(feature = "webrtc-audio"))]
         let _ = enabled; // Suppress unused warning
     }
-    
+
     /// Enable or disable WebRTC AGC (Auto Gain Control)
     /// Note: Only works if compiled with --features webrtc-audio
     pub fn set_webrtc_agc_enabled(&self, enabled: bool) {
@@ -217,41 +217,53 @@ impl AudioReceiverWrapper {
             inner: RwLock::new(InternalReceiver::new()),
         }
     }
-    
+
     /// Add a sender with their key and epoch hint
-    /// 
+    ///
     /// # Arguments
     /// * `session_id` - Unique session ID for this sender
     /// * `key` - 32-byte encryption key derived from MLS
     /// * `epoch_hint` - Current MLS epoch (low 16 bits)
-    pub fn add_sender(&self, session_id: u32, key: &[u8], epoch_hint: u16) -> Result<(), AudioError> {
+    pub fn add_sender(
+        &self,
+        session_id: u32,
+        key: &[u8],
+        epoch_hint: u16,
+    ) -> Result<(), AudioError> {
         if key.len() != KEY_SIZE {
             return Err(AudioError::InvalidKeySize);
         }
-        
+
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(key);
-        
+
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        inner.add_sender(session_id, &key_arr, epoch_hint).map_err(convert_error)?;
+        inner
+            .add_sender(session_id, &key_arr, epoch_hint)
+            .map_err(convert_error)?;
         Ok(())
     }
-    
+
     /// Update a sender's key (called when MLS epoch advances)
-    /// 
+    ///
     /// Old keys are retained for graceful epoch handover.
-    pub fn update_sender_key(&self, session_id: u32, key: &[u8], epoch_hint: u16) -> Result<bool, AudioError> {
+    pub fn update_sender_key(
+        &self,
+        session_id: u32,
+        key: &[u8],
+        epoch_hint: u16,
+    ) -> Result<bool, AudioError> {
         if key.len() != KEY_SIZE {
             return Err(AudioError::InvalidKeySize);
         }
-        
+
         let mut key_arr = [0u8; KEY_SIZE];
         key_arr.copy_from_slice(key);
-        
+
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
         Ok(inner.update_sender_key(session_id, &key_arr, epoch_hint))
     }
-    
+
     /// Remove a sender
     pub fn remove_sender(&self, session_id: u32) {
         if let Ok(inner) = self.inner.read() {
@@ -274,17 +286,20 @@ impl AudioReceiverWrapper {
             inner.set_sender_muted(session_id, muted);
         }
     }
-    
+
     /// Process a received packet
     pub fn on_packet(&self, data: &[u8]) -> Result<(), AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        inner.on_packet(Bytes::copy_from_slice(data)).map_err(convert_error)?;
+        inner
+            .on_packet(Bytes::copy_from_slice(data))
+            .map_err(convert_error)?;
         Ok(())
     }
-    
+
     /// Pop decoded frames
     pub fn pop_decoded(&self) -> Vec<DecodedFrame> {
-        self.inner.read()
+        self.inner
+            .read()
             .map(|i| {
                 i.pop_decoded()
                     .into_iter()
@@ -293,16 +308,20 @@ impl AudioReceiverWrapper {
             })
             .unwrap_or_default()
     }
-    
+
     /// Pop mixed audio for playback
     /// Returns mixed PCM and list of active speaker session IDs
     pub fn pop_mixed(&self) -> Option<MixedAudioResult> {
-        self.inner.read().ok()?.pop_mixed().map(|mixed| MixedAudioResult {
-            pcm: mixed.pcm,
-            active_speakers: mixed.active_speakers,
-        })
+        self.inner
+            .read()
+            .ok()?
+            .pop_mixed()
+            .map(|mixed| MixedAudioResult {
+                pcm: mixed.pcm,
+                active_speakers: mixed.active_speakers,
+            })
     }
-    
+
     /// Set jitter buffer target latency in milliseconds
     pub fn set_jitter_buffer_ms(&self, latency_ms: u32) {
         if let Ok(inner) = self.inner.read() {
@@ -310,7 +329,6 @@ impl AudioReceiverWrapper {
         }
     }
 }
-
 
 impl Default for AudioReceiverWrapper {
     fn default() -> Self {
@@ -370,7 +388,9 @@ impl AudioHardware {
 
     pub fn write_playback(&self, pcm: Vec<i16>) -> Result<(), AudioError> {
         let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
-        device.send_playback(pcm).map_err(|_| AudioError::OpusError)?;
+        device
+            .send_playback(pcm)
+            .map_err(|_| AudioError::OpusError)?;
         Ok(())
     }
 }
@@ -379,7 +399,9 @@ impl AudioHardware {
 // Text Crypto - UniFFI-compatible wrappers
 // =============================================================================
 
-use crate::text_crypto::{encrypt_text, decrypt_text, create_text_message, TextMessage, EncryptedTextPacket};
+use crate::text_crypto::{
+    create_text_message, decrypt_text, encrypt_text, EncryptedTextPacket, TextMessage,
+};
 
 /// UniFFI-compatible TextMessage (avoids protobuf dependency in bindings)
 #[derive(Debug, Clone, uniffi::Record)]
@@ -496,7 +518,7 @@ impl TextCryptoWrapper {
         key_arr.copy_from_slice(&key);
         Ok(Self { dave_key: key_arr })
     }
-    
+
     /// Encrypt a text message
     pub fn encrypt(
         &self,
@@ -506,15 +528,24 @@ impl TextCryptoWrapper {
         message: TextMessageRecord,
     ) -> Result<EncryptedTextPacketRecord, TextCryptoError> {
         let text_msg: TextMessage = message.into();
-        encrypt_text(&self.dave_key, epoch, channel_id, sender_session_id, &text_msg)
-            .map(|p| p.into())
-            .map_err(|_| TextCryptoError::EncryptionFailed)
+        encrypt_text(
+            &self.dave_key,
+            epoch,
+            channel_id,
+            sender_session_id,
+            &text_msg,
+        )
+        .map(|p| p.into())
+        .map_err(|_| TextCryptoError::EncryptionFailed)
     }
-    
+
     /// Decrypt an encrypted text packet
-    pub fn decrypt(&self, packet: EncryptedTextPacketRecord) -> Result<TextMessageRecord, TextCryptoError> {
+    pub fn decrypt(
+        &self,
+        packet: EncryptedTextPacketRecord,
+    ) -> Result<TextMessageRecord, TextCryptoError> {
         let enc_packet: EncryptedTextPacket = packet.into();
-       decrypt_text(&self.dave_key, &enc_packet)
+        decrypt_text(&self.dave_key, &enc_packet)
             .map(|m| m.into())
             .map_err(|_| TextCryptoError::DecryptionFailed)
     }
@@ -646,47 +677,67 @@ pub struct MlsEnvelopeRecord {
 pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioError> {
     use prost::Message;
     let proto = ProtoState::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
-    
-    let channels = proto.channels.into_iter().map(|c| {
-        let icon = c.icon.and_then(|i| i.icon).map(|icon| {
-            match icon {
-                channel_icon::Icon::Emoji(e) => ChannelIconRecord { emoji: Some(e), preset_id: None, custom_data: None },
-                channel_icon::Icon::PresetId(p) => ChannelIconRecord { emoji: None, preset_id: Some(p), custom_data: None },
-                channel_icon::Icon::CustomData(d) => ChannelIconRecord { emoji: None, preset_id: None, custom_data: Some(d.to_vec()) },
+
+    let channels = proto
+        .channels
+        .into_iter()
+        .map(|c| {
+            let icon = c.icon.and_then(|i| i.icon).map(|icon| match icon {
+                channel_icon::Icon::Emoji(e) => ChannelIconRecord {
+                    emoji: Some(e),
+                    preset_id: None,
+                    custom_data: None,
+                },
+                channel_icon::Icon::PresetId(p) => ChannelIconRecord {
+                    emoji: None,
+                    preset_id: Some(p),
+                    custom_data: None,
+                },
+                channel_icon::Icon::CustomData(d) => ChannelIconRecord {
+                    emoji: None,
+                    preset_id: None,
+                    custom_data: Some(d.to_vec()),
+                },
+            });
+
+            ChannelInfoRecord {
+                channel_id: c.channel_id,
+                name: c.name,
+                comment: c.comment,
+                icon,
+                position: c.position,
+                user_ids: c.user_ids,
+                users: c
+                    .users
+                    .into_iter()
+                    .map(|u| ChannelUserStatusRecord {
+                        session_id: u.session_id,
+                        is_muted: u.is_muted,
+                        is_deafened: u.is_deafened,
+                        display_name: u.display_name,
+                        user_uuid: u.user_uuid,
+                    })
+                    .collect(),
+                channel_type: match c.r#type {
+                    1 => ChannelType::Lobby,
+                    _ => ChannelType::Regular,
+                },
             }
-        });
+        })
+        .collect();
 
-        ChannelInfoRecord {
-            channel_id: c.channel_id,
-            name: c.name,
-            comment: c.comment,
-            icon,
-            position: c.position,
-            user_ids: c.user_ids,
-            users: c.users.into_iter().map(|u| ChannelUserStatusRecord {
-                session_id: u.session_id,
-                is_muted: u.is_muted,
-                is_deafened: u.is_deafened,
-                display_name: u.display_name,
-                user_uuid: u.user_uuid,
-            }).collect(),
-            channel_type: match c.r#type {
-                1 => ChannelType::Lobby,
-                _ => ChannelType::Regular,
-            },
-        }
-    }).collect();
-
-    let profiles = proto.profiles.into_iter().map(|p| {
-        UserProfileRecord {
+    let profiles = proto
+        .profiles
+        .into_iter()
+        .map(|p| UserProfileRecord {
             user_id: p.user_id.parse().unwrap_or(0),
             display_name: p.display_name,
             bio: p.bio,
             avatar_data: p.avatar_data.to_vec(),
             signature: p.signature.to_vec(),
             signing_key: p.signing_key.to_vec(),
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(ServerStateRecord { channels, profiles })
 }
@@ -741,7 +792,8 @@ pub fn encode_user_status_update(update: UserStatusUpdate) -> Vec<u8> {
 #[uniffi::export]
 pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, AudioError> {
     use prost::Message;
-    let proto = ProtoUserStatusUpdate::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    let proto =
+        ProtoUserStatusUpdate::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
     Ok(UserStatusUpdate {
         session_id: proto.session_id,
         is_muted: proto.is_muted,
@@ -752,7 +804,8 @@ pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, Audi
 #[uniffi::export]
 pub fn decode_user_joined(data: Vec<u8>) -> Result<UserJoinedRecord, AudioError> {
     use prost::Message;
-    let proto = aura_protocol::UserJoined::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    let proto =
+        aura_protocol::UserJoined::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
     Ok(UserJoinedRecord {
         channel_id: proto.channel_id,
         session_id: proto.session_id,
@@ -764,7 +817,8 @@ pub fn decode_user_joined(data: Vec<u8>) -> Result<UserJoinedRecord, AudioError>
 #[uniffi::export]
 pub fn decode_user_left(data: Vec<u8>) -> Result<UserLeftRecord, AudioError> {
     use prost::Message;
-    let proto = aura_protocol::UserLeft::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    let proto =
+        aura_protocol::UserLeft::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
     Ok(UserLeftRecord {
         channel_id: proto.channel_id,
         session_id: proto.session_id,
@@ -781,9 +835,12 @@ pub fn encode_join_channel_request(req: JoinChannelRequestRecord) -> Vec<u8> {
 }
 
 #[uniffi::export]
-pub fn decode_encrypted_text_packet(data: Vec<u8>) -> Result<EncryptedTextPacketRecord, AudioError> {
+pub fn decode_encrypted_text_packet(
+    data: Vec<u8>,
+) -> Result<EncryptedTextPacketRecord, AudioError> {
     use prost::Message;
-    let proto = aura_protocol::EncryptedTextPacket::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    let proto = aura_protocol::EncryptedTextPacket::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
     Ok(EncryptedTextPacketRecord {
         sender_session_id: proto.sender_session_id,
         channel_id: proto.channel_id,
@@ -815,8 +872,9 @@ pub fn encode_encrypted_text_packet(packet: EncryptedTextPacketRecord) -> Vec<u8
 #[uniffi::export]
 pub fn decode_mls_envelope(data: Vec<u8>) -> Result<MlsEnvelopeRecord, AudioError> {
     use prost::Message;
-    let proto = aura_protocol::MlsEnvelope::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
-    
+    let proto =
+        aura_protocol::MlsEnvelope::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+
     let group_type = if proto.group_type == aura_protocol::MlsGroupType::Voice as i32 {
         MlsGroupType::Voice
     } else {
@@ -861,7 +919,7 @@ pub fn decode_mls_envelope(data: Vec<u8>) -> Result<MlsEnvelopeRecord, AudioErro
 #[uniffi::export]
 pub fn encode_mls_envelope(envelope: MlsEnvelopeRecord) -> Vec<u8> {
     use prost::Message;
-    
+
     let group_type = match envelope.group_type {
         MlsGroupType::Voice => aura_protocol::MlsGroupType::Voice as i32,
         MlsGroupType::Text => aura_protocol::MlsGroupType::Text as i32,
@@ -874,11 +932,13 @@ pub fn encode_mls_envelope(envelope: MlsEnvelopeRecord) -> Vec<u8> {
     } else if let Some(w) = envelope.welcome {
         Some(aura_protocol::mls_envelope::Content::Welcome(w))
     } else if let Some(cw) = envelope.commit_welcome {
-        Some(aura_protocol::mls_envelope::Content::CommitWelcome(aura_protocol::MlsCommitWelcome {
-            commit: cw.commit,
-            welcome: cw.welcome,
-            new_member_session_id: cw.new_member_session_id,
-        }))
+        Some(aura_protocol::mls_envelope::Content::CommitWelcome(
+            aura_protocol::MlsCommitWelcome {
+                commit: cw.commit,
+                welcome: cw.welcome,
+                new_member_session_id: cw.new_member_session_id,
+            },
+        ))
     } else {
         None
     };
@@ -892,7 +952,7 @@ pub fn encode_mls_envelope(envelope: MlsEnvelopeRecord) -> Vec<u8> {
         epoch: envelope.epoch,
         content,
     };
-    
+
     proto.encode_to_vec()
 }
 
@@ -940,7 +1000,7 @@ pub struct MlsWrapper {
 #[uniffi::export]
 impl MlsWrapper {
     /// Create a new MLS client with the given identity name
-    /// 
+    ///
     /// # Arguments
     /// * `identity_name` - User's UUID or unique identifier
     #[uniffi::constructor]
@@ -950,43 +1010,52 @@ impl MlsWrapper {
             inner: Mutex::new(client),
         })
     }
-    
+
     /// Generate a key package to send to the server
-    /// 
+    ///
     /// Returns serialized KeyPackage bytes that can be sent to server
     pub fn create_key_package(&self) -> Result<Vec<u8>, MlsError> {
-        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         client.get_key_package_bytes().map_err(Into::into)
     }
-    
+
     /// Create a new MLS group (as the first member)
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
     pub fn create_group(&self, channel_id: String, is_voice: bool) -> Result<(), MlsError> {
-        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.create_group(&group_id).map_err(Into::into)
     }
-    
+
     /// Join a group via a Welcome message from the server
-    /// 
+    ///
     /// # Arguments
     /// * `welcome_bytes` - Serialized Welcome message
     pub fn join_group(&self, welcome_bytes: Vec<u8>) -> Result<(), MlsError> {
-        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         client.process_welcome(&welcome_bytes)?;
         Ok(())
     }
-    
+
     /// Add a member to a group (returns Commit and Welcome)
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
     /// * `key_package_bytes` - Serialized KeyPackage from new member
-    /// 
+    ///
     /// # Returns
     /// MlsCommitWelcome containing commit and welcome bytes
     pub fn add_member(
@@ -995,14 +1064,17 @@ impl MlsWrapper {
         is_voice: bool,
         key_package_bytes: Vec<u8>,
     ) -> Result<MlsCommitWelcome, MlsError> {
-        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         let (commit, welcome) = client.add_member(&group_id, &key_package_bytes)?;
         Ok(MlsCommitWelcome { commit, welcome })
     }
-    
+
     /// Process a Commit message from another member
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
@@ -1013,52 +1085,74 @@ impl MlsWrapper {
         is_voice: bool,
         commit_bytes: Vec<u8>,
     ) -> Result<u64, MlsError> {
-        let mut client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
-        client.process_commit(&group_id, &commit_bytes).map_err(Into::into)
+        client
+            .process_commit(&group_id, &commit_bytes)
+            .map_err(Into::into)
     }
-    
+
     /// Export encryption key for audio (voice group)
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `sender_session_id` - Session ID of the audio sender
-    /// 
+    ///
     /// # Returns
     /// 32-byte encryption key for this sender
-    pub fn export_audio_key(&self, channel_id: String, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
-        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+    pub fn export_audio_key(
+        &self,
+        channel_id: String,
+        sender_session_id: u32,
+    ) -> Result<Vec<u8>, MlsError> {
+        let client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, true).into_bytes();
         let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
         Ok(key.to_vec())
     }
-    
+
     /// Export encryption key for text (text group)
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `sender_session_id` - Session ID of the text sender
-    /// 
+    ///
     /// # Returns
     /// 32-byte encryption key for this sender
-    pub fn export_text_key(&self, channel_id: String, sender_session_id: u32) -> Result<Vec<u8>, MlsError> {
-        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+    pub fn export_text_key(
+        &self,
+        channel_id: String,
+        sender_session_id: u32,
+    ) -> Result<Vec<u8>, MlsError> {
+        let client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false).into_bytes();
         let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
         Ok(key.to_vec())
     }
-    
+
     /// Get current epoch for a group
-    /// 
+    ///
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `is_voice` - true for voice group, false for text group
     pub fn current_epoch(&self, channel_id: String, is_voice: bool) -> Result<u64, MlsError> {
-        let client = self.inner.lock().map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.epoch(&group_id).map_err(Into::into)
     }
-    
+
     /// Check if we're a member of a group
     pub fn is_member(&self, channel_id: String, is_voice: bool) -> bool {
         if let Ok(client) = self.inner.lock() {
@@ -1076,32 +1170,41 @@ impl MlsWrapper {
 mod tests {
     use super::*;
     use crate::crypto::DaveCrypto;
-    
+
     #[test]
     fn test_wrapper_roundtrip() {
         let key = DaveCrypto::random_key();
         let session_id = 42;
-        
+
         let sender = AudioSenderWrapper::new(session_id, &key).expect("Create sender");
         let receiver = AudioReceiverWrapper::new();
-        receiver.add_sender(session_id, &key, 0).expect("Add sender");
-        
+        receiver
+            .add_sender(session_id, &key, 0)
+            .expect("Add sender");
+
         let pcm = vec![1000i16; 960];
-        let packet = sender.process(&pcm)
+        let packet = sender
+            .process(&pcm)
             .expect("Process")
             .expect("VAD off; expected packet");
 
         receiver.on_packet(&packet).expect("On packet");
-        
+
         let decoded = receiver.pop_decoded();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].session_id, session_id);
     }
 }
 #[uniffi::export]
-pub fn encode_create_channel(name: String, comment: String, icon: Option<ChannelIconRecord>) -> Vec<u8> {
+pub fn encode_create_channel(
+    name: String,
+    comment: String,
+    icon: Option<ChannelIconRecord>,
+) -> Vec<u8> {
     let proto_icon = icon.map(|i| ProtoIcon {
-        icon: i.emoji.map(|e| channel_icon::Icon::Emoji(e))
+        icon: i
+            .emoji
+            .map(|e| channel_icon::Icon::Emoji(e))
             .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
             .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
     });
@@ -1123,7 +1226,9 @@ pub fn encode_update_channel(
     position: Option<i32>,
 ) -> Vec<u8> {
     let proto_icon = icon.map(|i| ProtoIcon {
-        icon: i.emoji.map(|e| channel_icon::Icon::Emoji(e))
+        icon: i
+            .emoji
+            .map(|e| channel_icon::Icon::Emoji(e))
             .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
             .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
     });

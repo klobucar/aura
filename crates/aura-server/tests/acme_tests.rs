@@ -1,7 +1,7 @@
 use aura_server::config::Config;
 use aura_server::connection::QuicServer;
-use aura_server::state::ServerState;
 use aura_server::db::Database;
+use aura_server::state::ServerState;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -20,7 +20,7 @@ async fn test_acme_certificate_acquisition_with_pebble() {
     // 1. Create a temporary database and config
     let db = Arc::new(Database::open_in_memory().unwrap());
     let mut config = Config::default();
-    
+
     // Configure for ACME testing
     config.server.acme_domain = Some("localhost".to_string());
     config.server.acme_directory_url = Some("https://localhost:14000/dir".to_string());
@@ -38,36 +38,41 @@ async fn test_acme_certificate_acquisition_with_pebble() {
 
     // 3. Start the server
     // Note: This spawns a background task for ACME and binds the UDP socket.
-    // It also binds TCP/443 for ALPN challenges. 
-    // IMPORTANT: This requires permission to bind to privileged ports 
+    // It also binds TCP/443 for ALPN challenges.
+    // IMPORTANT: This requires permission to bind to privileged ports
     // OR we should remap it for testing.
     // In this test environment, we might need to run as sudo or change the port.
     // However, Pebble is configured to talk to port 443 in our pebble-config.json.
-    
+
     let bind_addr: std::net::SocketAddr = "127.0.0.1:8443".parse().unwrap();
     let server = match QuicServer::new(bind_addr, Arc::clone(&state)) {
         Ok(s) => s,
         Err(e) => {
             // If we can't bind 443 (privileged), we might fail here.
-            panic!("Failed to create QuicServer (check if you have permission to bind port 443): {}", e);
+            panic!(
+                "Failed to create QuicServer (check if you have permission to bind port 443): {}",
+                e
+            );
         }
     };
 
     // 4. Wait for certificate acquisition
     // Pebble with PEBBLE_VA_ALWAYS_VALID=1 should issue a cert almost immediately.
     let mut success = false;
-    for _ in 0..60 { // 60 seconds timeout
+    for _ in 0..60 {
+        // 60 seconds timeout
         sleep(Duration::from_secs(1)).await;
-        
+
         // We can check if a cert file was created in the cache
         // or just try to connect to the server via QUIC.
         if config.server.acme_cache_path.as_ref().unwrap().exists() {
-             // Check for files in cache
-             let entries = std::fs::read_dir(config.server.acme_cache_path.as_ref().unwrap()).unwrap();
-             if entries.count() > 0 {
-                 success = true;
-                 break;
-             }
+            // Check for files in cache
+            let entries =
+                std::fs::read_dir(config.server.acme_cache_path.as_ref().unwrap()).unwrap();
+            if entries.count() > 0 {
+                success = true;
+                break;
+            }
         }
     }
 

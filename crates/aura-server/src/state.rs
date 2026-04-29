@@ -5,18 +5,18 @@
 use crate::auth::AuthService;
 use crate::config::{Config, VerificationMode};
 use crate::db::Database;
-use aura_protocol::{
-    FastAudioPacket, UserProfile, MlsEnvelope, MlsGroupType, mls_envelope, EncryptedTextPacket,
-    ServerState as ProtoServerState, ChannelInfo as ProtoChannelInfo, ChannelIcon as ProtoChannelIcon,
-    channel_icon,
-};
 use anyhow::{anyhow, Result};
+use aura_protocol::{
+    channel_icon, mls_envelope, ChannelIcon as ProtoChannelIcon, ChannelInfo as ProtoChannelInfo,
+    EncryptedTextPacket, FastAudioPacket, MlsEnvelope, MlsGroupType,
+    ServerState as ProtoServerState, UserProfile,
+};
 use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -74,9 +74,8 @@ pub enum ServiceMessage {
     ServerSnapshot(ProtoServerState),
     /// Relay encrypted text message to channel members
     RelayText(EncryptedTextPacket),
-    
+
     // --- MLS Protocol Messages ---
-    
     /// Tell client to create a new MLS group (they are the first joiner)
     MlsCreateGroup {
         channel_id: String,
@@ -205,43 +204,43 @@ impl SeenMessages {
             messages: DashMap::new(),
         }
     }
-    
+
     /// Check if a message ID has been seen. If not, mark it as seen.
     /// Returns true if the message is NEW (not a replay).
     /// Returns false if the message is a REPLAY (already seen).
     pub fn check_and_mark(&self, channel_id: String, message_id: &str) -> bool {
         let expires_at = Instant::now() + std::time::Duration::from_secs(SEEN_MESSAGE_TTL_SECS);
-        
+
         let mut entries = self.messages.entry(channel_id).or_insert_with(Vec::new);
-        
+
         // Check if already seen
         for entry in entries.iter() {
             if entry.message_id == message_id {
                 return false; // Replay detected!
             }
         }
-        
+
         // Not seen - add to list
         entries.push(SeenMessageEntry {
             message_id: message_id.to_string(),
             expires_at,
         });
-        
+
         true // New message
     }
-    
+
     /// Cleanup expired entries. Call periodically to prevent memory bloat.
     pub fn cleanup_expired(&self) {
         let now = Instant::now();
-        
+
         for mut entries in self.messages.iter_mut() {
             entries.value_mut().retain(|e| e.expires_at > now);
         }
-        
+
         // Remove empty channels
         self.messages.retain(|_, v| !v.is_empty());
     }
-    
+
     /// Get count of tracked messages (for metrics)
     pub fn message_count(&self) -> usize {
         self.messages.iter().map(|e| e.value().len()).sum()
@@ -265,7 +264,7 @@ pub struct ServerState {
 
     // Session ID counter
     session_counter: Arc<std::sync::atomic::AtomicU32>,
-    
+
     // Replay protection: track seen text message IDs
     pub seen_messages: Arc<SeenMessages>,
 
@@ -297,9 +296,18 @@ impl ServerState {
         match db.get_all_channels() {
             Ok(channels) => {
                 for (id, name, comment, i_type, i_data, pos, c_type) in channels {
-                    state.channel_metadata.insert(id.clone(), ChannelMetadata {
-                        id: id.clone(), name, comment, icon_type: i_type, icon_data: i_data, position: pos, channel_type: c_type
-                    });
+                    state.channel_metadata.insert(
+                        id.clone(),
+                        ChannelMetadata {
+                            id: id.clone(),
+                            name,
+                            comment,
+                            icon_type: i_type,
+                            icon_data: i_data,
+                            position: pos,
+                            channel_type: c_type,
+                        },
+                    );
                     state.create_channel(id);
                 }
             }
@@ -316,7 +324,12 @@ impl ServerState {
     }
 
     /// Register a new client session.
-    pub fn register_session(&self, user_uuid: String, socket_addr: SocketAddr, sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>) -> u32 {
+    pub fn register_session(
+        &self,
+        user_uuid: String,
+        socket_addr: SocketAddr,
+        sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
+    ) -> u32 {
         // Allocate a new session ID
         let session_id = self.allocate_session_id();
         let session = ClientSession {
@@ -332,7 +345,7 @@ impl ServerState {
             bytes_out: Arc::new(AtomicU64::new(0)),
         };
         self.sessions.insert(session_id, session);
-        
+
         // Populate profile cache immediately
         match self.db.find_user_by_uuid(&user_uuid) {
             Ok(Some(user)) => {
@@ -357,9 +370,15 @@ impl ServerState {
                     signing_key,
                 };
                 self.profiles.insert(user_uuid.clone(), profile);
-                info!("Registered session {} for user {} (Profile cached)", session_id, user.display_name);
+                info!(
+                    "Registered session {} for user {} (Profile cached)",
+                    session_id, user.display_name
+                );
             }
-            Ok(None) => warn!("Registered session {} for unknown user {}", session_id, user_uuid),
+            Ok(None) => warn!(
+                "Registered session {} for unknown user {}",
+                session_id, user_uuid
+            ),
             Err(e) => warn!("Failed to fetch profile for user {}: {}", user_uuid, e),
         }
 
@@ -372,7 +391,7 @@ impl ServerState {
             // Broadcast user left before removing from groups
             if let Some(voice_id) = session.voice_group_id {
                 self.broadcast_user_left(voice_id.clone(), session_id).await;
-                
+
                 if let Some(group) = self.voice_groups.get(&voice_id) {
                     group.value().write().await.members.remove(&session_id);
                 }
@@ -383,12 +402,14 @@ impl ServerState {
                 }
             }
             info!("Removed session {}", session_id);
-            
+
             // Only remove the profile cache entry if no other active session
             // shares this user_uuid. A fast reconnect can register a new session
             // before the old one is fully torn down — we must not wipe the new
             // session's profile in that case.
-            let still_active = self.sessions.iter()
+            let still_active = self
+                .sessions
+                .iter()
                 .any(|s| s.value().user_uuid == session.user_uuid);
             if !still_active {
                 self.profiles.remove(&session.user_uuid);
@@ -458,12 +479,17 @@ impl ServerState {
         for meta_entry in self.channel_metadata.iter() {
             let meta = meta_entry.value();
             let mut users = Vec::new();
-            
-            if let Some(group_lock) = self.voice_groups.get(&aura_protocol::make_mls_group_id(&meta.id, true)) {
+
+            if let Some(group_lock) = self
+                .voice_groups
+                .get(&aura_protocol::make_mls_group_id(&meta.id, true))
+            {
                 let group = group_lock.read().await;
                 for id in group.members.iter() {
                     if let Some(sess) = self.sessions.get(&id) {
-                        let display_name = self.profiles.get(&sess.user_uuid)
+                        let display_name = self
+                            .profiles
+                            .get(&sess.user_uuid)
                             .map(|p| p.display_name.clone())
                             .unwrap_or_else(|| format!("User {}", *id));
                         users.push(aura_protocol::ChannelUserStatus {
@@ -487,13 +513,19 @@ impl ServerState {
 
             let icon = match meta.icon_type {
                 1 => Some(ProtoChannelIcon {
-                    icon: Some(channel_icon::Icon::Emoji(String::from_utf8_lossy(&meta.icon_data).into())),
+                    icon: Some(channel_icon::Icon::Emoji(
+                        String::from_utf8_lossy(&meta.icon_data).into(),
+                    )),
                 }),
                 2 => Some(ProtoChannelIcon {
-                    icon: Some(channel_icon::Icon::PresetId(String::from_utf8_lossy(&meta.icon_data).into())),
+                    icon: Some(channel_icon::Icon::PresetId(
+                        String::from_utf8_lossy(&meta.icon_data).into(),
+                    )),
                 }),
                 3 => Some(ProtoChannelIcon {
-                    icon: Some(channel_icon::Icon::CustomData(meta.icon_data.clone().into())),
+                    icon: Some(channel_icon::Icon::CustomData(
+                        meta.icon_data.clone().into(),
+                    )),
                 }),
                 _ => None,
             };
@@ -511,14 +543,23 @@ impl ServerState {
         }
 
         let profiles: Vec<UserProfile> = self.profiles.iter().map(|p| p.value().clone()).collect();
-        
-        info!("[Snapshot] Sending {} channels and {} profiles", channels.len(), profiles.len());
+
+        info!(
+            "[Snapshot] Sending {} channels and {} profiles",
+            channels.len(),
+            profiles.len()
+        );
 
         ProtoServerState { channels, profiles }
     }
 
     /// Broadcast that a user joined a channel to ALL connected users.
-    pub async fn broadcast_user_joined(&self, channel_id: String, session_id: u32, display_name: String) {
+    pub async fn broadcast_user_joined(
+        &self,
+        channel_id: String,
+        session_id: u32,
+        display_name: String,
+    ) {
         let user_uuid = self
             .sessions
             .get(&session_id)
@@ -536,11 +577,13 @@ impl ServerState {
                 });
             }
         }
-        
+
         // Send full server snapshot to the new joiner
         if let Some(new_sess) = self.sessions.get(&session_id) {
             let snapshot = self.get_server_snapshot().await;
-            let _ = new_sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
+            let _ = new_sess
+                .sender
+                .send(ServiceMessage::ServerSnapshot(snapshot));
         }
     }
 
@@ -560,7 +603,11 @@ impl ServerState {
     /// Broadcast user status update (mute/deafen) to everyone.
     pub async fn broadcast_user_status(&self, session_id: u32, is_muted: bool, is_deafened: bool) {
         // Force muted true if deafened is true
-        let (is_muted, is_deafened) = if is_deafened { (true, true) } else { (is_muted, is_deafened) };
+        let (is_muted, is_deafened) = if is_deafened {
+            (true, true)
+        } else {
+            (is_muted, is_deafened)
+        };
 
         // Update in-memory session state
         if let Some(mut sess) = self.sessions.get_mut(&session_id) {
@@ -586,23 +633,31 @@ impl ServerState {
         }
     }
 
-
     // --- Text Message Routing (Zero-Knowledge) ---
 
     /// Broadcast an encrypted text message to all members of the text group.
     /// Server never decrypts - just routes opaque packets.
     /// Returns true if a ratchet is needed (for batched ratcheting).
-    pub async fn broadcast_text_message(&self, sender_session_id: u32, packet: EncryptedTextPacket) -> bool {
+    pub async fn broadcast_text_message(
+        &self,
+        sender_session_id: u32,
+        packet: EncryptedTextPacket,
+    ) -> bool {
         let channel_id = packet.channel_id.clone();
         let message_id = &packet.message_id;
-        
+
         // Replay protection: Check if we've seen this message ID before
-        if !self.seen_messages.check_and_mark(channel_id.clone(), message_id) {
-            warn!("Replay attack detected! Duplicate message ID '{}' from session {} in channel {}", 
-                  message_id, sender_session_id, channel_id);
+        if !self
+            .seen_messages
+            .check_and_mark(channel_id.clone(), message_id)
+        {
+            warn!(
+                "Replay attack detected! Duplicate message ID '{}' from session {} in channel {}",
+                message_id, sender_session_id, channel_id
+            );
             return false;
         }
-        
+
         // Verify sender is a member of this text group
         let text_group_id = aura_protocol::make_mls_group_id(&channel_id, false);
         let group_lock = match self.text_groups.get(&text_group_id) {
@@ -612,54 +667,64 @@ impl ServerState {
                 return false;
             }
         };
-        
+
         let group = group_lock.read().await;
-        
+
         if !group.members.contains(&sender_session_id) {
-            warn!("Session {} not a member of text group {}", sender_session_id, channel_id);
+            warn!(
+                "Session {} not a member of text group {}",
+                sender_session_id, channel_id
+            );
             return false;
         }
-        
+
         // Increment message counter
         let msg_count = group.message_count.fetch_add(1, Ordering::Relaxed) + 1;
-        
+
         // Collect members to send to (excluding sender)
         let members: Vec<u32> = group.members.iter().map(|id| *id).collect();
         drop(group); // Release lock before sending
-        
+
         // Fan-out to all members except sender
         for member_id in members {
             if member_id == sender_session_id {
                 continue; // Don't echo back to sender
             }
-            
+
             if let Some(session) = self.sessions.get(&member_id) {
-                let _ = session.sender.send(ServiceMessage::RelayText(packet.clone()));
+                let _ = session
+                    .sender
+                    .send(ServiceMessage::RelayText(packet.clone()));
             }
         }
-        
-        info!("Relayed text message from {} to channel {} (msg #{})", 
-              sender_session_id, channel_id, msg_count);
-        
+
+        info!(
+            "Relayed text message from {} to channel {} (msg #{})",
+            sender_session_id, channel_id, msg_count
+        );
+
         // Check if we need to ratchet
         self.should_ratchet_text_group(channel_id).await
     }
-    
+
     /// Check if a text group should ratchet based on message count or time.
     /// Batched ratcheting: every 50 messages OR every 5 minutes.
     pub async fn should_ratchet_text_group(&self, channel_id: String) -> bool {
-        let group_lock = match self.text_groups.get(&aura_protocol::make_mls_group_id(&channel_id, false)) {
+        let group_lock = match self
+            .text_groups
+            .get(&aura_protocol::make_mls_group_id(&channel_id, false))
+        {
             Some(g) => g.clone(),
             None => return false,
         };
-        
+
         let group = group_lock.read().await;
         let msg_count = group.message_count.load(Ordering::Relaxed);
         let elapsed = group.last_ratchet.elapsed().as_secs();
-        
+
         msg_count >= TEXT_RATCHET_MESSAGE_THRESHOLD || elapsed >= TEXT_RATCHET_TIME_THRESHOLD_SECS
     }
-    
+
     /// Reset ratchet counters after a successful epoch advance.
     pub async fn reset_text_ratchet_counters(&self, channel_id: String) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
@@ -667,13 +732,12 @@ impl ServerState {
             Some(g) => g.clone(),
             None => return,
         };
-        
+
         let mut group = group_lock.write().await;
         group.message_count.store(0, Ordering::Relaxed);
         group.last_ratchet = Instant::now();
         info!("Reset ratchet counters for text group {}", group_id);
     }
-
 
     // --- Group Membership Helpers ---
 
@@ -682,7 +746,7 @@ impl ServerState {
         if let Some(group) = self.voice_groups.get(&voice_group_id) {
             group.value().write().await.members.insert(session_id);
         }
-        
+
         // Set voice_group_id on session so audio routing works
         if let Some(mut session) = self.sessions.get_mut(&session_id) {
             session.voice_group_id = Some(voice_group_id);
@@ -694,7 +758,7 @@ impl ServerState {
         if let Some(group) = self.voice_groups.get(&voice_group_id) {
             group.value().write().await.members.remove(&session_id);
         }
-        
+
         // Clear voice_group_id on session
         if let Some(mut session) = self.sessions.get_mut(&session_id) {
             session.voice_group_id = None;
@@ -745,9 +809,23 @@ impl ServerState {
         };
 
         if is_voice {
-            self.handle_voice_mls_join(channel_id, session_id, user_uuid, key_package, &session.sender).await;
+            self.handle_voice_mls_join(
+                channel_id,
+                session_id,
+                user_uuid,
+                key_package,
+                &session.sender,
+            )
+            .await;
         } else {
-            self.handle_text_mls_join(channel_id, session_id, user_uuid, key_package, &session.sender).await;
+            self.handle_text_mls_join(
+                channel_id,
+                session_id,
+                user_uuid,
+                key_package,
+                &session.sender,
+            )
+            .await;
         }
     }
 
@@ -760,10 +838,14 @@ impl ServerState {
         sender: &tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
     ) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
-        let group_lock = self.voice_groups
+        let group_lock = self
+            .voice_groups
             .entry(group_id.clone())
             .or_insert_with(|| {
-                info!("[MLS] Lazily initializing Voice group for channel {}", channel_id);
+                info!(
+                    "[MLS] Lazily initializing Voice group for channel {}",
+                    channel_id
+                );
                 Arc::new(RwLock::new(VoiceGroup {
                     id: group_id.clone(),
                     current_epoch: 0,
@@ -788,7 +870,10 @@ impl ServerState {
             group.founder_session_id = Some(session_id);
             group.members.insert(session_id);
             group.pending_joins.clear(); // Clear any stale joins from previous dead founder
-            info!("[MLS] Session {} is the new founder of voice group {}", session_id, channel_id);
+            info!(
+                "[MLS] Session {} is the new founder of voice group {}",
+                session_id, channel_id
+            );
 
             let _ = sender.send(ServiceMessage::MlsCreateGroup {
                 channel_id: channel_id.clone(),
@@ -805,15 +890,19 @@ impl ServerState {
             group.pending_joins.push(pending);
 
             if let Some(founder_session) = self.sessions.get(&founder_id) {
-                info!("[MLS] Forwarding key package from {} to founder {} for voice group {}",
-                      session_id, founder_id, channel_id);
-                let _ = founder_session.sender.send(ServiceMessage::MlsAddMemberRequest {
-                    channel_id: channel_id.clone(),
-                    is_voice: true,
-                    joiner_session_id: session_id,
-                    joiner_uuid: user_uuid,
-                    key_package,
-                });
+                info!(
+                    "[MLS] Forwarding key package from {} to founder {} for voice group {}",
+                    session_id, founder_id, channel_id
+                );
+                let _ = founder_session
+                    .sender
+                    .send(ServiceMessage::MlsAddMemberRequest {
+                        channel_id: channel_id.clone(),
+                        is_voice: true,
+                        joiner_session_id: session_id,
+                        joiner_uuid: user_uuid,
+                        key_package,
+                    });
             }
         }
     }
@@ -827,10 +916,14 @@ impl ServerState {
         sender: &tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
     ) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
-        let group_lock = self.text_groups
+        let group_lock = self
+            .text_groups
             .entry(group_id.clone())
             .or_insert_with(|| {
-                info!("[MLS] Lazily initializing Text group for channel {}", channel_id);
+                info!(
+                    "[MLS] Lazily initializing Text group for channel {}",
+                    channel_id
+                );
                 Arc::new(RwLock::new(TextGroup {
                     id: group_id.clone(),
                     current_epoch: 0,
@@ -856,7 +949,10 @@ impl ServerState {
             group.founder_session_id = Some(session_id);
             group.members.insert(session_id);
             group.pending_joins.clear();
-            info!("[MLS] Session {} is the new founder of text group {}", session_id, channel_id);
+            info!(
+                "[MLS] Session {} is the new founder of text group {}",
+                session_id, channel_id
+            );
 
             let _ = sender.send(ServiceMessage::MlsCreateGroup {
                 channel_id: channel_id.clone(),
@@ -872,13 +968,15 @@ impl ServerState {
             group.pending_joins.push(pending);
 
             if let Some(founder_session) = self.sessions.get(&founder_id) {
-                let _ = founder_session.sender.send(ServiceMessage::MlsAddMemberRequest {
-                    channel_id: channel_id.clone(),
-                    is_voice: false,
-                    joiner_session_id: session_id,
-                    joiner_uuid: user_uuid,
-                    key_package,
-                });
+                let _ = founder_session
+                    .sender
+                    .send(ServiceMessage::MlsAddMemberRequest {
+                        channel_id: channel_id.clone(),
+                        is_voice: false,
+                        joiner_session_id: session_id,
+                        joiner_uuid: user_uuid,
+                        key_package,
+                    });
             }
         }
     }
@@ -896,8 +994,12 @@ impl ServerState {
     ) {
         // Send Welcome to new member
         if let Some(new_session) = self.sessions.get(&new_member_session_id) {
-            info!("[MLS] Sending Welcome to session {} for {} group {}",
-                  new_member_session_id, if is_voice { "voice" } else { "text" }, channel_id);
+            info!(
+                "[MLS] Sending Welcome to session {} for {} group {}",
+                new_member_session_id,
+                if is_voice { "voice" } else { "text" },
+                channel_id
+            );
             let _ = new_session.sender.send(ServiceMessage::MlsWelcome {
                 channel_id: channel_id.clone(),
                 is_voice,
@@ -912,8 +1014,10 @@ impl ServerState {
                 let mut group = group_lock.write().await;
                 group.current_epoch += 1;
                 group.members.insert(new_member_session_id); // Add new member
-                // Remove from pending
-                group.pending_joins.retain(|p| p.joiner_session_id != new_member_session_id);
+                                                             // Remove from pending
+                group
+                    .pending_joins
+                    .retain(|p| p.joiner_session_id != new_member_session_id);
                 group.members.iter().map(|id| *id).collect()
             } else {
                 return;
@@ -924,7 +1028,9 @@ impl ServerState {
                 let mut group = group_lock.write().await;
                 group.current_epoch += 1;
                 group.members.insert(new_member_session_id);
-                group.pending_joins.retain(|p| p.joiner_session_id != new_member_session_id);
+                group
+                    .pending_joins
+                    .retain(|p| p.joiner_session_id != new_member_session_id);
                 group.members.iter().map(|id| *id).collect()
             } else {
                 return;
@@ -945,8 +1051,12 @@ impl ServerState {
             }
         }
 
-        info!("[MLS] Distributed commit for {} group {} (new member: {})",
-              if is_voice { "voice" } else { "text" }, channel_id, new_member_session_id);
+        info!(
+            "[MLS] Distributed commit for {} group {} (new member: {})",
+            if is_voice { "voice" } else { "text" },
+            channel_id,
+            new_member_session_id
+        );
     }
 
     // --- MLS Delivery Service (Reliable Signaling) ---
@@ -964,7 +1074,11 @@ impl ServerState {
     }
 
     /// Handle Voice MLS message - LOW CHURN rules
-    async fn handle_voice_mls(&self, channel_id: String, msg: MlsEnvelope) -> Result<MlsSignalResponse> {
+    async fn handle_voice_mls(
+        &self,
+        channel_id: String,
+        msg: MlsEnvelope,
+    ) -> Result<MlsSignalResponse> {
         let group_lock = match self.voice_groups.get(&channel_id) {
             Some(g) => g.clone(),
             None => return Err(anyhow!("Voice group not found")),
@@ -1002,7 +1116,11 @@ impl ServerState {
     }
 
     /// Handle Text MLS message - HIGH CHURN allowed
-    async fn handle_text_mls(&self, channel_id: String, msg: MlsEnvelope) -> Result<MlsSignalResponse> {
+    async fn handle_text_mls(
+        &self,
+        channel_id: String,
+        msg: MlsEnvelope,
+    ) -> Result<MlsSignalResponse> {
         let group_lock = match self.text_groups.get(&channel_id) {
             Some(g) => g.clone(),
             None => return Err(anyhow!("Text group not found")),
@@ -1021,7 +1139,7 @@ impl ServerState {
         match msg.content {
             Some(mls_envelope::Content::Commit(_)) => {
                 group.current_epoch += 1;
-                
+
                 // Reset ratchet counters on epoch advance
                 group.message_count.store(0, Ordering::Relaxed);
                 group.last_ratchet = Instant::now();
@@ -1062,22 +1180,38 @@ impl ServerState {
     // --- Channel & Profile Management ---
 
     /// Create a new channel persistently.
-    pub async fn create_channel_persistent(&self, name: String, comment: String, icon: Option<ProtoChannelIcon>) -> Result<String> {
+    pub async fn create_channel_persistent(
+        &self,
+        name: String,
+        comment: String,
+        icon: Option<ProtoChannelIcon>,
+    ) -> Result<String> {
         let (icon_type, icon_data) = self.convert_proto_icon(icon);
         let channel_type = 0; // Default to Regular for manually created channels
-        
-        let channel_id = self.db.upsert_channel(None, &name, &comment, icon_type, &icon_data, 0, channel_type)?;
-        
-        // Update in-memory metadata
-        self.channel_metadata.insert(channel_id.clone(), ChannelMetadata {
-            id: channel_id.clone(),
-            name,
-            comment,
+
+        let channel_id = self.db.upsert_channel(
+            None,
+            &name,
+            &comment,
             icon_type,
-            icon_data,
-            position: 0,
+            &icon_data,
+            0,
             channel_type,
-        });
+        )?;
+
+        // Update in-memory metadata
+        self.channel_metadata.insert(
+            channel_id.clone(),
+            ChannelMetadata {
+                id: channel_id.clone(),
+                name,
+                comment,
+                icon_type,
+                icon_data,
+                position: 0,
+                channel_type,
+            },
+        );
 
         // Initialize MLS groups
         self.create_channel(channel_id.clone());
@@ -1085,42 +1219,77 @@ impl ServerState {
         // Broadcast full state update to everyone
         let snapshot = self.get_server_snapshot().await;
         for sess in self.sessions.iter() {
-            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+            let _ = sess
+                .sender
+                .send(ServiceMessage::ServerSnapshot(snapshot.clone()));
         }
 
         Ok(channel_id)
     }
 
     /// Update channel metadata persistently.
-    pub async fn update_channel_persistent(&self, channel_id: String, name: Option<String>, comment: Option<String>, icon: Option<ProtoChannelIcon>, position: Option<i32>) -> Result<()> {
-        let mut meta = self.channel_metadata.get_mut(&channel_id).ok_or_else(|| anyhow!("Channel not found"))?;
-        
-        if let Some(n) = name { meta.name = n; }
-        if let Some(c) = comment { meta.comment = c; }
+    pub async fn update_channel_persistent(
+        &self,
+        channel_id: String,
+        name: Option<String>,
+        comment: Option<String>,
+        icon: Option<ProtoChannelIcon>,
+        position: Option<i32>,
+    ) -> Result<()> {
+        let mut meta = self
+            .channel_metadata
+            .get_mut(&channel_id)
+            .ok_or_else(|| anyhow!("Channel not found"))?;
+
+        if let Some(n) = name {
+            meta.name = n;
+        }
+        if let Some(c) = comment {
+            meta.comment = c;
+        }
         if let Some(i) = icon {
             let (t, d) = self.convert_proto_icon(Some(i));
             meta.icon_type = t;
             meta.icon_data = d;
         }
-        if let Some(p) = position { meta.position = p; }
+        if let Some(p) = position {
+            meta.position = p;
+        }
 
         // Persist to DB
-        self.db.upsert_channel(Some(channel_id.clone()), &meta.name, &meta.comment, meta.icon_type, &meta.icon_data, meta.position, meta.channel_type)?;
-        
+        self.db.upsert_channel(
+            Some(channel_id.clone()),
+            &meta.name,
+            &meta.comment,
+            meta.icon_type,
+            &meta.icon_data,
+            meta.position,
+            meta.channel_type,
+        )?;
+
         drop(meta); // Release lock
 
         // Broadcast full state update
         let snapshot = self.get_server_snapshot().await;
         for sess in self.sessions.iter() {
-            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+            let _ = sess
+                .sender
+                .send(ServiceMessage::ServerSnapshot(snapshot.clone()));
         }
 
         Ok(())
     }
 
     /// Update user profile persistently.
-    pub async fn update_profile_persistent(&self, session_id: u32, profile: UserProfile) -> Result<()> {
-        let session = self.sessions.get(&session_id).ok_or_else(|| anyhow!("Session not found"))?;
+    pub async fn update_profile_persistent(
+        &self,
+        session_id: u32,
+        profile: UserProfile,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("Session not found"))?;
         let user_uuid = session.user_uuid.clone();
         drop(session);
 
@@ -1130,7 +1299,7 @@ impl ServerState {
             &profile.bio,
             &profile.avatar_data,
             &profile.signature,
-            &profile.signing_key
+            &profile.signing_key,
         )?;
 
         // Update in-memory cache
@@ -1140,7 +1309,9 @@ impl ServerState {
         // originator, so their own in-memory view reflects what the server
         // persisted). Cheap compared to shipping a full ServerSnapshot.
         for sess in self.sessions.iter() {
-            let _ = sess.sender.send(ServiceMessage::ProfileUpdated(profile.clone()));
+            let _ = sess
+                .sender
+                .send(ServiceMessage::ProfileUpdated(profile.clone()));
         }
 
         Ok(())
@@ -1150,16 +1321,17 @@ impl ServerState {
     pub async fn delete_channel_persistent(&self, channel_id: &str) -> Result<()> {
         // Update DB
         self.db.delete_channel(channel_id)?;
-        
+
         // Update in-memory metadata
         self.channel_metadata.remove(channel_id);
-        
+
         // Force everyone out of the channel groups in-memory
         let voice_group_id = aura_protocol::make_mls_group_id(channel_id, true);
         if let Some(voice_group) = self.voice_groups.get(&voice_group_id) {
             let members = { voice_group.read().await.members.clone() };
             for session_id in members {
-                self.remove_from_voice_group(channel_id.to_string(), session_id).await;
+                self.remove_from_voice_group(channel_id.to_string(), session_id)
+                    .await;
             }
         }
         self.voice_groups.remove(&voice_group_id);
@@ -1168,16 +1340,18 @@ impl ServerState {
         if let Some(text_group) = self.text_groups.get(&text_group_id) {
             let members = { text_group.read().await.members.clone() };
             for session_id in members {
-                self.remove_from_text_group(channel_id.to_string(), session_id).await;
+                self.remove_from_text_group(channel_id.to_string(), session_id)
+                    .await;
             }
         }
         self.text_groups.remove(&text_group_id);
 
-
         // Broadcast full state update to everyone
         let snapshot = self.get_server_snapshot().await;
         for sess in self.sessions.iter() {
-            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+            let _ = sess
+                .sender
+                .send(ServiceMessage::ServerSnapshot(snapshot.clone()));
         }
 
         Ok(())
@@ -1187,10 +1361,10 @@ impl ServerState {
     pub async fn delete_user_persistent(&self, user_uuid: &str) -> Result<()> {
         // Update DB
         self.db.delete_user(user_uuid)?;
-        
+
         // Update in-memory
         self.profiles.remove(user_uuid);
-        
+
         // Invalidate any active sessions for this user
         let mut sessions_to_remove = Vec::new();
         for sess in self.sessions.iter() {
@@ -1198,7 +1372,7 @@ impl ServerState {
                 sessions_to_remove.push(*sess.key());
             }
         }
-        
+
         for session_id in sessions_to_remove {
             self.remove_session(session_id).await;
         }
@@ -1206,7 +1380,9 @@ impl ServerState {
         // Broadcast full state update
         let snapshot = self.get_server_snapshot().await;
         for sess in self.sessions.iter() {
-            let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot.clone()));
+            let _ = sess
+                .sender
+                .send(ServiceMessage::ServerSnapshot(snapshot.clone()));
         }
 
         Ok(())
@@ -1248,7 +1424,9 @@ impl ServerState {
         }
 
         // Track inbound bytes for this sender
-        sender_session.bytes_in.fetch_add(raw_bytes.len() as u64, Ordering::Relaxed);
+        sender_session
+            .bytes_in
+            .fetch_add(raw_bytes.len() as u64, Ordering::Relaxed);
 
         let voice_group_id = match sender_session.voice_group_id {
             Some(id) => id,
@@ -1259,7 +1437,7 @@ impl ServerState {
             Some(g) => {
                 let group = g.value().read().await;
                 group.members.iter().map(|id| *id).collect()
-            },
+            }
             None => return,
         };
 
@@ -1277,7 +1455,9 @@ impl ServerState {
                 }
                 // Track outbound bytes for this receiver
                 session.bytes_out.fetch_add(relay_len, Ordering::Relaxed);
-                let _ = session.sender.send(ServiceMessage::RelayAudio(raw_bytes.clone()));
+                let _ = session
+                    .sender
+                    .send(ServiceMessage::RelayAudio(raw_bytes.clone()));
             }
         }
     }
@@ -1312,14 +1492,18 @@ mod tests {
         let channel_id = "C_1".to_string();
         state.create_channel(channel_id.clone());
 
-        assert!(state.voice_groups.contains_key(&aura_protocol::make_mls_group_id(&channel_id, true)));
-        assert!(state.text_groups.contains_key(&aura_protocol::make_mls_group_id(&channel_id, false)));
+        assert!(state
+            .voice_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&channel_id, true)));
+        assert!(state
+            .text_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&channel_id, false)));
     }
 
     #[tokio::test]
     async fn test_verification_policy() {
         let db = Arc::new(Database::open_in_memory().unwrap());
-        
+
         // Create a user
         let key = [0x42u8; 32];
         let user_uuid = db.create_user(&key, "TestUser").unwrap();
@@ -1349,14 +1533,18 @@ mod tests {
         state.create_channel(channel_id.clone());
 
         // Test Voice Group
-        state.add_to_voice_group(channel_id.clone(), session_id).await;
+        state
+            .add_to_voice_group(channel_id.clone(), session_id)
+            .await;
         {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
             let group = state.voice_groups.get(&group_id).unwrap();
             assert!(group.read().await.members.contains(&session_id));
         }
 
-        state.remove_from_voice_group(channel_id.clone(), session_id).await;
+        state
+            .remove_from_voice_group(channel_id.clone(), session_id)
+            .await;
         {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
             let group = state.voice_groups.get(&group_id).unwrap();
@@ -1364,14 +1552,18 @@ mod tests {
         }
 
         // Test Text Group
-        state.add_to_text_group(channel_id.clone(), session_id).await;
+        state
+            .add_to_text_group(channel_id.clone(), session_id)
+            .await;
         {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
             let group = state.text_groups.get(&group_id).unwrap();
             assert!(group.read().await.members.contains(&session_id));
         }
 
-        state.remove_from_text_group(channel_id.clone(), session_id).await;
+        state
+            .remove_from_text_group(channel_id.clone(), session_id)
+            .await;
         {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
             let group = state.text_groups.get(&group_id).unwrap();
@@ -1383,29 +1575,37 @@ mod tests {
     async fn test_broadcast_logic() {
         let state = create_test_state();
         let channel_id = "C_200".to_string();
-        
+
         // Setup two sessions
         let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
         let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
-        
+
         let addr: SocketAddr = "127.0.0.1:1111".parse().unwrap();
         let s1 = state.register_session("uuid-1".into(), addr, tx1);
         let s2 = state.register_session("uuid-2".into(), addr, tx2);
 
         // Create channel
         state.create_channel(channel_id.clone());
-        
+
         // Add s1 to voice group first
         state.add_to_voice_group(channel_id.clone(), s1).await;
-        
+
         // Broadcast joined for s2
-        // We need to add s2 to voice group first for logic to work usually? 
-        // broadcast_user_joined logic iterates voice group members to send state, 
+        // We need to add s2 to voice group first for logic to work usually?
+        // broadcast_user_joined logic iterates voice group members to send state,
         // and sends UserJoined to ALL connected sessions.
-        state.broadcast_user_joined(channel_id.clone(), s2, "User 2".into()).await;
+        state
+            .broadcast_user_joined(channel_id.clone(), s2, "User 2".into())
+            .await;
 
         // Check s1 received UserJoined
-        if let Some(ServiceMessage::UserJoined { channel_id: c, session_id: s, display_name: n, user_uuid: _ }) = rx1.recv().await {
+        if let Some(ServiceMessage::UserJoined {
+            channel_id: c,
+            session_id: s,
+            display_name: n,
+            user_uuid: _,
+        }) = rx1.recv().await
+        {
             assert_eq!(c, channel_id);
             assert_eq!(s, s2);
             assert_eq!(n, "User 2");
@@ -1431,7 +1631,7 @@ mod tests {
         // Setup two sessions
         let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
         let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
-        
+
         let addr: SocketAddr = "127.0.0.1:2222".parse().unwrap();
         let s1 = state.register_session("uuid-1".into(), addr, tx1);
         let s2 = state.register_session("uuid-2".into(), addr, tx2);
@@ -1466,7 +1666,10 @@ mod tests {
 
         // s1 should NOT receive it (echo check)
         // We use try_recv or timeout to check absence
-        assert!(rx1.try_recv().is_err(), "s1 received its own message (echo should be disabled)");
+        assert!(
+            rx1.try_recv().is_err(),
+            "s1 received its own message (echo should be disabled)"
+        );
     }
 
     #[tokio::test]
@@ -1475,7 +1678,7 @@ mod tests {
         let state = create_test_state();
         let channel_id = "C_400".to_string();
         state.create_channel(channel_id.clone());
-        
+
         // Add fake sender
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let addr: SocketAddr = "127.0.0.1:3333".parse().unwrap();
@@ -1513,8 +1716,10 @@ mod tests {
         assert!(ratchet, "Should trigger ratchet on 50th message");
 
         // Reset
-        state.reset_text_ratchet_counters(aura_protocol::make_mls_group_id(&channel_id, false)).await;
-        
+        state
+            .reset_text_ratchet_counters(aura_protocol::make_mls_group_id(&channel_id, false))
+            .await;
+
         // Next message should not ratchet (use new unique ID)
         let packet51 = EncryptedTextPacket {
             sender_session_id: s1,
@@ -1531,7 +1736,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_mls_signaling() {
-        use aura_protocol::{MlsEnvelope, mls_envelope, MlsGroupType};
+        use aura_protocol::{mls_envelope, MlsEnvelope, MlsGroupType};
         let state = create_test_state();
         let channel_id = "C_500".to_string();
         state.create_channel(channel_id.clone()); // Creates epoch 0
@@ -1564,16 +1769,16 @@ mod tests {
         let future_msg = MlsEnvelope {
             channel_id: aura_protocol::make_mls_group_id(&channel_id, true),
             group_type: MlsGroupType::Voice as i32,
-            epoch: 2, 
+            epoch: 2,
             sender_id: 12345,
             target_session_id: 0,
             target_uuid: String::new(),
-            content: Some(mls_envelope::Content::Commit(vec![4,5,6])),
+            content: Some(mls_envelope::Content::Commit(vec![4, 5, 6])),
         };
         let res_future = state.handle_mls_message(future_msg).await.unwrap();
         assert!(!res_future.success); // Should fail strict check
         assert_eq!(res_future.current_epoch, 1);
-        
+
         // 4. Unknown Group
         let unknown_msg = MlsEnvelope {
             channel_id: "C_UNKNOWN".to_string(),
@@ -1586,56 +1791,56 @@ mod tests {
         };
         assert!(state.handle_mls_message(unknown_msg).await.is_err());
     }
-    
+
     #[test]
     fn test_seen_messages_uniqueness() {
         let seen = SeenMessages::new();
         let channel_id = "C_1".to_string();
-        
+
         // First check should return true (new message)
         assert!(seen.check_and_mark(channel_id.clone(), "msg-1"));
-        
+
         // Second check should return false (replay)
         assert!(!seen.check_and_mark(channel_id.clone(), "msg-1"));
-        
+
         // Different message ID should return true
         assert!(seen.check_and_mark(channel_id.clone(), "msg-2"));
-        
+
         // Same message ID in different channel should return true
         assert!(seen.check_and_mark("C_2".to_string(), "msg-1"));
     }
-    
+
     #[test]
     fn test_seen_messages_count() {
         let seen = SeenMessages::new();
-        
+
         seen.check_and_mark("C_1".to_string(), "msg-001");
         seen.check_and_mark("C_1".to_string(), "msg-002");
         seen.check_and_mark("C_2".to_string(), "msg-003");
-        
+
         assert_eq!(seen.message_count(), 3);
     }
-    
+
     #[test]
     fn test_seen_messages_cleanup() {
         // use std::thread;
         // use std::time::Duration;
-        
+
         // Note: This test uses a very short delay to simulate expiry
         // In production, SEEN_MESSAGE_TTL_SECS is 300 (5 min)
-        
+
         let seen = SeenMessages::new();
-        
+
         // Add some messages
         seen.check_and_mark("C_1".to_string(), "msg-001");
         seen.check_and_mark("C_1".to_string(), "msg-002");
-        
+
         assert_eq!(seen.message_count(), 2);
-        
+
         // Cleanup should not remove them immediately (TTL not expired)
         seen.cleanup_expired();
         assert_eq!(seen.message_count(), 2);
-        
+
         // Replays should still be detected
         assert!(!seen.check_and_mark("C_1".to_string(), "msg-001"));
     }
@@ -1644,7 +1849,7 @@ mod tests {
     async fn test_lazy_mls_group_initialization() {
         let state = create_test_state();
         let channel_id = "C_LAZY_100".to_string();
-        
+
         // Simulating channels being present but groups missing (fresh restart)
         // Groups are empty by default in create_test_state
         assert!(!state.voice_groups.contains_key(&channel_id));
@@ -1656,19 +1861,27 @@ mod tests {
         let session_id = state.register_session("user-lazy".into(), addr, tx);
 
         // Attempt to join voice group - should lazily create it and make us founder
-        state.handle_voice_mls_join(
-            channel_id.clone(), 
-            session_id, 
-            "uuid-lazy".into(), 
-            vec![0, 1, 2], // Fake key package
-            &state.sessions.get(&session_id).unwrap().sender
-        ).await;
+        state
+            .handle_voice_mls_join(
+                channel_id.clone(),
+                session_id,
+                "uuid-lazy".into(),
+                vec![0, 1, 2], // Fake key package
+                &state.sessions.get(&session_id).unwrap().sender,
+            )
+            .await;
 
         // Verify group now exists
-        assert!(state.voice_groups.contains_key(&aura_protocol::make_mls_group_id(&channel_id, true)));
-        
+        assert!(state
+            .voice_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&channel_id, true)));
+
         // Match the message to confirm founder status
-        if let Some(ServiceMessage::MlsCreateGroup { channel_id: c, is_voice: v }) = rx.recv().await {
+        if let Some(ServiceMessage::MlsCreateGroup {
+            channel_id: c,
+            is_voice: v,
+        }) = rx.recv().await
+        {
             assert_eq!(c, channel_id);
             assert!(v);
         } else {
@@ -1676,19 +1889,27 @@ mod tests {
         }
 
         // Attempt to join text group
-        state.handle_text_mls_join(
-            channel_id.clone(),
-            session_id,
-            "uuid-lazy".into(),
-            vec![0, 1, 2],
-            &state.sessions.get(&session_id).unwrap().sender
-        ).await;
+        state
+            .handle_text_mls_join(
+                channel_id.clone(),
+                session_id,
+                "uuid-lazy".into(),
+                vec![0, 1, 2],
+                &state.sessions.get(&session_id).unwrap().sender,
+            )
+            .await;
 
         // Verify group now exists
-        assert!(state.text_groups.contains_key(&aura_protocol::make_mls_group_id(&channel_id, false)));
+        assert!(state
+            .text_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&channel_id, false)));
 
         // Confirm text founder status
-        if let Some(ServiceMessage::MlsCreateGroup { channel_id: c, is_voice: v }) = rx.recv().await {
+        if let Some(ServiceMessage::MlsCreateGroup {
+            channel_id: c,
+            is_voice: v,
+        }) = rx.recv().await
+        {
             assert_eq!(c, channel_id);
             assert!(!v);
         } else {

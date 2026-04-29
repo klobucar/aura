@@ -225,7 +225,8 @@ impl AuthService {
 
     /// Clean up expired sessions.
     pub fn cleanup_expired_sessions(&self) {
-        self.sessions.retain(|_, session| session.created_at.elapsed() < self.session_ttl);
+        self.sessions
+            .retain(|_, session| session.created_at.elapsed() < self.session_ttl);
     }
 
     /// Get session count (for monitoring).
@@ -287,8 +288,7 @@ impl AuthService {
         self.db.set_user_banned(target_user_uuid, true)?;
 
         // Invalidate any active sessions for banned user
-        self.sessions
-            .retain(|_, s| s.user_uuid != target_user_uuid);
+        self.sessions.retain(|_, s| s.user_uuid != target_user_uuid);
 
         Ok(())
     }
@@ -396,11 +396,11 @@ mod tests {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let config = Config::default();
         let auth = AuthService::new(db, config);
-        
+
         let mut rng = rand::rng();
         let bytes: [u8; 32] = rng.random();
         let signing_key = SigningKey::from_bytes(&bytes);
-        
+
         (auth, signing_key)
     }
 
@@ -482,17 +482,18 @@ mod tests {
     fn test_reserved_usernames() {
         let (auth, signing_key) = create_test_auth_service();
         let pk: [u8; 32] = signing_key.verifying_key().to_bytes();
-        
+
         let reserved_names = ["admin", "System", "SERVER", "aura"];
-        
+
         for name in reserved_names {
             let challenge = AuthService::generate_challenge();
             let sig = sign_challenge(&signing_key, &challenge);
             let result = auth.authenticate(&pk, name, &sig, &challenge, None);
-            
+
             assert!(
                 matches!(result, Err(AuthError::UsernameTaken(_))),
-                "Name {} should have been rejected as reserved", name
+                "Name {} should have been rejected as reserved",
+                name
             );
         }
     }

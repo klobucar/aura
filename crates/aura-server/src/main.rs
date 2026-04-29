@@ -14,7 +14,7 @@ use aura_server::state::{self, ServerState};
 
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 /// Environment variable for bootstrap admin public key (hex encoded).
 const ENV_BOOTSTRAP_ADMIN_KEY: &str = "AURA_BOOTSTRAP_ADMIN_KEY";
@@ -31,15 +31,17 @@ fn initialize_bootstrap_admin(db: &Database) -> Result<()> {
     let key_hex = match std::env::var(ENV_BOOTSTRAP_ADMIN_KEY) {
         Ok(k) => k,
         Err(_) => {
-            info!("No bootstrap admin configured. Set {} to create first admin.", ENV_BOOTSTRAP_ADMIN_KEY);
+            info!(
+                "No bootstrap admin configured. Set {} to create first admin.",
+                ENV_BOOTSTRAP_ADMIN_KEY
+            );
             return Ok(());
         }
     };
 
     // Parse hex public key
-    let key_bytes = hex::decode(&key_hex).map_err(|e| {
-        anyhow::anyhow!("Invalid bootstrap admin key (not valid hex): {}", e)
-    })?;
+    let key_bytes = hex::decode(&key_hex)
+        .map_err(|e| anyhow::anyhow!("Invalid bootstrap admin key (not valid hex): {}", e))?;
 
     if key_bytes.len() != 32 {
         return Err(anyhow::anyhow!(
@@ -52,8 +54,8 @@ fn initialize_bootstrap_admin(db: &Database) -> Result<()> {
     public_key.copy_from_slice(&key_bytes);
 
     // Get display name (default to "Admin")
-    let display_name = std::env::var(ENV_BOOTSTRAP_ADMIN_NAME)
-        .unwrap_or_else(|_| "Admin".to_string());
+    let display_name =
+        std::env::var(ENV_BOOTSTRAP_ADMIN_NAME).unwrap_or_else(|_| "Admin".to_string());
 
     // Create bootstrap admin
     db.create_bootstrap_admin(&public_key, &display_name)?;
@@ -86,7 +88,11 @@ async fn main() -> Result<()> {
     info!("  Verification mode: {:?}", config.verification.mode);
     info!(
         "  Server password: {}",
-        if config.requires_password() { "enabled" } else { "disabled" }
+        if config.requires_password() {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
 
     // Initialize database
@@ -108,22 +114,33 @@ async fn main() -> Result<()> {
         let comment = "Default voice lounge";
         let icon_type = 1; // Emoji
         let icon_data = "🛋️".as_bytes();
-        
+
         // Persist to DB
-        db.upsert_channel(Some(channel_id.clone()), name, comment, icon_type, icon_data, 0, 1)?; // 1 = Lobby
-        
+        db.upsert_channel(
+            Some(channel_id.clone()),
+            name,
+            comment,
+            icon_type,
+            icon_data,
+            0,
+            1,
+        )?; // 1 = Lobby
+
         // Initialize in memory
         state.create_channel(channel_id.clone());
-        state.channel_metadata.insert(channel_id.clone(), state::ChannelMetadata {
-            id: channel_id.clone(),
-            name: name.to_string(),
-            comment: comment.to_string(),
-            icon_type,
-            icon_data: icon_data.to_vec(),
-            position: 0,
-            channel_type: 1, // Lobby
-        });
-        
+        state.channel_metadata.insert(
+            channel_id.clone(),
+            state::ChannelMetadata {
+                id: channel_id.clone(),
+                name: name.to_string(),
+                comment: comment.to_string(),
+                icon_type,
+                icon_data: icon_data.to_vec(),
+                position: 0,
+                channel_type: 1, // Lobby
+            },
+        );
+
         info!("Created default channel '{}' (ID {})", name, channel_id);
     }
 
@@ -133,14 +150,17 @@ async fn main() -> Result<()> {
 
     // Parse bind address
     let bind_addr: std::net::SocketAddr = config.server.bind_address.parse()?;
-    
+
     // Create and run QUIC server
     let quic_server = QuicServer::new(bind_addr, Arc::clone(&state))?;
-    
+
     info!("Server Ready.");
     info!("");
     info!("To create a bootstrap admin on first run:");
-    info!("  export {}=<64-char-hex-public-key>", ENV_BOOTSTRAP_ADMIN_KEY);
+    info!(
+        "  export {}=<64-char-hex-public-key>",
+        ENV_BOOTSTRAP_ADMIN_KEY
+    );
     info!("  export {}=<admin-display-name>", ENV_BOOTSTRAP_ADMIN_NAME);
 
     // Run server (this blocks until shutdown)
@@ -161,8 +181,8 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aura_server::config::VerificationMode;
     use aura_protocol::{FastAudioPacket, NONCE_SIZE};
+    use aura_server::config::VerificationMode;
     use bytes::{Bytes, BytesMut};
 
     #[test]
