@@ -12,6 +12,7 @@ use crate::opus::{OpusCodec, OpusError};
 use crate::crypto::{DaveCrypto, CryptoError};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
 use crate::noise_suppression::NoiseSuppressor;
+use crate::vad::VoiceActivityDetector;
 #[cfg(feature = "webrtc-audio")]
 use crate::webrtc_processor::WebRtcProcessor;
 use aura_protocol::FastAudioPacket;
@@ -35,6 +36,13 @@ pub struct AudioSender {
     noise_suppressor: std::sync::Mutex<NoiseSuppressor>,
     /// Enable/disable RNNoise at runtime
     enable_rnnoise: AtomicBool,
+
+    /// Voice activity detector. When `enable_vad` is true and the detector
+    /// reports silence, `process*` returns `Ok(None)` so the caller skips the
+    /// datagram entirely.
+    vad: std::sync::Mutex<VoiceActivityDetector>,
+    /// Enable/disable VAD-based silence skipping at runtime. Default: false.
+    enable_vad: AtomicBool,
     
     /// WebRTC processor (AEC/NS/AGC) - optional feature
     #[cfg(feature = "webrtc-audio")]
@@ -70,7 +78,10 @@ impl AudioSender {
             crypto: RwLock::new(crypto),
             noise_suppressor: std::sync::Mutex::new(NoiseSuppressor::new()),
             enable_rnnoise: AtomicBool::new(true), // Enabled by default
-            
+
+            vad: std::sync::Mutex::new(VoiceActivityDetector::default_20ms()),
+            enable_vad: AtomicBool::new(false), // Off by default — opt-in per client
+
             #[cfg(feature = "webrtc-audio")]
             webrtc_processor,
             #[cfg(feature = "webrtc-audio")]
@@ -94,6 +105,26 @@ impl AudioSender {
     /// Enable or disable RNNoise at runtime
     pub fn set_rnnoise_enabled(&self, enabled: bool) {
         self.enable_rnnoise.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Enable or disable VAD-based silence skipping at runtime.
+    /// When enabled, `process*` returns `Ok(None)` for frames the VAD classifies
+    /// as silence (after hangover), letting the caller skip the network send.
+    pub fn set_vad_enabled(&self, enabled: bool) {
+        self.enable_vad.store(enabled, Ordering::SeqCst);
+        if !enabled {
+            // Drop hangover state so re-enabling starts fresh.
+            if let Ok(mut vad) = self.vad.lock() {
+                vad.reset();
+            }
+        }
+    }
+
+    /// Set the VAD detection threshold in dB (e.g., -40.0 = sensitive, -20.0 = loud-only).
+    pub fn set_vad_threshold_db(&self, threshold_db: f32) {
+        if let Ok(mut vad) = self.vad.lock() {
+            vad.set_threshold_db(threshold_db);
+        }
     }
     
     /// Enable or disable WebRTC AEC at runtime
@@ -149,16 +180,29 @@ impl AudioSender {
             .map_err(AudioPipelineError::Opus)
     }
     
-    /// Encode and encrypt PCM audio for transmission
-    /// 
-    /// Pipeline: PCM -> Opus -> Zero-pad -> XChaCha20-Poly1305 -> Packet
-    /// 
+    /// Encode and encrypt PCM audio for transmission.
+    ///
+    /// Pipeline: VAD gate -> Opus -> Zero-pad -> XChaCha20-Poly1305 -> Packet
+    ///
     /// Input: 960 samples of i16 PCM (20ms at 48kHz)
-    /// Output: Serialized FastAudioPacket ready for QUIC datagram
-    pub fn process(&self, pcm: &[i16]) -> Result<Bytes, AudioPipelineError> {
+    /// Output:
+    /// * `Ok(Some(bytes))` — serialized FastAudioPacket ready for QUIC datagram
+    /// * `Ok(None)` — VAD is enabled and the frame is silence; caller should skip the send
+    pub fn process(&self, pcm: &[i16]) -> Result<Option<Bytes>, AudioPipelineError> {
+        // 0. VAD gate — only when enabled. Sequence is bumped only on emitted frames so
+        //    receivers don't see gaps for skipped silence.
+        if self.enable_vad.load(Ordering::Relaxed) {
+            let voice = self.vad.lock()
+                .map(|mut v| v.process(pcm))
+                .unwrap_or(true);
+            if !voice {
+                return Ok(None);
+            }
+        }
+
         // 1. Encode to Opus
         let opus_data = self.codec.encode(pcm).map_err(AudioPipelineError::Opus)?;
-        
+
         // 2. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
@@ -166,11 +210,11 @@ impl AudioSender {
             crypto.encrypt(&opus_data, &nonce)
                 .map_err(AudioPipelineError::Crypto)?
         };
-        
+
         // 3. Build packet
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
-        
+
         let packet = FastAudioPacket {
             session_id: self.session_id,
             epoch_hint,
@@ -178,52 +222,67 @@ impl AudioSender {
             nonce,
             payload: Bytes::from(ciphertext),
         };
-        
+
         // 4. Serialize
-        Ok(packet.to_bytes())
+        Ok(Some(packet.to_bytes()))
     }
     
-    /// Encode and encrypt f32 PCM audio
-    /// 
+    /// Encode and encrypt f32 PCM audio.
+    ///
     /// `reference`: Optional playback audio for AEC (only needed if WebRTC AEC is enabled)
-    pub fn process_float_with_reference(&self, pcm: &[f32], _reference: Option<&[f32]>) -> Result<Bytes, AudioPipelineError> {
+    ///
+    /// Returns `Ok(None)` if VAD is enabled and the (post-NS) frame is silence.
+    /// VAD runs on the noise-suppressed signal so RNNoise / WebRTC NS can attenuate
+    /// background hiss before the gate decides voice vs. silence.
+    pub fn process_float_with_reference(&self, pcm: &[f32], _reference: Option<&[f32]>) -> Result<Option<Bytes>, AudioPipelineError> {
         let mut processed = pcm.to_vec();
-        
+
         // 1. WebRTC processing (AEC/NS/AGC)
         #[cfg(feature = "webrtc-audio")]
         if let Some(proc) = &self.webrtc_processor {
             let mut p = proc.lock().unwrap();
-            processed = p.process(&processed, reference);
+            processed = p.process(&processed, _reference);
         }
-        
+
         // 2. RNNoise (if enabled and WebRTC NS is disabled)
         #[cfg(feature = "webrtc-audio")]
-        let use_rnnoise = self.enable_rnnoise.load(Ordering::SeqCst) 
+        let use_rnnoise = self.enable_rnnoise.load(Ordering::SeqCst)
             && !self.enable_webrtc_ns.load(Ordering::SeqCst);
-        
+
         #[cfg(not(feature = "webrtc-audio"))]
         let use_rnnoise = self.enable_rnnoise.load(Ordering::SeqCst);
-        
+
         if use_rnnoise {
             let mut suppressor = self.noise_suppressor.lock().unwrap();
             processed = suppressor.process(&processed);
         }
-        
-        // 3. Encode to Opus using native float API
+
+        // 3. VAD gate — runs on the post-NS signal so noise reduction can attenuate
+        //    background hiss before the threshold check.
+        if self.enable_vad.load(Ordering::Relaxed) {
+            let voice = self.vad.lock()
+                .map(|mut v| v.process_float(&processed))
+                .unwrap_or(true);
+            if !voice {
+                return Ok(None);
+            }
+        }
+
+        // 4. Encode to Opus using native float API
         let opus_data = self.codec.encode_float(&processed).map_err(AudioPipelineError::Opus)?;
-        
-        // 4. Generate nonce and encrypt
+
+        // 5. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
             crypto.encrypt(&opus_data, &nonce)
                 .map_err(AudioPipelineError::Crypto)?
         };
-        
-        // 5. Build packet
+
+        // 6. Build packet
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
-        
+
         let packet = FastAudioPacket {
             session_id: self.session_id,
             epoch_hint,
@@ -231,8 +290,8 @@ impl AudioSender {
             nonce,
             payload: Bytes::from(ciphertext),
         };
-        
-        Ok(packet.to_bytes())
+
+        Ok(Some(packet.to_bytes()))
     }
     
     /// Get current sequence number
@@ -549,11 +608,13 @@ mod tests {
     fn test_sender_encode() {
         let key = DaveCrypto::random_key();
         let sender = AudioSender::new(42, &key).expect("Create sender");
-        
+
         // Generate test PCM
         let pcm = vec![0i16; 960];
-        let packet = sender.process(&pcm).expect("Process failed");
-        
+        let packet = sender.process(&pcm)
+            .expect("Process failed")
+            .expect("VAD off by default; expected a packet");
+
         // Should have header + encrypted data
         assert!(packet.len() > FastAudioPacket::HEADER_SIZE);
     }
@@ -572,8 +633,10 @@ mod tests {
         let pcm: Vec<i16> = (0..960).map(|i| ((i % 100) * 100) as i16).collect();
         
         // Send
-        let packet = sender.process(&pcm).expect("Process failed");
-        
+        let packet = sender.process(&pcm)
+            .expect("Process failed")
+            .expect("VAD off; expected a packet");
+
         // Receive
         receiver.on_packet(packet).expect("On packet failed");
         
@@ -600,8 +663,8 @@ mod tests {
         let pcm = vec![1000i16; 960];
         
         // Both send
-        let pkt1 = sender1.process(&pcm).expect("Send 1");
-        let pkt2 = sender2.process(&pcm).expect("Send 2");
+        let pkt1 = sender1.process(&pcm).expect("Send 1").expect("VAD off");
+        let pkt2 = sender2.process(&pcm).expect("Send 2").expect("VAD off");
         
         receiver.on_packet(pkt1).expect("Receive 1");
         receiver.on_packet(pkt2).expect("Receive 2");
@@ -623,7 +686,7 @@ mod tests {
         let key = DaveCrypto::random_key();
         let sender = AudioSender::new(999, &key).expect("Create sender");
         let pcm = vec![0i16; 960];
-        let packet = sender.process(&pcm).expect("Process");
+        let packet = sender.process(&pcm).expect("Process").expect("VAD off");
         
         // Should fail
         let result = receiver.on_packet(packet);
@@ -638,10 +701,40 @@ mod tests {
         
         assert_eq!(sender.sequence(), 0);
         
-        sender.process(&pcm).expect("Process 1");
+        sender.process(&pcm).expect("Process 1").expect("VAD off");
         assert_eq!(sender.sequence(), 1);
-        
-        sender.process(&pcm).expect("Process 2");
+
+        sender.process(&pcm).expect("Process 2").expect("VAD off");
+        assert_eq!(sender.sequence(), 2);
+    }
+
+    #[test]
+    fn test_vad_skips_silence_and_holds_sequence() {
+        let key = DaveCrypto::random_key();
+        let sender = AudioSender::new(7, &key).expect("Create sender");
+
+        // Enable VAD with a moderately strict threshold and short hangover for a
+        // deterministic test.
+        sender.set_vad_enabled(true);
+        sender.set_vad_threshold_db(-30.0);
+
+        // Pure silence -> VAD gates the frame, no packet emitted.
+        let silence = vec![0i16; 960];
+        let res = sender.process(&silence).expect("Process should not error");
+        assert!(res.is_none(), "VAD should silence the frame");
+        // Sequence must NOT advance for skipped frames so receivers don't see gaps.
+        assert_eq!(sender.sequence(), 0);
+
+        // Loud signal -> VAD lets it through, sequence advances.
+        let loud: Vec<i16> = (0..960).map(|_| 16000i16).collect();
+        let res = sender.process(&loud).expect("Process should not error");
+        assert!(res.is_some(), "VAD should pass loud signal");
+        assert_eq!(sender.sequence(), 1);
+
+        // Disabling VAD should let silence through again immediately.
+        sender.set_vad_enabled(false);
+        let res = sender.process(&silence).expect("Process should not error");
+        assert!(res.is_some(), "VAD disabled => packet must emit");
         assert_eq!(sender.sequence(), 2);
     }
 }

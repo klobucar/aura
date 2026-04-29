@@ -13,10 +13,12 @@ async fn test_full_audio_pipeline() {
     
     // Simulate audio (20ms at 48kHz = 960 samples)
     let pcm = vec![0i16; 960];
-    let encoded = sender.process(&pcm).expect("Process failed");
-    
+    let encoded = sender.process(&pcm)
+        .expect("Process failed")
+        .expect("VAD off by default; expected a packet");
+
     assert!(!encoded.is_empty(), "Encoded data should not be empty");
-    
+
     // Pass packet to receiver
     receiver.on_packet(&encoded).expect("OnPacket failed");
     
@@ -34,18 +36,18 @@ async fn test_packet_loss_recovery() {
     receiver.add_sender(1, &key, 0).expect("Failed to add sender");
     
     let pcm = vec![100i16; 960];
-    
+
     // Packet 1
-    let packet1 = sender.process(&pcm).expect("Process 1 failed");
+    let packet1 = sender.process(&pcm).expect("Process 1 failed").expect("VAD off");
     receiver.on_packet(&packet1).expect("OnPacket 1 failed");
     let _ = receiver.pop_mixed(); // Clear buffer
-    
+
     // Skip Packet 2 (manually increment sender sequence if possible, or just skip)
     // AudioSenderWrapper doesn't expose manual sequence set, so we just process twice
-    let _packet2 = sender.process(&pcm).expect("Process 2 failed");
-    
+    let _packet2 = sender.process(&pcm).expect("Process 2 failed").expect("VAD off");
+
     // Packet 3
-    let packet3 = sender.process(&pcm).expect("Process 3 failed");
+    let packet3 = sender.process(&pcm).expect("Process 3 failed").expect("VAD off");
     receiver.on_packet(&packet3).expect("OnPacket 3 failed");
     
     let mixed = receiver.pop_mixed().expect("PopMixed failed");
@@ -68,7 +70,7 @@ fn test_concurrent_senders() {
         let handle = thread::spawn(move || {
             let sender = AudioSenderWrapper::new(session_id, &key).expect("Failed to create sender");
             let pcm = vec![1000i16; 960];
-            let encoded = sender.process(&pcm).expect("Process failed");
+            let encoded = sender.process(&pcm).expect("Process failed").expect("VAD off");
             receiver_clone.on_packet(&encoded).expect("OnPacket failed");
             session_id
         });
@@ -93,7 +95,9 @@ fn test_zero_amplitude_handling() {
     receiver.add_sender(1, &key, 0).expect("Failed to add sender");
     
     let silence = vec![0i16; 960];
-    let encoded = sender.process(&silence).expect("Process failed");
+    let encoded = sender.process(&silence)
+        .expect("Process failed")
+        .expect("VAD off; silent PCM still emits a (small) Opus packet");
     receiver.on_packet(&encoded).expect("OnPacket failed");
     
     let mixed = receiver.pop_mixed().expect("PopMixed failed");

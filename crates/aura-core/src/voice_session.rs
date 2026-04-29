@@ -217,27 +217,29 @@ impl VoiceSession {
     // Audio Processing
     // =========================================================================
     
-    /// Process outgoing audio (PCM → encrypted packet)
-    /// 
+    /// Process outgoing audio (PCM → encrypted packet).
+    ///
     /// # Arguments
     /// * `pcm` - 960 samples of 16-bit mono PCM (20ms at 48kHz)
-    /// 
+    ///
     /// # Returns
-    /// Serialized FastAudioPacket ready for QUIC datagram
-    pub fn process_audio(&self, pcm: &[i16]) -> Result<Bytes, VoiceSessionError> {
+    /// * `Ok(Some(bytes))` - serialized FastAudioPacket ready for QUIC datagram
+    /// * `Ok(None)` - VAD enabled and the frame is silence; caller should skip the send
+    pub fn process_audio(&self, pcm: &[i16]) -> Result<Option<Bytes>, VoiceSessionError> {
         if self.group_id.read().unwrap().is_none() {
             return Err(VoiceSessionError::NotInChannel);
         }
-        
+
         Ok(self.sender.process(pcm)?)
     }
-    
-    /// Process outgoing audio (f32 PCM → encrypted packet)
-    pub fn process_audio_float(&self, pcm: &[f32]) -> Result<Bytes, VoiceSessionError> {
+
+    /// Process outgoing audio (f32 PCM → encrypted packet).
+    /// Returns `Ok(None)` when VAD is enabled and the frame is silence.
+    pub fn process_audio_float(&self, pcm: &[f32]) -> Result<Option<Bytes>, VoiceSessionError> {
         if self.group_id.read().unwrap().is_none() {
             return Err(VoiceSessionError::NotInChannel);
         }
-        
+
         Ok(self.sender.process_float_with_reference(pcm, None)?)
     }
     
@@ -344,7 +346,7 @@ mod tests {
         
         // Alice sends audio
         let pcm = vec![1000i16; 960];
-        let packet = alice.process_audio(&pcm).expect("Alice send");
+        let packet = alice.process_audio(&pcm).expect("Alice send").expect("VAD off");
         
         // Bob receives
         bob.receive_audio(packet).expect("Bob receive");

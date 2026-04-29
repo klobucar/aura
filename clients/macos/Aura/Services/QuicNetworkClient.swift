@@ -238,6 +238,16 @@ public class QuicNetworkClient {
             audioReceiver?.setJitterBufferMs(latencyMs: UInt32(ms))
             print("[QuicClient] Jitter buffer set to \(ms)ms")
         }
+
+        if let enabled = settings["vadEnabled"] as? Bool {
+            audioSender?.setVadEnabled(enabled: enabled)
+            print("[QuicClient] VAD: \(enabled ? "enabled" : "disabled")")
+        }
+
+        if let thresholdDb = settings["vadThresholdDb"] as? Float {
+            audioSender?.setVadThresholdDb(thresholdDb: thresholdDb)
+            print("[QuicClient] VAD threshold: \(thresholdDb) dB")
+        }
     }
     
     // MARK: - Connection
@@ -638,10 +648,20 @@ public class QuicNetworkClient {
                 audioSender?.setWebrtcAecEnabled(enabled: aecEnabled)
                 audioSender?.setWebrtcNsEnabled(enabled: webrtcNsEnabled)
                 audioSender?.setWebrtcAgcEnabled(enabled: webrtcAgcEnabled)
-                
+
+                // VAD: enabled when transmission mode is voice activation; threshold derived
+                // from the saved sensitivity slider (0.0–1.0 maps to -50..-20 dB).
+                let savedMode = UserDefaults.standard.string(forKey: "AuraTransmissionMode")
+                let vadEnabled = (savedMode == "vad")
+                let savedSensitivity = UserDefaults.standard.float(forKey: "AuraVADSensitivity")
+                let sensitivity = savedSensitivity == 0 ? Float(0.5) : savedSensitivity
+                let thresholdDb = -50.0 + (sensitivity * 30.0) // 0.0 → -50 dB, 1.0 → -20 dB
+                audioSender?.setVadThresholdDb(thresholdDb: thresholdDb)
+                audioSender?.setVadEnabled(enabled: vadEnabled)
+
                 audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
-                
-                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms")
+
+                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms, VAD=\(vadEnabled)@\(thresholdDb)dB")
                 
                 // Text crypto will use MLS-derived keys per-sender (no initialization needed)
                 
@@ -1632,11 +1652,15 @@ public class QuicNetworkClient {
     /// - Parameter rawPcmBytes: Raw PCM data from AudioCapture (Int16 samples)
     public func sendAudioDatagram(_ floatPcm: [Float]) async throws {
         guard isAuthenticated, let sender = audioSender else { return }
-        
-        // Process through audio sender (Opus + Encrypt) using high-fidelity float path
+
+        // Process through audio sender (Opus + Encrypt) using high-fidelity float path.
+        // Returns nil when VAD is enabled and the frame is silence — skip the send.
         let packetData: Data
         do {
-            packetData = try Data(sender.processFloat(pcm: floatPcm))
+            guard let bytes = try sender.processFloat(pcm: floatPcm) else {
+                return // VAD silenced; nothing to transmit this 20ms slice
+            }
+            packetData = Data(bytes)
         } catch {
             print("[QuicClient] Audio encoding error: \(error)")
             return
@@ -1686,8 +1710,10 @@ public class QuicNetworkClient {
                     )
                 }
                 
-                // WORKAROUND: Rust core doesn't have VAD yet - it reports anyone with packets as "active"
-                // Manually timeout speakers who stop sending packets (500ms silence detection)
+                // Receive-side speaker timeout: when a sender uses VAD, no packets arrive
+                // during silence — and even without VAD, datagrams can be lost. Mark a
+                // speaker as inactive after 500ms of no packets so the UI clears the
+                // talking indicator promptly.
                 for speakerId in result.activeSpeakers {
                     // Reset timeout for this speaker
                     speakerTimeouts[speakerId]?.cancel()

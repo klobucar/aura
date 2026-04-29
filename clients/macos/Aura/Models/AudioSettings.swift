@@ -109,6 +109,12 @@ class AudioSettings: ObservableObject {
     @Published var vadSensitivity: Float = 0.5 // 0.0 = very sensitive, 1.0 = loud speech only
     @Published var pttHotkey: Hotkey?
 
+    /// VAD detection threshold in dB, derived from `vadSensitivity` slider.
+    /// Linear map: 0.0 → -50 dB (sensitive), 1.0 → -20 dB (loud-only).
+    var vadThresholdDb: Float {
+        -50.0 + (vadSensitivity * 30.0)
+    }
+
     
     // MARK: - Persistence
     
