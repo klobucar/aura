@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::VerificationMode;
+    use aura_server::config::VerificationMode;
     use aura_protocol::{FastAudioPacket, NONCE_SIZE};
     use bytes::{Bytes, BytesMut};
 
