@@ -198,6 +198,12 @@ pub struct SeenMessages {
     messages: DashMap<String, Vec<SeenMessageEntry>>,
 }
 
+impl Default for SeenMessages {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SeenMessages {
     pub fn new() -> Self {
         Self {
@@ -211,7 +217,7 @@ impl SeenMessages {
     pub fn check_and_mark(&self, channel_id: String, message_id: &str) -> bool {
         let expires_at = Instant::now() + std::time::Duration::from_secs(SEEN_MESSAGE_TTL_SECS);
 
-        let mut entries = self.messages.entry(channel_id).or_insert_with(Vec::new);
+        let mut entries = self.messages.entry(channel_id).or_default();
 
         // Check if already seen
         for entry in entries.iter() {
@@ -524,7 +530,7 @@ impl ServerState {
                 }),
                 3 => Some(ProtoChannelIcon {
                     icon: Some(channel_icon::Icon::CustomData(
-                        meta.icon_data.clone().into(),
+                        meta.icon_data.clone(),
                     )),
                 }),
                 _ => None,
@@ -1578,7 +1584,7 @@ mod tests {
 
         // Setup two sessions
         let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
-        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
 
         let addr: SocketAddr = "127.0.0.1:1111".parse().unwrap();
         let s1 = state.register_session("uuid-1".into(), addr, tx1);

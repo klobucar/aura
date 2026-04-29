@@ -27,7 +27,7 @@ pub struct TtsSettings {
     pub speak_join_leave: bool,
 }
 
-#[derive(uniffi::Object)]
+#[derive(uniffi::Object, Default)]
 pub struct TtsFormatter;
 
 #[uniffi::export]

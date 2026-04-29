@@ -195,9 +195,9 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert rustls config for ACME: {}", e))?;
 
-        Ok(Self::apply_transport_config(ServerConfig::with_crypto(
+        Self::apply_transport_config(ServerConfig::with_crypto(
             Arc::new(quinn_crypto),
-        ))?)
+        ))
     }
 
     /// Minimal TCP listener for Fly.io health checks when ACME is disabled.
@@ -252,9 +252,9 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert manual TLS config: {}", e))?;
 
-        Ok(Self::apply_transport_config(ServerConfig::with_crypto(
+        Self::apply_transport_config(ServerConfig::with_crypto(
             Arc::new(quinn_crypto),
-        ))?)
+        ))
     }
 
     /// Generate self-signed TLS certificate for QUIC.
@@ -276,9 +276,9 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert self-signed config: {}", e))?;
 
-        Ok(Self::apply_transport_config(ServerConfig::with_crypto(
+        Self::apply_transport_config(ServerConfig::with_crypto(
             Arc::new(quinn_crypto),
-        ))?)
+        ))
     }
 
     /// Apply common transport settings for low-latency voice.
@@ -337,7 +337,6 @@ impl QuicServer {
 }
 
 /// Handle a single QUIC connection.
-
 async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<()> {
     let remote = conn.remote_address();
     info!("[{}] Connection established", remote);
@@ -357,7 +356,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
             Ok(result) => result,
             Err(e) => {
                 warn!("[{}] Authentication failed: {}", remote, e);
-                return Err(e.into());
+                return Err(e);
             }
         };
 
@@ -496,13 +495,10 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
     Ok(())
 }
 
-/// Client session after authentication.
-/*
-struct AuthSession {
-    session_id: u32,
-    username: String,
-}
-*/
+// Client session after authentication.
+// (Was a struct AuthSession { session_id: u32, username: String } — left as a
+//  comment for now, but no longer needed since session bookkeeping moved into
+//  ServerState. Remove or restore as needed.)
 
 /// Authenticate a client using TOFU protocol.
 /// Server-first protocol for Apple Network.framework compatibility:
@@ -1250,5 +1246,5 @@ impl ConnectionContext {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 }

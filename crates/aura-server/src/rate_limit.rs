@@ -7,7 +7,7 @@
 
 use governor::{
     clock::DefaultClock,
-    state::{keyed::DashMapStateStore, InMemoryState},
+    state::keyed::DashMapStateStore,
     Quota, RateLimiter,
 };
 use nonzero_ext::nonzero;

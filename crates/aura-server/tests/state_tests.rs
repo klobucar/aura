@@ -1,4 +1,3 @@
-use aura_protocol::EncryptedTextPacket;
 use aura_server::config::Config;
 use aura_server::db::Database;
 use aura_server::state::{SeenMessages, ServerState, ServiceMessage};
@@ -76,7 +75,7 @@ async fn test_replay_attack_detection() {
         .await;
 
     // Second send with same message_id should be rejected (replay)
-    let result2 = state
+    let _result2 = state
         .broadcast_text_message(session_id, packet.clone())
         .await;
     // Replay should be detected and rejected

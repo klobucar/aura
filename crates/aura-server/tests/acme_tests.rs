@@ -45,7 +45,7 @@ async fn test_acme_certificate_acquisition_with_pebble() {
     // However, Pebble is configured to talk to port 443 in our pebble-config.json.
 
     let bind_addr: std::net::SocketAddr = "127.0.0.1:8443".parse().unwrap();
-    let server = match QuicServer::new(bind_addr, Arc::clone(&state)) {
+    let _server = match QuicServer::new(bind_addr, Arc::clone(&state)) {
         Ok(s) => s,
         Err(e) => {
             // If we can't bind 443 (privileged), we might fail here.

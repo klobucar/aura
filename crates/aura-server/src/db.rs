@@ -13,6 +13,14 @@ use uuid::Uuid;
 /// Current database schema version.
 const SCHEMA_VERSION: i64 = 1;
 
+/// Tuple shape returned by `get_all_channels`:
+/// `(channel_id, name, comment, icon_type, icon_data, position, channel_type)`.
+pub type ChannelRow = (String, String, String, i32, Vec<u8>, i32, i32);
+
+/// Tuple shape returned by `get_user_profile`:
+/// `(bio, avatar_data, signature, signing_key)`.
+pub type UserProfileRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Thread-safe database handle.
 pub type DbHandle = Arc<Mutex<Connection>>;
 
@@ -489,9 +497,7 @@ impl Database {
     }
 
     /// Get all channels from the database.
-    pub fn get_all_channels(
-        &self,
-    ) -> Result<Vec<(String, String, String, i32, Vec<u8>, i32, i32)>> {
+    pub fn get_all_channels(&self) -> Result<Vec<ChannelRow>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT channel_id, name, comment, icon_type, icon_data, position, channel_type 
@@ -516,6 +522,7 @@ impl Database {
     }
 
     /// Upsert a channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_channel(
         &self,
         id: Option<String>,
@@ -556,10 +563,7 @@ impl Database {
     }
 
     /// Get a user profile.
-    pub fn get_user_profile(
-        &self,
-        user_uuid: &str,
-    ) -> Result<Option<(String, Vec<u8>, Vec<u8>, Vec<u8>)>> {
+    pub fn get_user_profile(&self, user_uuid: &str) -> Result<Option<UserProfileRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT bio, avatar_data, signature, signing_key FROM user_profiles WHERE user_uuid = ?",
