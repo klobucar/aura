@@ -4,14 +4,14 @@
 //! for the send/receive hot paths.
 
 use bytes::Bytes;
-use std::sync::atomic::{AtomicU16, AtomicU64, AtomicBool, Ordering};
-use std::sync::RwLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::RwLock;
 
-use crate::opus::{OpusCodec, OpusError};
-use crate::crypto::{DaveCrypto, CryptoError};
+use crate::crypto::{CryptoError, DaveCrypto};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
 use crate::noise_suppression::NoiseSuppressor;
+use crate::opus::{OpusCodec, OpusError};
 use crate::vad::VoiceActivityDetector;
 #[cfg(feature = "webrtc-audio")]
 use crate::webrtc_processor::WebRtcProcessor;
@@ -43,7 +43,7 @@ pub struct AudioSender {
     vad: std::sync::Mutex<VoiceActivityDetector>,
     /// Enable/disable VAD-based silence skipping at runtime. Default: false.
     enable_vad: AtomicBool,
-    
+
     /// WebRTC processor (AEC/NS/AGC) - optional feature
     #[cfg(feature = "webrtc-audio")]
     webrtc_processor: Option<std::sync::Mutex<WebRtcProcessor>>,
@@ -53,7 +53,7 @@ pub struct AudioSender {
     enable_webrtc_ns: AtomicBool,
     #[cfg(feature = "webrtc-audio")]
     enable_webrtc_agc: AtomicBool,
-    
+
     /// Our session ID
     session_id: u32,
     /// Current MLS epoch hint
@@ -67,12 +67,12 @@ impl AudioSender {
     pub fn new(session_id: u32, key: &[u8; 32]) -> Result<Self, AudioPipelineError> {
         let codec = OpusCodec::new().map_err(AudioPipelineError::Opus)?;
         let crypto = DaveCrypto::new(key);
-        
+
         #[cfg(feature = "webrtc-audio")]
         let webrtc_processor = WebRtcProcessor::new(false, false, false)
             .ok()
             .map(|p| std::sync::Mutex::new(p));
-        
+
         Ok(Self {
             codec,
             crypto: RwLock::new(crypto),
@@ -90,18 +90,19 @@ impl AudioSender {
             enable_webrtc_ns: AtomicBool::new(false),
             #[cfg(feature = "webrtc-audio")]
             enable_webrtc_agc: AtomicBool::new(false),
-            
+
             session_id,
             epoch_hint: AtomicU16::new(0),
             sequence: AtomicU16::new(0),
         })
     }
-    
+
     /// Set the current MLS epoch hint
     pub fn set_epoch(&self, epoch: u64) {
-        self.epoch_hint.store((epoch & 0xFFFF) as u16, Ordering::SeqCst);
+        self.epoch_hint
+            .store((epoch & 0xFFFF) as u16, Ordering::SeqCst);
     }
-    
+
     /// Enable or disable RNNoise at runtime
     pub fn set_rnnoise_enabled(&self, enabled: bool) {
         self.enable_rnnoise.store(enabled, Ordering::SeqCst);
@@ -126,19 +127,21 @@ impl AudioSender {
             vad.set_threshold_db(threshold_db);
         }
     }
-    
+
     /// Enable or disable WebRTC AEC at runtime
     #[cfg(feature = "webrtc-audio")]
     pub fn set_webrtc_aec_enabled(&self, enabled: bool) {
         self.enable_webrtc_aec.store(enabled, Ordering::SeqCst);
         if let Some(proc) = &self.webrtc_processor {
             let mut p = proc.lock().unwrap();
-            p.reconfigure(enabled, 
+            p.reconfigure(
+                enabled,
                 self.enable_webrtc_ns.load(Ordering::SeqCst),
-                self.enable_webrtc_agc.load(Ordering::SeqCst));
+                self.enable_webrtc_agc.load(Ordering::SeqCst),
+            );
         }
     }
-    
+
     /// Enable or disable WebRTC NS at runtime
     #[cfg(feature = "webrtc-audio")]
     pub fn set_webrtc_ns_enabled(&self, enabled: bool) {
@@ -148,10 +151,11 @@ impl AudioSender {
             p.reconfigure(
                 self.enable_webrtc_aec.load(Ordering::SeqCst),
                 enabled,
-                self.enable_webrtc_agc.load(Ordering::SeqCst));
+                self.enable_webrtc_agc.load(Ordering::SeqCst),
+            );
         }
     }
-    
+
     /// Enable or disable WebRTC AGC at runtime
     #[cfg(feature = "webrtc-audio")]
     pub fn set_webrtc_agc_enabled(&self, enabled: bool) {
@@ -161,25 +165,27 @@ impl AudioSender {
             p.reconfigure(
                 self.enable_webrtc_aec.load(Ordering::SeqCst),
                 self.enable_webrtc_ns.load(Ordering::SeqCst),
-                enabled);
+                enabled,
+            );
         }
     }
-    
+
     /// Update the encryption key (called when MLS epoch advances)
     pub fn update_key(&self, new_key: &[u8; 32], new_epoch: u64) {
         let mut crypto = self.crypto.write().unwrap();
         *crypto = DaveCrypto::new(new_key);
         self.set_epoch(new_epoch);
     }
-    
+
     /// Set DRED duration (number of 10ms frames of redundancy)
-    /// 
+    ///
     /// Example: duration=10 means 100ms of redundancy
     pub fn set_dred_duration(&self, duration: i32) -> Result<(), AudioPipelineError> {
-        self.codec.set_dred_duration(duration)
+        self.codec
+            .set_dred_duration(duration)
             .map_err(AudioPipelineError::Opus)
     }
-    
+
     /// Encode and encrypt PCM audio for transmission.
     ///
     /// Pipeline: VAD gate -> Opus -> Zero-pad -> XChaCha20-Poly1305 -> Packet
@@ -192,9 +198,7 @@ impl AudioSender {
         // 0. VAD gate — only when enabled. Sequence is bumped only on emitted frames so
         //    receivers don't see gaps for skipped silence.
         if self.enable_vad.load(Ordering::Relaxed) {
-            let voice = self.vad.lock()
-                .map(|mut v| v.process(pcm))
-                .unwrap_or(true);
+            let voice = self.vad.lock().map(|mut v| v.process(pcm)).unwrap_or(true);
             if !voice {
                 return Ok(None);
             }
@@ -207,7 +211,8 @@ impl AudioSender {
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
-            crypto.encrypt(&opus_data, &nonce)
+            crypto
+                .encrypt(&opus_data, &nonce)
                 .map_err(AudioPipelineError::Crypto)?
         };
 
@@ -226,7 +231,7 @@ impl AudioSender {
         // 4. Serialize
         Ok(Some(packet.to_bytes()))
     }
-    
+
     /// Encode and encrypt f32 PCM audio.
     ///
     /// `reference`: Optional playback audio for AEC (only needed if WebRTC AEC is enabled)
@@ -234,7 +239,11 @@ impl AudioSender {
     /// Returns `Ok(None)` if VAD is enabled and the (post-NS) frame is silence.
     /// VAD runs on the noise-suppressed signal so RNNoise / WebRTC NS can attenuate
     /// background hiss before the gate decides voice vs. silence.
-    pub fn process_float_with_reference(&self, pcm: &[f32], _reference: Option<&[f32]>) -> Result<Option<Bytes>, AudioPipelineError> {
+    pub fn process_float_with_reference(
+        &self,
+        pcm: &[f32],
+        _reference: Option<&[f32]>,
+    ) -> Result<Option<Bytes>, AudioPipelineError> {
         let mut processed = pcm.to_vec();
 
         // 1. WebRTC processing (AEC/NS/AGC)
@@ -260,7 +269,9 @@ impl AudioSender {
         // 3. VAD gate — runs on the post-NS signal so noise reduction can attenuate
         //    background hiss before the threshold check.
         if self.enable_vad.load(Ordering::Relaxed) {
-            let voice = self.vad.lock()
+            let voice = self
+                .vad
+                .lock()
                 .map(|mut v| v.process_float(&processed))
                 .unwrap_or(true);
             if !voice {
@@ -269,13 +280,17 @@ impl AudioSender {
         }
 
         // 4. Encode to Opus using native float API
-        let opus_data = self.codec.encode_float(&processed).map_err(AudioPipelineError::Opus)?;
+        let opus_data = self
+            .codec
+            .encode_float(&processed)
+            .map_err(AudioPipelineError::Opus)?;
 
         // 5. Generate nonce and encrypt
         let nonce = DaveCrypto::random_nonce();
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
-            crypto.encrypt(&opus_data, &nonce)
+            crypto
+                .encrypt(&opus_data, &nonce)
                 .map_err(AudioPipelineError::Crypto)?
         };
 
@@ -293,7 +308,7 @@ impl AudioSender {
 
         Ok(Some(packet.to_bytes()))
     }
-    
+
     /// Get current sequence number
     pub fn sequence(&self) -> u16 {
         self.sequence.load(Ordering::SeqCst)
@@ -335,7 +350,7 @@ impl AudioReceiver {
             jitter_config: JitterBufferConfig::default(),
         }
     }
-    
+
     /// Create with custom jitter buffer config
     pub fn with_config(jitter_config: JitterBufferConfig) -> Self {
         Self {
@@ -343,7 +358,7 @@ impl AudioReceiver {
             jitter_config,
         }
     }
-    
+
     /// Set jitter buffer target latency for all senders
     pub fn set_jitter_buffer_ms(&self, latency_ms: u32) {
         let mut senders = self.senders.write().unwrap();
@@ -351,16 +366,21 @@ impl AudioReceiver {
             state.jitter.set_target_latency(latency_ms);
         }
     }
-    
+
     /// Register a sender with their decryption key
-    pub fn add_sender(&self, session_id: u32, key: &[u8; 32], epoch_hint: u16) -> Result<(), AudioPipelineError> {
+    pub fn add_sender(
+        &self,
+        session_id: u32,
+        key: &[u8; 32],
+        epoch_hint: u16,
+    ) -> Result<(), AudioPipelineError> {
         let codec = OpusCodec::new().map_err(AudioPipelineError::Opus)?;
         let crypto = DaveCrypto::new(key);
         let jitter = JitterBuffer::new(self.jitter_config.clone());
-        
+
         let mut key_store = HashMap::new();
         key_store.insert(epoch_hint, crypto);
-        
+
         let state = SenderState {
             codec,
             key_store,
@@ -398,14 +418,14 @@ impl AudioReceiver {
             false
         }
     }
-    
+
     /// Remove a sender (e.g., when they leave the channel)
     pub fn remove_sender(&self, session_id: u32) {
         self.senders.write().unwrap().remove(&session_id);
     }
-    
+
     /// Update a sender's decryption key (called when MLS epoch advances)
-    /// 
+    ///
     /// Retains old keys for graceful epoch handover (~10s worth of packets).
     /// Old epochs are pruned when more than 3 are stored.
     pub fn update_sender_key(&self, session_id: u32, new_key: &[u8; 32], new_epoch: u16) -> bool {
@@ -413,13 +433,15 @@ impl AudioReceiver {
             // Add new key
             state.key_store.insert(new_epoch, DaveCrypto::new(new_key));
             state.current_epoch = new_epoch;
-            
+
             // Prune old epochs (keep at most 3)
             while state.key_store.len() > 3 {
                 // Find and remove the oldest epoch
-                if let Some(&oldest) = state.key_store.keys()
+                if let Some(&oldest) = state
+                    .key_store
+                    .keys()
                     .filter(|&&e| e != state.current_epoch)
-                    .min() 
+                    .min()
                 {
                     state.key_store.remove(&oldest);
                 }
@@ -429,20 +451,21 @@ impl AudioReceiver {
             false
         }
     }
-    
+
     /// Process a received packet
-    /// 
+    ///
     /// Pipeline: Parse -> Try decrypt with epoch_hint key -> Fallback to other epochs -> Insert
     pub fn on_packet(&self, data: Bytes) -> Result<(), AudioPipelineError> {
         // 1. Parse packet
         let packet = FastAudioPacket::parse(data)
             .map_err(|e| AudioPipelineError::PacketParse(e.to_string()))?;
-        
+
         // 2. Get sender state
         let mut senders = self.senders.write().unwrap();
-        let state = senders.get_mut(&packet.session_id)
+        let state = senders
+            .get_mut(&packet.session_id)
             .ok_or(AudioPipelineError::UnknownSender(packet.session_id))?;
-        
+
         // 3. Replay protection: reject if sequence is too old
         let seq_diff = packet.sequence.wrapping_sub(state.last_sequence);
         if seq_diff > 32768 && seq_diff != 0 {
@@ -450,10 +473,11 @@ impl AudioReceiver {
             return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
         }
         state.last_sequence = state.last_sequence.max(packet.sequence);
-        
+
         // 4. Try decryption with epoch_hint key first, then fallback
         let opus_data = if let Some(crypto) = state.key_store.get(&packet.epoch_hint) {
-            crypto.decrypt(&packet.payload, &packet.nonce)
+            crypto
+                .decrypt(&packet.payload, &packet.nonce)
                 .map_err(AudioPipelineError::Crypto)?
         } else {
             // Fallback: try other epochs (for packets in-flight during transition)
@@ -465,28 +489,27 @@ impl AudioReceiver {
                 }
             }
             decrypted.ok_or(AudioPipelineError::Crypto(
-                crate::crypto::CryptoError::DecryptionFailed
+                crate::crypto::CryptoError::DecryptionFailed,
             ))?
         };
-        
+
         // 5. Insert into jitter buffer
         state.jitter.push(
             packet.sequence as u64,
             packet.sequence as u32 * 960, // Approximate timestamp
             Bytes::from(opus_data),
         );
-        
+
         Ok(())
     }
 
-    
     /// Pop and decode ready frames from all senders
-    /// 
+    ///
     /// Returns: Vec of (session_id, decoded PCM samples)
     pub fn pop_decoded(&self) -> Vec<(u32, Vec<i16>)> {
         let mut senders = self.senders.write().unwrap();
         let mut results = Vec::new();
-        
+
         for (&session_id, state) in senders.iter_mut() {
             match state.jitter.pop() {
                 PopResult::Packet(opus_data) => {
@@ -494,7 +517,10 @@ impl AudioReceiver {
                         results.push((session_id, pcm));
                     }
                 }
-                PopResult::PacketWithGap { data: opus_data, lost } => {
+                PopResult::PacketWithGap {
+                    data: opus_data,
+                    lost,
+                } => {
                     // If we have a gap of 1 packet, we can try to use FEC from this packet
                     // to recover the missing one before playing THIS packet.
                     if lost == 1 {
@@ -502,7 +528,7 @@ impl AudioReceiver {
                             results.push((session_id, recovered_pcm));
                         }
                     }
-                    
+
                     // Then play the actual current packet
                     if let Ok(pcm) = state.codec.decode(&opus_data, false) {
                         results.push((session_id, pcm));
@@ -517,10 +543,10 @@ impl AudioReceiver {
                 PopResult::Empty => {}
             }
         }
-        
+
         results
     }
-    
+
     /// Mix all decoded frames into a single output with speaker metadata
     pub fn pop_mixed(&self) -> Option<MixedAudio> {
         let frames = self.pop_decoded();
@@ -543,10 +569,7 @@ impl AudioReceiver {
         let mut active_speakers = Vec::new();
 
         for (session_id, pcm) in &frames {
-            let (gain, muted) = sender_cfg
-                .get(session_id)
-                .copied()
-                .unwrap_or((1.0, false));
+            let (gain, muted) = sender_cfg.get(session_id).copied().unwrap_or((1.0, false));
 
             if muted {
                 continue;
@@ -567,7 +590,8 @@ impl AudioReceiver {
         }
 
         // Clip to i16 range
-        let pcm = mixed.iter()
+        let pcm = mixed
+            .iter()
             .map(|&s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
             .collect();
 
@@ -589,13 +613,13 @@ impl Default for AudioReceiver {
 pub enum AudioPipelineError {
     #[error("Opus codec error: {0}")]
     Opus(#[from] OpusError),
-    
+
     #[error("Crypto error: {0}")]
     Crypto(#[from] CryptoError),
-    
+
     #[error("Packet parse error: {0}")]
     PacketParse(String),
-    
+
     #[error("Unknown sender: {0}")]
     UnknownSender(u32),
 }
@@ -603,7 +627,7 @@ pub enum AudioPipelineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sender_encode() {
         let key = DaveCrypto::random_key();
@@ -611,35 +635,39 @@ mod tests {
 
         // Generate test PCM
         let pcm = vec![0i16; 960];
-        let packet = sender.process(&pcm)
+        let packet = sender
+            .process(&pcm)
             .expect("Process failed")
             .expect("VAD off by default; expected a packet");
 
         // Should have header + encrypted data
         assert!(packet.len() > FastAudioPacket::HEADER_SIZE);
     }
-    
+
     #[test]
     fn test_sender_receiver_roundtrip() {
         let key = DaveCrypto::random_key();
         let session_id = 123;
-        
+
         // Create sender and receiver
         let sender = AudioSender::new(session_id, &key).expect("Create sender");
         let receiver = AudioReceiver::new();
-        receiver.add_sender(session_id, &key, 0).expect("Add sender");
-        
+        receiver
+            .add_sender(session_id, &key, 0)
+            .expect("Add sender");
+
         // Generate test tone
         let pcm: Vec<i16> = (0..960).map(|i| ((i % 100) * 100) as i16).collect();
-        
+
         // Send
-        let packet = sender.process(&pcm)
+        let packet = sender
+            .process(&pcm)
             .expect("Process failed")
             .expect("VAD off; expected a packet");
 
         // Receive
         receiver.on_packet(packet).expect("On packet failed");
-        
+
         // Pop decoded
         let decoded = receiver.pop_decoded();
         assert_eq!(decoded.len(), 1);
@@ -647,28 +675,28 @@ mod tests {
         // Opus is lossy, but length should match
         assert_eq!(decoded[0].1.len(), 960);
     }
-    
+
     #[test]
     fn test_multiple_senders() {
         let key1 = DaveCrypto::random_key();
         let key2 = DaveCrypto::random_key();
-        
+
         let sender1 = AudioSender::new(1, &key1).expect("Create sender 1");
         let sender2 = AudioSender::new(2, &key2).expect("Create sender 2");
         let receiver = AudioReceiver::new();
-        
+
         receiver.add_sender(1, &key1, 0).expect("Add sender 1");
         receiver.add_sender(2, &key2, 0).expect("Add sender 2");
-        
+
         let pcm = vec![1000i16; 960];
-        
+
         // Both send
         let pkt1 = sender1.process(&pcm).expect("Send 1").expect("VAD off");
         let pkt2 = sender2.process(&pcm).expect("Send 2").expect("VAD off");
-        
+
         receiver.on_packet(pkt1).expect("Receive 1");
         receiver.on_packet(pkt2).expect("Receive 2");
-        
+
         // Should get mixed output with both speakers
         let mixed = receiver.pop_mixed();
         assert!(mixed.is_some());
@@ -677,30 +705,30 @@ mod tests {
         assert!(mixed.active_speakers.contains(&1));
         assert!(mixed.active_speakers.contains(&2));
     }
-    
+
     #[test]
     fn test_unknown_sender_rejected() {
         let receiver = AudioReceiver::new();
-        
+
         // Create packet from unknown sender
         let key = DaveCrypto::random_key();
         let sender = AudioSender::new(999, &key).expect("Create sender");
         let pcm = vec![0i16; 960];
         let packet = sender.process(&pcm).expect("Process").expect("VAD off");
-        
+
         // Should fail
         let result = receiver.on_packet(packet);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_sequence_increments() {
         let key = DaveCrypto::random_key();
         let sender = AudioSender::new(1, &key).expect("Create sender");
         let pcm = vec![0i16; 960];
-        
+
         assert_eq!(sender.sequence(), 0);
-        
+
         sender.process(&pcm).expect("Process 1").expect("VAD off");
         assert_eq!(sender.sequence(), 1);
 

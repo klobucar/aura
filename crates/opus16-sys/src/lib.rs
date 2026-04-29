@@ -5,7 +5,7 @@
 
 #![allow(non_camel_case_types)]
 
-use std::os::raw::{c_int, c_uchar, c_float};
+use std::os::raw::{c_float, c_int, c_uchar};
 
 // ============================================================================
 // Opaque Types

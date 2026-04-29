@@ -23,10 +23,10 @@ pub struct JitterBufferConfig {
 impl Default for JitterBufferConfig {
     fn default() -> Self {
         Self {
-            target_latency_ms: 20,   // Ultra-low latency (1 frame)
-            max_packets: 100,        // ~2 seconds of audio
-            max_age_ms: 100,         // Drop packets older than 100ms
-            frame_duration_ms: 20,   // Standard Opus frame
+            target_latency_ms: 20, // Ultra-low latency (1 frame)
+            max_packets: 100,      // ~2 seconds of audio
+            max_age_ms: 100,       // Drop packets older than 100ms
+            frame_duration_ms: 20, // Standard Opus frame
         }
     }
 }
@@ -41,7 +41,7 @@ impl JitterBufferConfig {
             frame_duration_ms: 20,
         }
     }
-    
+
     /// Create a high-latency config (for unstable connections)
     pub fn high_latency() -> Self {
         Self {
@@ -83,7 +83,7 @@ pub struct JitterBufferStats {
 }
 
 /// Per-sender jitter buffer with packet reordering
-/// 
+///
 /// Each audio sender gets their own jitter buffer to handle
 /// independent packet loss and reordering.
 pub struct JitterBuffer {
@@ -119,24 +119,24 @@ impl JitterBuffer {
             last_arrival: None,
         }
     }
-    
+
     /// Create a new jitter buffer with default configuration
     pub fn with_defaults() -> Self {
         Self::new(JitterBufferConfig::default())
     }
-    
+
     /// Set target latency at runtime
     pub fn set_target_latency(&mut self, latency_ms: u32) {
         self.config.target_latency_ms = latency_ms;
     }
-    
+
     /// Insert a received packet into the buffer
-    /// 
+    ///
     /// Returns `true` if the packet was accepted, `false` if dropped
     pub fn push(&mut self, seq: u64, timestamp: u32, data: Bytes) -> bool {
         let now = Instant::now();
         self.stats.packets_received += 1;
-        
+
         // Update jitter estimate
         if let Some(last) = self.last_arrival {
             let interval = now.duration_since(last).as_secs_f32() * 1000.0;
@@ -147,13 +147,13 @@ impl JitterBuffer {
             self.stats.estimated_jitter_ms = self.jitter_ema;
         }
         self.last_arrival = Some(now);
-        
+
         // Check for duplicate
         if self.packets.contains_key(&seq) {
             self.stats.packets_dropped_duplicate += 1;
             return false;
         }
-        
+
         // Check if too old (already played past this sequence)
         if let Some(last) = self.last_played_seq {
             if seq <= last {
@@ -161,20 +161,23 @@ impl JitterBuffer {
                 return false;
             }
         }
-        
+
         // Insert the packet
-        self.packets.insert(seq, BufferedPacket {
-            data,
-            timestamp,
-            received_at: now,
-        });
-        
+        self.packets.insert(
+            seq,
+            BufferedPacket {
+                data,
+                timestamp,
+                received_at: now,
+            },
+        );
+
         // Initialize sequence tracking on first packet
         if !self.started {
             self.next_seq = seq;
             self.started = true;
         }
-        
+
         // Evict oldest packets if buffer is too full
         while self.packets.len() > self.config.max_packets {
             if let Some((&oldest_seq, _)) = self.packets.first_key_value() {
@@ -182,19 +185,19 @@ impl JitterBuffer {
                 self.stats.packets_dropped_late += 1;
             }
         }
-        
+
         self.stats.current_buffer_size = self.packets.len();
         true
     }
-    
+
     /// Pop the next frame to play
-    /// 
+    ///
     /// Returns `Some(data)` if a frame is ready, `None` if we need to wait
     /// or generate PLC audio.
     pub fn pop(&mut self) -> PopResult {
         let now = Instant::now();
         let max_age = Duration::from_millis(self.config.max_age_ms as u64);
-        
+
         // First, clean up packets that are too old
         let mut to_remove = Vec::new();
         for (&seq, pkt) in &self.packets {
@@ -206,7 +209,7 @@ impl JitterBuffer {
             self.packets.remove(&seq);
             self.stats.packets_dropped_late += 1;
         }
-        
+
         // Try to get the next expected packet
         if let Some(pkt) = self.packets.remove(&self.next_seq) {
             self.last_played_seq = Some(self.next_seq);
@@ -215,29 +218,32 @@ impl JitterBuffer {
             self.stats.current_buffer_size = self.packets.len();
             return PopResult::Packet(pkt.data);
         }
-        
+
         // Packet is missing - check if we should skip ahead
         if let Some((&oldest_seq, oldest_pkt)) = self.packets.first_key_value() {
             let age = now.duration_since(oldest_pkt.received_at);
             let target = Duration::from_millis(self.config.target_latency_ms as u64);
-            
+
             // If the oldest buffered packet has been waiting too long, skip to it
             if age > target && oldest_seq > self.next_seq {
                 let gap = oldest_seq - self.next_seq;
                 self.stats.packets_lost += gap;
                 self.next_seq = oldest_seq;
-                
+
                 // Now try to pop again
                 if let Some(pkt) = self.packets.remove(&self.next_seq) {
                     self.last_played_seq = Some(self.next_seq);
                     self.next_seq += 1;
                     self.stats.packets_played += 1;
                     self.stats.current_buffer_size = self.packets.len();
-                    return PopResult::PacketWithGap { data: pkt.data, lost: gap };
+                    return PopResult::PacketWithGap {
+                        data: pkt.data,
+                        lost: gap,
+                    };
                 }
             }
         }
-        
+
         // No packet available, check if buffer is empty
         if self.packets.is_empty() && !self.started {
             PopResult::Empty
@@ -245,22 +251,22 @@ impl JitterBuffer {
             PopResult::NeedPLC
         }
     }
-    
+
     /// Get current statistics
     pub fn stats(&self) -> &JitterBufferStats {
         &self.stats
     }
-    
+
     /// Get current buffer depth in packets
     pub fn depth(&self) -> usize {
         self.packets.len()
     }
-    
+
     /// Get current buffer depth in milliseconds
     pub fn depth_ms(&self) -> u32 {
         self.packets.len() as u32 * self.config.frame_duration_ms
     }
-    
+
     /// Reset the buffer (e.g., on sender reconnect)
     pub fn reset(&mut self) {
         self.packets.clear();
@@ -291,7 +297,7 @@ impl PopResult {
     pub fn has_data(&self) -> bool {
         matches!(self, PopResult::Packet(_) | PopResult::PacketWithGap { .. })
     }
-    
+
     /// Extract the data if present
     pub fn into_data(self) -> Option<Bytes> {
         match self {
@@ -304,22 +310,22 @@ impl PopResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn make_packet(n: usize) -> Bytes {
         Bytes::from(vec![n as u8; 10])
     }
-    
+
     #[test]
     fn test_in_order_packets() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         // Insert packets in order
         for i in 0..5 {
             assert!(jb.push(i, i as u32 * 960, make_packet(i as usize)));
         }
-        
+
         assert_eq!(jb.depth(), 5);
-        
+
         // Pop should return them in order
         for i in 0..5 {
             match jb.pop() {
@@ -329,23 +335,23 @@ mod tests {
                 _ => panic!("Expected packet"),
             }
         }
-        
+
         assert_eq!(jb.depth(), 0);
     }
-    
+
     #[test]
     fn test_out_of_order_packets() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         // First establish sequence starting at 0
         jb.push(0, 0 * 960, make_packet(0));
-        
+
         // Now insert remaining packets out of order: 2, 4, 1, 3
         jb.push(2, 2 * 960, make_packet(2));
         jb.push(4, 4 * 960, make_packet(4));
         jb.push(1, 1 * 960, make_packet(1));
         jb.push(3, 3 * 960, make_packet(3));
-        
+
         // Pop should return them in order
         for i in 0..5 {
             match jb.pop() {
@@ -356,31 +362,31 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_duplicate_rejection() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         assert!(jb.push(0, 0, make_packet(0)));
         assert!(!jb.push(0, 0, make_packet(0))); // Duplicate should be rejected
-        
+
         assert_eq!(jb.stats().packets_dropped_duplicate, 1);
         assert_eq!(jb.depth(), 1);
     }
-    
+
     #[test]
     fn test_late_packet_rejection() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         // Push and pop packet 0
         jb.push(0, 0, make_packet(0));
         let _ = jb.pop();
-        
+
         // Now try to push packet 0 again (too late)
         assert!(!jb.push(0, 0, make_packet(0)));
         assert_eq!(jb.stats().packets_dropped_late, 1);
     }
-    
+
     #[test]
     fn test_gap_detection() {
         let config = JitterBufferConfig {
@@ -388,20 +394,20 @@ mod tests {
             ..Default::default()
         };
         let mut jb = JitterBuffer::new(config);
-        
+
         // Push packet 0, then 5 (gap of 1,2,3,4)
         jb.push(0, 0, make_packet(0));
         jb.push(5, 5 * 960, make_packet(5));
-        
+
         // Pop packet 0
         match jb.pop() {
             PopResult::Packet(data) => assert_eq!(data[0], 0),
             _ => panic!("Expected packet 0"),
         }
-        
+
         // Wait a tiny bit to simulate passing time
         std::thread::sleep(Duration::from_millis(1));
-        
+
         // Pop should skip to packet 5 and report gap
         match jb.pop() {
             PopResult::PacketWithGap { data, lost } => {
@@ -414,7 +420,7 @@ mod tests {
             other => panic!("Expected PacketWithGap or NeedPLC, got {:?}", other),
         }
     }
-    
+
     #[test]
     fn test_buffer_overflow() {
         let config = JitterBufferConfig {
@@ -422,43 +428,43 @@ mod tests {
             ..Default::default()
         };
         let mut jb = JitterBuffer::new(config);
-        
+
         // Push more than max
         for i in 0..10 {
             jb.push(i, i as u32 * 960, make_packet(i as usize));
         }
-        
+
         // Should only have max_packets
         assert_eq!(jb.depth(), 5);
     }
-    
+
     #[test]
     fn test_reset() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         for i in 0..5 {
             jb.push(i, i as u32 * 960, make_packet(i as usize));
         }
-        
+
         assert_eq!(jb.depth(), 5);
-        
+
         jb.reset();
-        
+
         assert_eq!(jb.depth(), 0);
         assert!(!jb.started);
     }
-    
+
     #[test]
     fn test_stats() {
         let mut jb = JitterBuffer::with_defaults();
-        
+
         jb.push(0, 0, make_packet(0));
         jb.push(1, 960, make_packet(1));
         jb.push(1, 960, make_packet(1)); // Duplicate
-        
+
         let _ = jb.pop();
         let _ = jb.pop();
-        
+
         let stats = jb.stats();
         assert_eq!(stats.packets_received, 3);
         assert_eq!(stats.packets_played, 2);

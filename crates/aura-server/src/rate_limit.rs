@@ -6,9 +6,9 @@
 //! allowed so local tests and same-host tooling are unaffected.
 
 use governor::{
-    Quota, RateLimiter,
     clock::DefaultClock,
-    state::{InMemoryState, keyed::DashMapStateStore},
+    state::{keyed::DashMapStateStore, InMemoryState},
+    Quota, RateLimiter,
 };
 use nonzero_ext::nonzero;
 use std::net::IpAddr;

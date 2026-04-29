@@ -5,22 +5,22 @@
 
 #![allow(unpredictable_function_pointer_comparisons)]
 
-pub mod opus;
-pub mod opus16;
-pub mod jitter_buffer;
-pub mod crypto;
-pub mod audio_pipeline;
-pub mod mls;
-pub mod text_crypto;
-pub mod voice_session;
 #[cfg(feature = "native-audio")]
 pub mod audio_io;
-pub mod vad;
+pub mod audio_pipeline;
+pub mod crypto;
+pub mod jitter_buffer;
+pub mod mls;
 pub mod noise_suppression;
-#[cfg(feature = "webrtc-audio")]
-pub mod webrtc_processor;
+pub mod opus;
+pub mod opus16;
+pub mod text_crypto;
 pub mod tts;
 pub mod uniffi_bindings;
+pub mod vad;
+pub mod voice_session;
+#[cfg(feature = "webrtc-audio")]
+pub mod webrtc_processor;
 #[cfg(feature = "native-audio")]
 use crate::uniffi_bindings::AudioHardware;
 
@@ -46,15 +46,15 @@ uniffi::setup_scaffolding!("aura_core");
 //        // 1. Zero-Padding Commitment (prevents Partitioning Oracle attacks)
 //        let mut padded = vec![0u8; 16];  // 16 bytes of 0x00
 //        padded.extend_from_slice(plaintext);
-//        
+//
 //        // 2. Generate random 192-bit nonce
 //        let nonce: [u8; 24] = rand::thread_rng().gen();
-//        
+//
 //        // 3. Encrypt with XChaCha20-Poly1305
 //        let cipher = XChaCha20Poly1305::new(key.into());
 //        let ciphertext = cipher.encrypt(&nonce.into(), padded.as_ref())
 //            .expect("encryption failure");
-//        
+//
 //        // 4. Return: nonce || ciphertext
 //        [nonce.as_ref(), &ciphertext].concat()
 //    }
@@ -96,19 +96,31 @@ pub extern "C" fn aura_audio_free(hw: *mut AudioHardware) {
 #[no_mangle]
 pub extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.start_capture().is_ok() { 0 } else { -1 }
+    if hw.start_capture().is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 #[cfg(feature = "native-audio")]
 #[no_mangle]
 pub extern "C" fn aura_audio_stop_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.stop_capture().is_ok() { 0 } else { -1 }
+    if hw.stop_capture().is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_read_capture(hw: *mut AudioHardware, buf: *mut i16, len: usize) -> i32 {
+pub extern "C" fn aura_audio_read_capture(
+    hw: *mut AudioHardware,
+    buf: *mut i16,
+    len: usize,
+) -> i32 {
     let hw = unsafe { &*hw };
     if let Some(samples) = hw.read_capture() {
         let to_copy = samples.len().min(len);
@@ -123,13 +135,21 @@ pub extern "C" fn aura_audio_read_capture(hw: *mut AudioHardware, buf: *mut i16,
 
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_write_playback(hw: *mut AudioHardware, buf: *const i16, len: usize) -> i32 {
+pub extern "C" fn aura_audio_write_playback(
+    hw: *mut AudioHardware,
+    buf: *const i16,
+    len: usize,
+) -> i32 {
     let hw = unsafe { &*hw };
     let mut vec = vec![0i16; len];
     unsafe {
         std::ptr::copy_nonoverlapping(buf, vec.as_mut_ptr(), len);
     }
-    if hw.write_playback(vec).is_ok() { 0 } else { -1 }
+    if hw.write_playback(vec).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 #[cfg(test)]
