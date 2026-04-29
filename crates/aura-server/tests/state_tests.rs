@@ -69,11 +69,11 @@ async fn test_replay_attack_detection() {
         tag: vec![0u8; 16],
     };
 
-    // First send should succeed
-    let result1 = state
+    // First send should succeed (we don't assert on the bool — just that the
+    // call returns rather than panics).
+    let _result1 = state
         .broadcast_text_message(session_id, packet.clone())
         .await;
-    assert!(result1 || !result1); // Just verify it doesn't panic
 
     // Second send with same message_id should be rejected (replay)
     let result2 = state
