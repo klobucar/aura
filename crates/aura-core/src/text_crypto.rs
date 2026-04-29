@@ -103,7 +103,7 @@ mod tests {
         let key = [0x42u8; 32];
         let message = create_text_message("user-123", "Hello, world!", None);
         
-        let packet = encrypt_text(&key, 1, 100, 1, &message)
+        let packet = encrypt_text(&key, 1, "100".into(), 1, &message)
             .expect("Encryption should succeed");
         
         let decrypted = decrypt_text(&key, &packet)
@@ -121,7 +121,7 @@ mod tests {
         let key2 = [0x43u8; 32];
         let message = create_text_message("user-123", "Secret message", None);
         
-        let packet = encrypt_text(&key1, 1, 100, 1, &message)
+        let packet = encrypt_text(&key1, 1, "100".into(), 1, &message)
             .expect("Encryption should succeed");
         
         let result = decrypt_text(&key2, &packet);
@@ -134,7 +134,7 @@ mod tests {
         let original_id = "msg-456";
         let message = create_text_message("user-123", "This is a reply", Some(original_id));
         
-        let packet = encrypt_text(&key, 1, 100, 1, &message)
+        let packet = encrypt_text(&key, 1, "100".into(), 1, &message)
             .expect("Encryption should succeed");
         
         let decrypted = decrypt_text(&key, &packet)
@@ -148,7 +148,7 @@ mod tests {
         let key = [0x42u8; 32];
         let message = create_text_message("user-123", "Hello!", None);
         
-        let packet = encrypt_text(&key, 5, 42, 7, &message)
+        let packet = encrypt_text(&key, 5, "42".into(), 7, &message)
             .expect("Encryption should succeed");
         
         assert_eq!(packet.epoch, 5);
