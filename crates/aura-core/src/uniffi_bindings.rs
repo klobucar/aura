@@ -97,18 +97,23 @@ impl AudioSenderWrapper {
         }
     }
     
-    /// Encode and encrypt PCM audio
-    pub fn process(&self, pcm: &[i16]) -> Result<Vec<u8>, AudioError> {
+    /// Encode and encrypt PCM audio.
+    ///
+    /// Returns `Ok(None)` when VAD is enabled and the frame is silence — callers
+    /// should skip the network send for that frame.
+    pub fn process(&self, pcm: &[i16]) -> Result<Option<Vec<u8>>, AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        let bytes = inner.process(pcm).map_err(convert_error)?;
-        Ok(bytes.to_vec())
+        let maybe = inner.process(pcm).map_err(convert_error)?;
+        Ok(maybe.map(|b| b.to_vec()))
     }
-    
-    /// Encode and encrypt f32 PCM audio
-    pub fn process_float(&self, pcm: Vec<f32>) -> Result<Vec<u8>, AudioError> {
+
+    /// Encode and encrypt f32 PCM audio.
+    ///
+    /// Returns `Ok(None)` when VAD is enabled and the (post-NS) frame is silence.
+    pub fn process_float(&self, pcm: Vec<f32>) -> Result<Option<Vec<u8>>, AudioError> {
         let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
-        let bytes = inner.process_float_with_reference(&pcm, None).map_err(convert_error)?;
-        Ok(bytes.to_vec())
+        let maybe = inner.process_float_with_reference(&pcm, None).map_err(convert_error)?;
+        Ok(maybe.map(|b| b.to_vec()))
     }
     
     /// Set DRED duration in 10ms frames (0 to 100)
@@ -122,6 +127,23 @@ impl AudioSenderWrapper {
     pub fn set_noise_suppression_enabled(&self, enabled: bool) {
         if let Ok(inner) = self.inner.read() {
             inner.set_rnnoise_enabled(enabled);
+        }
+    }
+
+    /// Enable or disable VAD (Voice Activity Detection) silence skipping.
+    /// When enabled, `process` / `process_float` return `None` for silent frames
+    /// so the caller can skip the network send.
+    pub fn set_vad_enabled(&self, enabled: bool) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_vad_enabled(enabled);
+        }
+    }
+
+    /// Set the VAD detection threshold in dB.
+    /// Lower (more negative) is more sensitive; -40 dB is a typical default.
+    pub fn set_vad_threshold_db(&self, threshold_db: f32) {
+        if let Ok(inner) = self.inner.read() {
+            inner.set_vad_threshold_db(threshold_db);
         }
     }
     
@@ -1065,8 +1087,10 @@ mod tests {
         receiver.add_sender(session_id, &key, 0).expect("Add sender");
         
         let pcm = vec![1000i16; 960];
-        let packet = sender.process(&pcm).expect("Process");
-        
+        let packet = sender.process(&pcm)
+            .expect("Process")
+            .expect("VAD off; expected packet");
+
         receiver.on_packet(&packet).expect("On packet");
         
         let decoded = receiver.pop_decoded();

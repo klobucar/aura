@@ -81,7 +81,7 @@ struct SettingsView: View {
                         ForEach(AudioSettings.TransmissionMode.allCases, id: \.self) { mode in
                             transmissionModeRow(mode: mode)
                         }
-                        
+
                         if settings.transmissionMode == .pushToTalk {
                             pttSettings.padding(.top, 8)
                         } else if settings.transmissionMode == .voiceActivation {
@@ -89,6 +89,26 @@ struct SettingsView: View {
                         }
                     }
                     .auraGlassSection(title: "Transmission", icon: "wave.3.right")
+                    .onChange(of: settings.transmissionMode) { _, newMode in
+                        settings.saveSettings()
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: [
+                                "vadEnabled": newMode == .voiceActivation,
+                                "vadThresholdDb": settings.vadThresholdDb,
+                            ]
+                        )
+                    }
+                    .onChange(of: settings.vadSensitivity) { _, _ in
+                        settings.saveSettings()
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: [
+                                "vadEnabled": settings.transmissionMode == .voiceActivation,
+                                "vadThresholdDb": settings.vadThresholdDb,
+                            ]
+                        )
+                    }
                     
                     // Audio Quality Section
                     VStack(alignment: .leading, spacing: 16) {

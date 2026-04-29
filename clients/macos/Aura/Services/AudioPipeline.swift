@@ -79,18 +79,33 @@ public class AudioPipeline: ObservableObject {
     
     // MARK: - Transmit Pipeline
     
-    /// Process PCM audio for transmission
-    public func process(pcm: [Int16]) throws -> Data {
+    /// Process PCM audio for transmission.
+    /// Returns `nil` when VAD is enabled and the frame is silence — caller
+    /// should skip the network send.
+    public func process(pcm: [Int16]) throws -> Data? {
         guard let sender = sender else { throw AudioPipelineError.notInitialized }
-        let packet = try sender.process(pcm: pcm)
+        guard let packet = try sender.process(pcm: pcm) else { return nil }
         return Data(packet)
     }
-    
-    /// Process float PCM for transmission (preferred for libopus 1.6)
-    public func process(floatPcm: [Float]) throws -> Data {
+
+    /// Process float PCM for transmission (preferred for libopus 1.6).
+    /// Returns `nil` when VAD silences the frame.
+    public func process(floatPcm: [Float]) throws -> Data? {
         guard let sender = sender else { throw AudioPipelineError.notInitialized }
-        let packet = try sender.processFloat(pcm: floatPcm)
+        guard let packet = try sender.processFloat(pcm: floatPcm) else { return nil }
         return Data(packet)
+    }
+
+    // MARK: - VAD config
+
+    /// Enable/disable VAD silence skipping on the send path.
+    public func setVadEnabled(_ enabled: Bool) {
+        sender?.setVadEnabled(enabled: enabled)
+    }
+
+    /// Set VAD detection threshold in dB. Lower = more sensitive.
+    public func setVadThresholdDb(_ thresholdDb: Float) {
+        sender?.setVadThresholdDb(thresholdDb: thresholdDb)
     }
     
     public func getSequence() -> UInt16 {
