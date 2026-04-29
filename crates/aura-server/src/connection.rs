@@ -394,10 +394,9 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                         last_activity = std::time::Instant::now();
                         if !data.is_empty() {
                             match data[0] {
-                                0x01 => { // Audio
-                                    if data.len() > 1 {
-                                        ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
-                                    }
+                                // Audio. Skip empty audio frames (header only).
+                                0x01 if data.len() > 1 => {
+                                    ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                 }
                                 0x00 => {
                                     // Keepalive / RTT probe. Echo the full
