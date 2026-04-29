@@ -5,11 +5,7 @@
 //! `AuthRequest` packets from a single address. Loopback traffic is always
 //! allowed so local tests and same-host tooling are unaffected.
 
-use governor::{
-    clock::DefaultClock,
-    state::keyed::DashMapStateStore,
-    Quota, RateLimiter,
-};
+use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
 use nonzero_ext::nonzero;
 use std::net::IpAddr;
 use std::num::NonZeroU32;

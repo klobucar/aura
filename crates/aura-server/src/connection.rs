@@ -195,9 +195,7 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert rustls config for ACME: {}", e))?;
 
-        Self::apply_transport_config(ServerConfig::with_crypto(
-            Arc::new(quinn_crypto),
-        ))
+        Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
     }
 
     /// Minimal TCP listener for Fly.io health checks when ACME is disabled.
@@ -252,9 +250,7 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert manual TLS config: {}", e))?;
 
-        Self::apply_transport_config(ServerConfig::with_crypto(
-            Arc::new(quinn_crypto),
-        ))
+        Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
     }
 
     /// Generate self-signed TLS certificate for QUIC.
@@ -276,9 +272,7 @@ impl QuicServer {
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
             .map_err(|e| anyhow!("Failed to convert self-signed config: {}", e))?;
 
-        Self::apply_transport_config(ServerConfig::with_crypto(
-            Arc::new(quinn_crypto),
-        ))
+        Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
     }
 
     /// Apply common transport settings for low-latency voice.
@@ -1245,6 +1239,4 @@ impl ConnectionContext {
 // Helper functions for packet handling
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}
