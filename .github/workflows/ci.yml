@@ -50,7 +50,7 @@ jobs:
       - name: install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
       - run: cargo test --workspace --no-fail-fast
 
   clippy:
@@ -82,5 +82,5 @@ jobs:
       - name: install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
       - run: cargo clippy --workspace --all-targets
