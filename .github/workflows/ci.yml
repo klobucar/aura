@@ -13,6 +13,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Opus 1.6.x DNN weight tarball checksum. Must match vendor/opus/autogen.sh.
+  # Bump together when the vendored opus is updated.
+  OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
 
 jobs:
   fmt:
@@ -32,6 +35,18 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "${{ env.OPUS_MODEL_CHECKSUM }}"
       - name: install build deps
         run: |
           sudo apt-get update
@@ -52,6 +67,18 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "${{ env.OPUS_MODEL_CHECKSUM }}"
       - name: install build deps
         run: |
           sudo apt-get update
