@@ -57,7 +57,9 @@ impl JitterBufferConfig {
 struct BufferedPacket {
     /// The audio data (encrypted or decrypted depending on stage)
     data: Bytes,
-    /// RTP-style timestamp (sample count)
+    /// RTP-style timestamp (sample count). Stored for future PLC/timing use; not
+    /// read by current logic — kept on the struct so the push API stays stable.
+    #[allow(dead_code)]
     timestamp: u32,
     /// When this packet was received
     received_at: Instant,
@@ -344,12 +346,12 @@ mod tests {
         let mut jb = JitterBuffer::with_defaults();
 
         // First establish sequence starting at 0
-        jb.push(0, 0 * 960, make_packet(0));
+        jb.push(0, 0, make_packet(0));
 
         // Now insert remaining packets out of order: 2, 4, 1, 3
         jb.push(2, 2 * 960, make_packet(2));
         jb.push(4, 4 * 960, make_packet(4));
-        jb.push(1, 1 * 960, make_packet(1));
+        jb.push(1, 960, make_packet(1));
         jb.push(3, 3 * 960, make_packet(3));
 
         // Pop should return them in order

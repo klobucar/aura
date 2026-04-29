@@ -107,7 +107,7 @@ fn test_concurrent_senders() {
 
     let mixed = receiver.pop_mixed().expect("PopMixed failed");
     assert_eq!(mixed.pcm.len(), 960);
-    assert!(mixed.active_speakers.len() > 0);
+    assert!(!mixed.active_speakers.is_empty());
 }
 
 #[test]

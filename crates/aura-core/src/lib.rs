@@ -84,39 +84,41 @@ pub extern "C" fn aura_audio_new() -> *mut AudioHardware {
     }
 }
 
+/// # Safety
+/// `hw` must be a pointer returned by `aura_audio_new` and not yet freed.
+/// Passing a null pointer is safe (the call is a no-op).
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_free(hw: *mut AudioHardware) {
+pub unsafe extern "C" fn aura_audio_free(hw: *mut AudioHardware) {
     if !hw.is_null() {
         unsafe { drop(Box::from_raw(hw)) };
     }
 }
 
+/// # Safety
+/// `hw` must be a non-null pointer returned by `aura_audio_new` and not yet freed.
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32 {
+pub unsafe extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.start_capture().is_ok() {
-        0
-    } else {
-        -1
-    }
+    if hw.start_capture().is_ok() { 0 } else { -1 }
 }
 
+/// # Safety
+/// `hw` must be a non-null pointer returned by `aura_audio_new` and not yet freed.
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_stop_capture(hw: *mut AudioHardware) -> i32 {
+pub unsafe extern "C" fn aura_audio_stop_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.stop_capture().is_ok() {
-        0
-    } else {
-        -1
-    }
+    if hw.stop_capture().is_ok() { 0 } else { -1 }
 }
 
+/// # Safety
+/// `hw` must be a non-null pointer returned by `aura_audio_new` and not yet freed.
+/// `buf` must point to writable memory of at least `len * size_of::<i16>()` bytes.
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_read_capture(
+pub unsafe extern "C" fn aura_audio_read_capture(
     hw: *mut AudioHardware,
     buf: *mut i16,
     len: usize,
@@ -133,9 +135,12 @@ pub extern "C" fn aura_audio_read_capture(
     }
 }
 
+/// # Safety
+/// `hw` must be a non-null pointer returned by `aura_audio_new` and not yet freed.
+/// `buf` must point to readable memory of at least `len * size_of::<i16>()` bytes.
 #[cfg(feature = "native-audio")]
 #[no_mangle]
-pub extern "C" fn aura_audio_write_playback(
+pub unsafe extern "C" fn aura_audio_write_playback(
     hw: *mut AudioHardware,
     buf: *const i16,
     len: usize,
@@ -145,11 +150,7 @@ pub extern "C" fn aura_audio_write_playback(
     unsafe {
         std::ptr::copy_nonoverlapping(buf, vec.as_mut_ptr(), len);
     }
-    if hw.write_playback(vec).is_ok() {
-        0
-    } else {
-        -1
-    }
+    if hw.write_playback(vec).is_ok() { 0 } else { -1 }
 }
 
 #[cfg(test)]

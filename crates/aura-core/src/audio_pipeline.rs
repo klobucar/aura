@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::RwLock;
 
 use crate::crypto::{CryptoError, DaveCrypto};

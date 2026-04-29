@@ -496,6 +496,7 @@ impl OpusDred {
         Ok(Self { ptr })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_ptr(&self) -> *const ffi::OpusDRED {
         self.ptr.as_ptr()
     }

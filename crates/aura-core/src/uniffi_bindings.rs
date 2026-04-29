@@ -749,9 +749,9 @@ pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
         user_id: profile.user_id.to_string(),
         display_name: profile.display_name,
         bio: profile.bio,
-        avatar_data: profile.avatar_data.into(),
-        signature: profile.signature.into(),
-        signing_key: profile.signing_key.into(),
+        avatar_data: profile.avatar_data,
+        signature: profile.signature,
+        signing_key: profile.signing_key,
     };
 
     let req = ProtoUpdateProfile {
@@ -861,9 +861,9 @@ pub fn encode_encrypted_text_packet(packet: EncryptedTextPacketRecord) -> Vec<u8
         channel_id: packet.channel_id,
         epoch: packet.epoch,
         message_id: packet.message_id,
-        ciphertext: packet.ciphertext.into(),
-        nonce: packet.nonce.into(),
-        tag: packet.tag.into(),
+        ciphertext: packet.ciphertext,
+        nonce: packet.nonce,
+        tag: packet.tag,
         reply_to_id: packet.reply_to_id,
     };
     proto.encode_to_vec()
@@ -1204,9 +1204,9 @@ pub fn encode_create_channel(
     let proto_icon = icon.map(|i| ProtoIcon {
         icon: i
             .emoji
-            .map(|e| channel_icon::Icon::Emoji(e))
-            .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
-            .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
+            .map(channel_icon::Icon::Emoji)
+            .or_else(|| i.preset_id.map(channel_icon::Icon::PresetId))
+            .or_else(|| i.custom_data.map(channel_icon::Icon::CustomData)),
     });
 
     let req = ProtoCreateChannel {
@@ -1228,9 +1228,9 @@ pub fn encode_update_channel(
     let proto_icon = icon.map(|i| ProtoIcon {
         icon: i
             .emoji
-            .map(|e| channel_icon::Icon::Emoji(e))
-            .or_else(|| i.preset_id.map(|p| channel_icon::Icon::PresetId(p)))
-            .or_else(|| i.custom_data.map(|c| channel_icon::Icon::CustomData(c))),
+            .map(channel_icon::Icon::Emoji)
+            .or_else(|| i.preset_id.map(channel_icon::Icon::PresetId))
+            .or_else(|| i.custom_data.map(channel_icon::Icon::CustomData)),
     });
 
     let req = ProtoUpdateChannel {

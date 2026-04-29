@@ -1,7 +1,7 @@
 // Security-focused tests for crypto module
 // Refactored to use DaveCrypto API
 
-use crate::crypto::{DaveCrypto, KEY_SIZE, NONCE_SIZE};
+use crate::crypto::{DaveCrypto, KEY_SIZE};
 
 #[test]
 fn test_nonce_uniqueness() {
