@@ -101,7 +101,11 @@ pub unsafe extern "C" fn aura_audio_free(hw: *mut AudioHardware) {
 #[no_mangle]
 pub unsafe extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.start_capture().is_ok() { 0 } else { -1 }
+    if hw.start_capture().is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// # Safety
@@ -110,7 +114,11 @@ pub unsafe extern "C" fn aura_audio_start_capture(hw: *mut AudioHardware) -> i32
 #[no_mangle]
 pub unsafe extern "C" fn aura_audio_stop_capture(hw: *mut AudioHardware) -> i32 {
     let hw = unsafe { &*hw };
-    if hw.stop_capture().is_ok() { 0 } else { -1 }
+    if hw.stop_capture().is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// # Safety
@@ -150,7 +158,11 @@ pub unsafe extern "C" fn aura_audio_write_playback(
     unsafe {
         std::ptr::copy_nonoverlapping(buf, vec.as_mut_ptr(), len);
     }
-    if hw.write_playback(vec).is_ok() { 0 } else { -1 }
+    if hw.write_playback(vec).is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 #[cfg(test)]

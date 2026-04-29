@@ -529,9 +529,7 @@ impl ServerState {
                     )),
                 }),
                 3 => Some(ProtoChannelIcon {
-                    icon: Some(channel_icon::Icon::CustomData(
-                        meta.icon_data.clone(),
-                    )),
+                    icon: Some(channel_icon::Icon::CustomData(meta.icon_data.clone())),
                 }),
                 _ => None,
             };
