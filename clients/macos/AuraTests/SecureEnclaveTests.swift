@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Aura
 
 @MainActor
@@ -58,14 +59,12 @@ final class SecureEnclaveTests: XCTestCase {
     
     func testWrapUnwrapRoundTrip() {
         let profileId = UUID()
-        
-        // Generate real Ed25519 key
-        let identity = UserIdentity()
-        identity.generateKeypair()
-        guard let keyData = identity.signingKey?.rawRepresentation else {
-            XCTFail("Failed to generate key")
-            return
-        }
+
+        // Generate a real Ed25519 key directly. We deliberately don't go
+        // through UserIdentity here so tests don't need access to its
+        // private signingKey storage.
+        let key = Curve25519.Signing.PrivateKey()
+        let keyData = key.rawRepresentation
         
         // Wrap
         guard let wrappedData = UserIdentity.wrapKeyWithBiometric(keyData: keyData, profileId: profileId) else {

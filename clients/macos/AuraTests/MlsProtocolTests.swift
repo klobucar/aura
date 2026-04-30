@@ -5,6 +5,7 @@
 //  MLS E2EE Protocol Integration Tests
 //
 
+import Foundation
 import Testing
 @testable import Aura
 
@@ -33,19 +34,19 @@ struct MlsProtocolTests {
         let wrapper = try MlsWrapper(identityName: "founder-user")
         
         // Create voice and text groups for channel 1
-        try wrapper.createGroup(channelId: 1, isVoice: true)
-        try wrapper.createGroup(channelId: 1, isVoice: false)
+        try wrapper.createGroup(channelId: "1", isVoice: true)
+        try wrapper.createGroup(channelId: "1", isVoice: false)
         
         // Should be able to export audio key
-        let audioKey = try wrapper.exportAudioKey(channelId: 1, senderSessionId: 1)
+        let audioKey = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
         #expect(audioKey.count == 32) // ChaCha20 key size
         
         // Should be member of group
-        let isMember = wrapper.isMember(channelId: 1, isVoice: true)
+        let isMember = wrapper.isMember(channelId: "1", isVoice: true)
         #expect(isMember == true)
         
         // Epoch should be 0 for new group
-        let epoch = try wrapper.currentEpoch(channelId: 1, isVoice: true)
+        let epoch = try wrapper.currentEpoch(channelId: "1", isVoice: true)
         #expect(epoch == 0)
     }
     
@@ -55,13 +56,13 @@ struct MlsProtocolTests {
         let joiner = try MlsWrapper(identityName: "bob")
         
         // 1. Founder creates group
-        try founder.createGroup(channelId: 1, isVoice: true)
+        try founder.createGroup(channelId: "1", isVoice: true)
         
         // 2. Joiner generates key package
         let keyPackage = try joiner.createKeyPackage()
         
         // 3. Founder adds joiner, gets commit + welcome
-        let result = try founder.addMember(channelId: 1, isVoice: true, keyPackageBytes: keyPackage)
+        let result = try founder.addMember(channelId: "1", isVoice: true, keyPackageBytes: keyPackage)
         #expect(result.commit.count > 0)
         #expect(result.welcome.count > 0)
         
@@ -69,16 +70,16 @@ struct MlsProtocolTests {
         try joiner.joinGroup(welcomeBytes: result.welcome)
         
         // 5. Both should now be members
-        #expect(founder.isMember(channelId: 1, isVoice: true) == true)
-        #expect(joiner.isMember(channelId: 1, isVoice: true) == true)
+        #expect(founder.isMember(channelId: "1", isVoice: true) == true)
+        #expect(joiner.isMember(channelId: "1", isVoice: true) == true)
         
         // 6. Founder epoch should have advanced
-        let founderEpoch = try founder.currentEpoch(channelId: 1, isVoice: true)
+        let founderEpoch = try founder.currentEpoch(channelId: "1", isVoice: true)
         #expect(founderEpoch == 1)
         
         // 7. Both should be able to derive the same group key
-        let founderKey = try founder.exportAudioKey(channelId: 1, senderSessionId: 1)
-        let joinerKey = try joiner.exportAudioKey(channelId: 1, senderSessionId: 1)
+        let founderKey = try founder.exportAudioKey(channelId: "1", senderSessionId: 1)
+        let joinerKey = try joiner.exportAudioKey(channelId: "1", senderSessionId: 1)
         #expect(founderKey == joinerKey)
         
         print("[Test] Two-party MLS group established successfully")
@@ -91,34 +92,34 @@ struct MlsProtocolTests {
         let charlie = try MlsWrapper(identityName: "charlie")
         
         // 1. Alice creates group
-        try alice.createGroup(channelId: 1, isVoice: true)
+        try alice.createGroup(channelId: "1", isVoice: true)
         
         // 2. Bob joins
         let bobKp = try bob.createKeyPackage()
-        let addBob = try alice.addMember(channelId: 1, isVoice: true, keyPackageBytes: bobKp)
+        let addBob = try alice.addMember(channelId: "1", isVoice: true, keyPackageBytes: bobKp)
         try bob.joinGroup(welcomeBytes: addBob.welcome)
         
         // 3. Charlie joins - Bob processes Alice's commit, then Alice adds Charlie
-        _ = try bob.processCommit(channelId: 1, isVoice: true, commitBytes: addBob.commit)
+        _ = try bob.processCommit(channelId: "1", isVoice: true, commitBytes: addBob.commit)
         
         let charlieKp = try charlie.createKeyPackage()
-        let addCharlie = try alice.addMember(channelId: 1, isVoice: true, keyPackageBytes: charlieKp)
+        let addCharlie = try alice.addMember(channelId: "1", isVoice: true, keyPackageBytes: charlieKp)
         try charlie.joinGroup(welcomeBytes: addCharlie.welcome)
-        _ = try bob.processCommit(channelId: 1, isVoice: true, commitBytes: addCharlie.commit)
+        _ = try bob.processCommit(channelId: "1", isVoice: true, commitBytes: addCharlie.commit)
         
         // 4. All three should be at the same epoch
-        let aliceEpoch = try alice.currentEpoch(channelId: 1, isVoice: true)
-        let bobEpoch = try bob.currentEpoch(channelId: 1, isVoice: true)
-        let charlieEpoch = try charlie.currentEpoch(channelId: 1, isVoice: true)
+        let aliceEpoch = try alice.currentEpoch(channelId: "1", isVoice: true)
+        let bobEpoch = try bob.currentEpoch(channelId: "1", isVoice: true)
+        let charlieEpoch = try charlie.currentEpoch(channelId: "1", isVoice: true)
         
         #expect(aliceEpoch == 2)
         #expect(bobEpoch == 2)
         #expect(charlieEpoch == 2)
         
         // 5. All three should derive consistent keys
-        let aliceKey = try alice.exportAudioKey(channelId: 1, senderSessionId: 42)
-        let bobKey = try bob.exportAudioKey(channelId: 1, senderSessionId: 42)
-        let charlieKey = try charlie.exportAudioKey(channelId: 1, senderSessionId: 42)
+        let aliceKey = try alice.exportAudioKey(channelId: "1", senderSessionId: 42)
+        let bobKey = try bob.exportAudioKey(channelId: "1", senderSessionId: 42)
+        let charlieKey = try charlie.exportAudioKey(channelId: "1", senderSessionId: 42)
         
         #expect(aliceKey == bobKey)
         #expect(bobKey == charlieKey)
@@ -131,16 +132,16 @@ struct MlsProtocolTests {
     @Test func testPerSenderKeyDerivation() async throws {
         // Test that different sender IDs produce different keys
         let wrapper = try MlsWrapper(identityName: "test-user")
-        try wrapper.createGroup(channelId: 1, isVoice: true)
+        try wrapper.createGroup(channelId: "1", isVoice: true)
         
-        let key1 = try wrapper.exportAudioKey(channelId: 1, senderSessionId: 1)
-        let key2 = try wrapper.exportAudioKey(channelId: 1, senderSessionId: 2)
+        let key1 = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
+        let key2 = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 2)
         
         // Keys for different senders should be different
         #expect(key1 != key2)
         
         // Same sender should produce same key
-        let key1Again = try wrapper.exportAudioKey(channelId: 1, senderSessionId: 1)
+        let key1Again = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
         #expect(key1 == key1Again)
     }
     
@@ -148,16 +149,16 @@ struct MlsProtocolTests {
         // Test that voice and text groups are independent
         let wrapper = try MlsWrapper(identityName: "test-user")
         
-        try wrapper.createGroup(channelId: 1, isVoice: true)
-        try wrapper.createGroup(channelId: 1, isVoice: false)
+        try wrapper.createGroup(channelId: "1", isVoice: true)
+        try wrapper.createGroup(channelId: "1", isVoice: false)
         
         // Both voice and text groups should exist for same channel
-        #expect(wrapper.isMember(channelId: 1, isVoice: true) == true)
-        #expect(wrapper.isMember(channelId: 1, isVoice: false) == true)
+        #expect(wrapper.isMember(channelId: "1", isVoice: true) == true)
+        #expect(wrapper.isMember(channelId: "1", isVoice: false) == true)
         
         // Keys should be different between voice and text
-        let voiceKey = try wrapper.exportAudioKey(channelId: 1, senderSessionId: 1)
-        let textKey = try wrapper.exportTextKey(channelId: 1, senderSessionId: 1)
+        let voiceKey = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
+        let textKey = try wrapper.exportTextKey(channelId: "1", senderSessionId: 1)
         
         #expect(voiceKey != textKey)
     }

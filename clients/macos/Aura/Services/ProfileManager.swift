@@ -6,10 +6,13 @@ import Combine
 public class ProfileManager: ObservableObject {
     
     @Published public var profiles: [UserProfileModel] = []
-    
-    private static let storageKey = "AuraUserProfiles"
-    
-    public init() {
+
+    /// UserDefaults key. Production code uses the default; tests pass a custom
+    /// key so they can isolate state per-test without touching real prefs.
+    private let storageKey: String
+
+    public init(storageKey: String = "AuraUserProfiles") {
+        self.storageKey = storageKey
         loadProfiles()
     }
     
@@ -76,7 +79,7 @@ public class ProfileManager: ObservableObject {
     // MARK: - Persistence
     
     private func loadProfiles() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey) else {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else {
             print("[ProfileManager] No saved profiles found")
             return
         }
@@ -92,7 +95,7 @@ public class ProfileManager: ObservableObject {
     private func saveProfiles() {
         do {
             let data = try JSONEncoder().encode(profiles)
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            UserDefaults.standard.set(data, forKey: storageKey)
             print("[ProfileManager] Saved \\(profiles.count) profiles")
         } catch {
             print("[ProfileManager] Failed to save profiles: \\(error)")
