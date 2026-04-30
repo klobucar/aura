@@ -10,7 +10,7 @@ rand = ["dep:rand"]
 
 [dependencies]
 prost = "0.14.3"
-bytes = "1.0"
+bytes = "1.11"
 thiserror = "2.0.18"
 rand = { version = "0.10.0", optional = true }
 
