@@ -185,7 +185,7 @@
                         <Grid ColumnDefinitions="*,Auto">
                             <TextBox Grid.Column="0"
                                      Text="{Binding ServerAddress}"
-                                     Watermark="Server"
+                                     PlaceholderText="Server"
                                      Background="#313244"
                                      Foreground="#CDD6F4"
                                      BorderThickness="0"
@@ -194,7 +194,7 @@
                                      FontSize="13"/>
                             <TextBox Grid.Column="1"
                                      Text="{Binding ServerPort}"
-                                     Watermark="Port"
+                                     PlaceholderText="Port"
                                      Width="72"
                                      Margin="6,0,0,0"
                                      Background="#313244"
@@ -207,7 +207,7 @@
 
                         <!-- Password -->
                         <TextBox Text="{Binding ServerPassword}"
-                                 Watermark="Password (optional)"
+                                 PlaceholderText="Password (optional)"
                                  PasswordChar="•"
                                  Background="#313244"
                                  Foreground="#CDD6F4"
@@ -218,7 +218,7 @@
 
                         <!-- Display Name -->
                         <TextBox Text="{Binding DisplayName}"
-                                 Watermark="Display Name"
+                                 PlaceholderText="Display Name"
                                  Background="#313244"
                                  Foreground="#CDD6F4"
                                  BorderThickness="0"
@@ -732,7 +732,7 @@
                                     BorderBrush="#313244"
                                     BorderThickness="1">
                                 <TextBox Text="{Binding MessageInput}"
-                                         Watermark="Message..."
+                                         PlaceholderText="Message..."
                                          Background="Transparent"
                                          BorderThickness="0"
                                          Foreground="#CDD6F4"

@@ -76,8 +76,8 @@ public class MlsProtocolTests
         joiner.JoinGroup(result.Welcome);
         
         // 5. Both should now be members
-        Assert.True(founder.IsMember(channelId: 1, isVoice: true));
-        Assert.True(joiner.IsMember(channelId: 1, isVoice: true));
+        Assert.True(founder.IsMember(channelId: "1", isVoice: true));
+        Assert.True(joiner.IsMember(channelId: "1", isVoice: true));
         
         // 6. Founder epoch should have advanced
         var founderEpoch = founder.CurrentEpoch(channelId: "1", isVoice: true);
@@ -309,7 +309,7 @@ public class MlsWrapper
     
     public ulong CurrentEpoch(string channelId, bool isVoice)
     {
-        return _epochs.GetValueOrDefault((channelId, isVoice), 0);
+        return _epochs.GetValueOrDefault((channelId, isVoice), 0UL);
     }
     
     public byte[] ExportAudioKey(string channelId, uint senderSessionId)
