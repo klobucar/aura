@@ -111,7 +111,7 @@ Now when you press **⌘R** (Run) in Xcode:
 ### "Library not found"
 Run the build script manually first:
 ```bash
-cd /Users/crabclaw/src/aura
+cd path/to/aura     # repo root
 ./scripts/build_macos.sh
 ```
 
