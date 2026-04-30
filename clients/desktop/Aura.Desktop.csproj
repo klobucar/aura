@@ -44,11 +44,17 @@
     <Protobuf Include="../../crates/aura-protocol/src/aura.proto" GrpcServices="None" />
   </ItemGroup>
 
-  <!-- Native Rust Library -->
+  <!-- Native Rust Library — exactly one of these exists per platform.
+       Each Include is conditional on the file being present so a Linux CI
+       run doesn't fail because the macOS .dylib isn't there. -->
   <ItemGroup>
-    <None Include="Generated/libaura_core.dylib">
+    <None Include="Generated/libaura_core.dylib" Condition="Exists('Generated/libaura_core.dylib')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libaura_core.dylib</Link>
+    </None>
+    <None Include="Generated/libaura_core.so" Condition="Exists('Generated/libaura_core.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libaura_core.so</Link>
     </None>
     <None Include="Generated/aura_core.dll" Condition="Exists('Generated/aura_core.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
