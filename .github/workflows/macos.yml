@@ -30,12 +30,13 @@ env:
 jobs:
   xcode-test:
     name: xcodebuild test
-    # macos-26 (Tahoe) ships Xcode 26 / macOS 26 SDK so APIs we gate behind
-    # `if #available(macOS 26, *)` (e.g. SwiftUI's glassEffect) compile.
-    # macos-latest is currently macos-15 / Xcode 16.4, which only has the
-    # macOS 15.5 SDK and rejects those symbols at parse time even when
-    # availability-gated. Same 10x minute multiplier as macos-latest.
-    runs-on: macos-26
+    # macos-latest (currently the macos-15 image, Xcode 16.4) — keychain works
+    # for our test suite, while macos-26's tightened Keychain access caused
+    # every keychain-touching test to crash pre-assertion. View+Modifiers.swift
+    # was temporarily downgraded to drop the macOS 26-only glassEffect call;
+    # restore both the call site and this runner pin together once Xcode 26
+    # is available on macos-latest.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable

@@ -186,16 +186,20 @@ extension View {
             .modifier(AuraTheme.Shadows.soft())
     }
     
-    /// Native macOS 26 Liquid Glass effect.
-    /// Uses system .glassEffect() when available, falls back to auraGlass().
-    @ViewBuilder
+    /// Liquid-glass-style surface.
+    ///
+    /// macOS 26 ships a native `.glassEffect()` that we'd love to use here, but
+    /// CI's `macos-latest` (currently the macos-15 image with Xcode 16's macOS
+    /// 15 SDK) doesn't have the symbol — Swift availability checks gate runtime
+    /// only, so the file fails to *compile* on the older SDK regardless of the
+    /// `if #available` guard.
+    ///
+    /// Until Xcode 26 ships on macos-latest, we always use the in-house
+    /// auraGlass material, which looks nearly identical. Restore the
+    /// `glassEffect(.regular.interactive(), in: .rect(cornerRadius:))` path
+    /// once the SDK is everywhere we need to build.
     func liquidGlass(cornerRadius: CGFloat = AuraTheme.Layout.liquidGlassCornerRadius) -> some View {
-        if #available(macOS 26, *) {
-            self
-                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius))
-        } else {
-            self.auraGlass(cornerRadius: cornerRadius, material: .hudWindow)
-        }
+        self.auraGlass(cornerRadius: cornerRadius, material: .hudWindow)
     }
     
     /// Standardized section container for Settings and Profile views.
