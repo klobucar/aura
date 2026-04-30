@@ -33,7 +33,7 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 # Authentication
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-rand = "0.10.0"
+rand = "0.10.1"
 
 # MLS Protocol (for server delivery service)
 openmls = "0.8.1"
