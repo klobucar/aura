@@ -30,7 +30,12 @@ env:
 jobs:
   xcode-test:
     name: xcodebuild test
-    runs-on: macos-latest
+    # macos-26 (Tahoe) ships Xcode 26 / macOS 26 SDK so APIs we gate behind
+    # `if #available(macOS 26, *)` (e.g. SwiftUI's glassEffect) compile.
+    # macos-latest is currently macos-15 / Xcode 16.4, which only has the
+    # macOS 15.5 SDK and rejects those symbols at parse time even when
+    # availability-gated. Same 10x minute multiplier as macos-latest.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
