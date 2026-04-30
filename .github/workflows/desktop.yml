@@ -1,0 +1,86 @@
+name: Desktop Client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/desktop/**'
+      - 'crates/aura-core/**'
+      - 'crates/aura-protocol/**'
+      - 'crates/opus16-sys/**'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'clients/desktop/**'
+      - 'crates/aura-core/**'
+      - 'crates/aura-protocol/**'
+      - 'crates/opus16-sys/**'
+      - '.github/workflows/desktop.yml'
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep this in sync with .github/workflows/ci.yml and vendor/opus/autogen.sh.
+  OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
+  # Match the local install (uniffi-bindgen 0.10.0+v0.29.4) so generated
+  # aura_core.cs lines up with the UniFFI runtime in aura-core.
+  UNIFFI_BINDGEN_CS_TAG: v0.10.0+v0.29.4
+
+jobs:
+  dotnet-test:
+    name: dotnet test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "${{ env.OPUS_MODEL_CHECKSUM }}"
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
+      - name: build Rust core
+        # libaura_core.so is what the C# runtime loads via UniFFI.
+        run: cargo build --release -p aura-core
+      - name: install uniffi-bindgen-cs
+        # Skip if the rust-cache already restored the binary; otherwise build
+        # from the tagged release that matches the UniFFI version aura-core uses.
+        run: |
+          if ! command -v uniffi-bindgen-cs >/dev/null; then
+            cargo install \
+              --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+              --tag "${{ env.UNIFFI_BINDGEN_CS_TAG }}" \
+              uniffi-bindgen-cs
+          fi
+      - name: generate C# bindings
+        run: |
+          mkdir -p clients/desktop/Generated
+          uniffi-bindgen-cs \
+            --library target/release/libaura_core.so \
+            --out-dir clients/desktop/Generated
+          cp target/release/libaura_core.so clients/desktop/Generated/
+      - name: dotnet restore
+        working-directory: clients/desktop/Tests
+        run: dotnet restore
+      - name: dotnet test
+        working-directory: clients/desktop/Tests
+        run: dotnet test --no-restore --verbosity normal
