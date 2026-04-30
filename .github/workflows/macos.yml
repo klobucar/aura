@@ -30,15 +30,24 @@ env:
 jobs:
   xcode-test:
     name: xcodebuild test
-    # macos-latest (currently the macos-15 image, Xcode 16.4) — keychain works
-    # for our test suite, while macos-26's tightened Keychain access caused
-    # every keychain-touching test to crash pre-assertion. View+Modifiers.swift
-    # was temporarily downgraded to drop the macOS 26-only glassEffect call;
-    # restore both the call site and this runner pin together once Xcode 26
-    # is available on macos-latest.
+    # macos-latest is the macos-15 host. Its Keychain is usable in tests,
+    # unlike the macos-26 image which rejects every keychain-touching test
+    # pre-assertion. The macos-15 host ships multiple Xcodes preinstalled —
+    # we pick Xcode 26 below for the macOS 26 SDK so glassEffect compiles.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: select latest preinstalled Xcode 26
+        # macos-latest (the macos-15 host) preinstalls multiple Xcodes
+        # (16.x and 26.x). View+Modifiers.swift's glassEffect needs the
+        # macOS 26 SDK at compile time, so we pick the newest /Applications/
+        # Xcode_26*.app entry. The exact patch version moves with image
+        # rolls — sorting picks whatever the runner currently has.
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Selecting: $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cache opus DNN model data
