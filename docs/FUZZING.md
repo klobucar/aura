@@ -1,7 +1,6 @@
 ---
 title: Fuzzing Guide
 description: Documentation for protocol fuzzing using libfuzzer.
-agent_intent: testing_guide
 ---
 # Fuzzing Aura Protocol
 

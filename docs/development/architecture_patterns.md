@@ -1,7 +1,6 @@
 ---
 title: Architecture Patterns
 description: Core design patterns and architectural decisions in the Aura codebase.
-agent_intent: onboarding_guide
 ---
 # Architecture Patterns
 

@@ -1,7 +1,6 @@
 ---
 title: DAVE Protocol Deviations
 description: Rationale for Aura's deviations from the standard Discord DAVE protocol.
-agent_intent: technical_reference
 ---
 # Aura DAVE Protocol Deviations & Rationale
 

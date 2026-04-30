@@ -1,7 +1,6 @@
 ---
 title: Desktop (C#) Architecture
 description: Architecture of the Windows C#/.NET desktop client and UniFFI integration.
-agent_intent: technical_reference
 ---
 # Desktop Client Architecture (C#)
 

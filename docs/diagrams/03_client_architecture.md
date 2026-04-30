@@ -1,7 +1,6 @@
 ---
 title: macOS Client Architecture
 description: Architecture of the Apple/Swift client and UniFFI integration.
-agent_intent: technical_reference
 ---
 # macOS Client Architecture (Swift)
 

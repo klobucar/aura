@@ -1,7 +1,6 @@
 ---
 title: Testing Standards
 description: Guidelines for testing Rust code and FFI boundaries in Aura.
-agent_intent: testing_guide
 ---
 # Testing Standards
 

@@ -1,7 +1,6 @@
 ---
 title: Codec & Protocol Details
 description: Deep dive into the Aura binary protocol and audio pipeline.
-agent_intent: technical_reference
 ---
 # Codec & Protocol Implementation
 
