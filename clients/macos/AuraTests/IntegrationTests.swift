@@ -8,12 +8,12 @@ final class IntegrationTests: XCTestCase {
     var profileManager: ProfileManager!
     
     override func setUp() async throws {
-        serverManager = ServerManager()
-        profileManager = ProfileManager()
-        
-        // Clean up test data
+        // Clean test storage first so the managers start from an empty state.
         UserDefaults.standard.removeObject(forKey: "TestAuraServerProfiles")
         UserDefaults.standard.removeObject(forKey: "TestAuraUserProfiles")
+
+        serverManager = ServerManager(storageKey: "TestAuraServerProfiles")
+        profileManager = ProfileManager(storageKey: "TestAuraUserProfiles")
     }
     
     override func tearDown() async throws {
@@ -166,8 +166,9 @@ final class IntegrationTests: XCTestCase {
         // Create profile metadata
         profileManager.createProfile(displayName: "Keychain User", identity: identity)
         
-        // Simulate app restart - create new managers
-        let newProfileManager = ProfileManager()
+        // Simulate app restart - create new managers (same test storage key
+        // so it picks up the profile metadata we just persisted).
+        let newProfileManager = ProfileManager(storageKey: "TestAuraUserProfiles")
         
         // Load profile metadata
         XCTAssertEqual(newProfileManager.profiles.count, 1)

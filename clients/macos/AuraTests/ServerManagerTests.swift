@@ -8,9 +8,8 @@ final class ServerManagerTests: XCTestCase {
     let testStorageKey = "TestAuraServerProfiles"
     
     override func setUp() async throws {
-        // Use a test-specific storage key
-        serverManager = ServerManager()
         UserDefaults.standard.removeObject(forKey: testStorageKey)
+        serverManager = ServerManager(storageKey: testStorageKey)
     }
     
     override func tearDown() async throws {
@@ -136,7 +135,7 @@ final class ServerManagerTests: XCTestCase {
         serverManager.addServer(server)
         
         // Create new manager instance (simulates app restart)
-        let newManager = ServerManager()
+        let newManager = ServerManager(storageKey: testStorageKey)
         
         XCTAssertEqual(newManager.servers.count, 1)
         XCTAssertEqual(newManager.servers.first?.name, "Persistent Server")

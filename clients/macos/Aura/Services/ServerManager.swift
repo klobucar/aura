@@ -6,10 +6,13 @@ import Combine
 public class ServerManager: ObservableObject {
     
     @Published public var servers: [ServerProfile] = []
-    
-    private static let storageKey = "AuraServerProfiles"
-    
-    public init() {
+
+    /// UserDefaults key. Production code uses the default; tests pass a custom
+    /// key so they can isolate state per-test without touching real prefs.
+    private let storageKey: String
+
+    public init(storageKey: String = "AuraServerProfiles") {
+        self.storageKey = storageKey
         loadServers()
     }
     
@@ -56,7 +59,7 @@ public class ServerManager: ObservableObject {
     // MARK: - Persistence
     
     private func loadServers() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey) else {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else {
             print("[ServerManager] No saved servers found")
             return
         }
@@ -72,7 +75,7 @@ public class ServerManager: ObservableObject {
     private func saveServers() {
         do {
             let data = try JSONEncoder().encode(servers)
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            UserDefaults.standard.set(data, forKey: storageKey)
             print("[ServerManager] Saved \\(servers.count) servers")
         } catch {
             print("[ServerManager] Failed to save servers: \\(error)")

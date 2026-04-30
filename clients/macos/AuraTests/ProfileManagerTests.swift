@@ -8,10 +8,12 @@ final class ProfileManagerTests: XCTestCase {
     let testStorageKey = "TestAuraUserProfiles"
     
     override func setUp() async throws {
-        profileManager = ProfileManager()
         UserDefaults.standard.removeObject(forKey: testStorageKey)
-        
-        // Clean up any test profiles from keychain
+
+        // The keychain cleanup helper iterates `profileManager.profiles`, so
+        // we have to construct the manager first. With an empty UserDefaults
+        // it'll start with zero profiles.
+        profileManager = ProfileManager(storageKey: testStorageKey)
         cleanupTestKeychain()
     }
     
@@ -194,7 +196,7 @@ final class ProfileManagerTests: XCTestCase {
         profileManager.createProfile(displayName: "Persistent User", identity: identity)
         
         // Create new manager instance (simulates app restart)
-        let newManager = ProfileManager()
+        let newManager = ProfileManager(storageKey: testStorageKey)
         
         XCTAssertEqual(newManager.profiles.count, 1)
         XCTAssertEqual(newManager.profiles.first?.displayName, "Persistent User")

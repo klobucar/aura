@@ -8,11 +8,11 @@ final class EdgeCaseTests: XCTestCase {
     var profileManager: ProfileManager!
     
     override func setUp() async throws {
-        serverManager = ServerManager()
-        profileManager = ProfileManager()
-        
         UserDefaults.standard.removeObject(forKey: "TestAuraServerProfiles")
         UserDefaults.standard.removeObject(forKey: "TestAuraUserProfiles")
+
+        serverManager = ServerManager(storageKey: "TestAuraServerProfiles")
+        profileManager = ProfileManager(storageKey: "TestAuraUserProfiles")
     }
     
     override func tearDown() async throws {
