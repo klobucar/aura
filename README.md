@@ -13,7 +13,7 @@ End-to-end encrypted VoIP with text chat. Rust core, native macOS and cross-plat
 Most always-on group voice tools force a tradeoff:
 
 - **Mumble** has the right shape — persistent channels, push-to-talk, low-latency, self-hosted — but predates modern end-to-end encryption and offers none of it. The server sees plaintext audio.
-- **Discord** is closed-source and centralized; its DAVE rollout brought E2EE to calls but the model still trusts Discord's services for identity, signaling, and metadata.
+- **Discord** brought serious E2EE to consumer voice with DAVE — Aura uses the same media-encryption construction. The differentiator is deployment: Discord is closed-source and centralized; Aura is built to be self-hosted by the community that runs it.
 - **Signal / WhatsApp** have strong E2EE but are built around address-book messaging, not always-on community voice channels.
 - **Matrix / Element Call** are general-purpose and powerful, but heavy and not optimized for low-latency hobbyist-server voice.
 
@@ -240,8 +240,8 @@ dotnet run -c Release
 # Workspace tests
 cargo test --workspace
 
-# Lints (clippy) — currently advisory in CI; will go strict once the warning backlog is cleared
-cargo clippy --workspace --all-targets
+# Lints (clippy) — strict; CI fails on any warning
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Formatting
 cargo fmt --all
@@ -249,7 +249,7 @@ cargo fmt --all
 
 Fuzzing harnesses for the protocol parser live under `crates/aura-protocol/fuzz/`. See [`docs/FUZZING.md`](docs/FUZZING.md) for how to run them with `cargo fuzz`.
 
-CI runs on every push and PR via `.github/workflows/ci.yml`: format check (strict), workspace tests (strict), clippy (advisory). The macOS Xcode build and the desktop .NET build aren't gated by the workflow yet.
+CI runs on every push and PR. Required gates: `cargo fmt --check`, `cargo test --workspace`, `cargo clippy ... -- -D warnings`, Conventional Commits lint on PR commits, weekly `cargo audit` and `cargo deny`, and `zizmor` workflow-security analysis. The macOS Xcode build and the desktop .NET build run on their own platform-specific workflows.
 
 ---
 
@@ -277,7 +277,10 @@ No. It is pre-alpha. Treat it as a research project until it has a third-party a
 
 ## Contributing
 
-Issue templates, contribution guide, and security disclosure policy land alongside the public release. In the meantime: bug reports as GitHub issues, security issues *privately* per the disclosure address that will live in `SECURITY.md`.
+- Bug reports and feature requests: open a GitHub issue (templates will guide you).
+- Pull requests: see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build/test loop, Conventional Commits + DCO sign-off requirements, and review expectations.
+- Security issues: please **don't** file a public issue — see [`SECURITY.md`](SECURITY.md) for the private disclosure process.
+- Community guidelines: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ---
 
