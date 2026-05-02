@@ -23,8 +23,8 @@
 - ✅ UniFFI bindings (Swift/C#)
 
 ### Clients
-- ✅ macOS SwiftUI scaffold
-- ✅ Windows .NET 8 scaffold
+- ✅ macOS SwiftUI client (voice, text, channels, settings, profiles, TOFU pinning, Secure Enclave)
+- ✅ Avalonia (.NET 10) desktop client with shared UniFFI core (voice + text parity for Windows/Linux/macOS)
 
 ---
 
@@ -46,10 +46,11 @@
 - [ ] Bandwidth tracking per session
 
 ### 1.3 Client UI - Voice
-- [ ] Push-to-talk keybind
+- [x] Push-to-talk keybind (global hotkey, recordable in Settings → Audio)
 - [x] Voice activity indicator
-- [ ] Audio settings (input/output device selection)
-- [ ] Volume sliders (input gain, output volume)
+- [x] Audio settings (input/output device selection)
+- [x] Per-user local volume sliders + local mute (persisted across reconnects)
+- [ ] Input gain / master output volume
 
 **Milestone**: Two users can join a channel and talk with E2EE ✅
 
@@ -111,7 +112,7 @@
 
 ### 4.2 User Management
 - [x] User list with online status (Server-side tracking complete)
-- [ ] Mute/deafen (local and server-side)
+- [x] Mute/deafen (server-broadcast status + local-only per-user mute)
 - [x] User comments/avatars (Protocol & DB storage ready)
 - [ ] Friend system
 - [ ] User registration tokens
