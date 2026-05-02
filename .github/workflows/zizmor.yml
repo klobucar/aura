@@ -1,0 +1,35 @@
+name: zizmor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/zizmor.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/zizmor.yml'
+  schedule:
+    # Mondays 06:23 UTC — staggered against the Security audit workflow.
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: zizmor (workflow security analysis)
+    runs-on: ubuntu-latest
+    permissions:
+      # Read repo contents; write SARIF results to Code Scanning;
+      # actions:read lets zizmor run online audits that need workflow metadata.
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
