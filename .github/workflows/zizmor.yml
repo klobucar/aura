@@ -33,3 +33,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
+        with:
+          # Scan only our own workflows. The default `.` walks the repo and
+          # picks up vendored workflows under crates/opus16-sys/vendor/opus/
+          # that we don't author and can't fix here.
+          inputs: .github/workflows/
