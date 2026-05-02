@@ -27,6 +27,8 @@ env:
   # Keep this in sync with .github/workflows/ci.yml and vendor/opus/autogen.sh.
   OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
 
+permissions: {}
+
 jobs:
   xcode-test:
     name: xcodebuild test
@@ -35,8 +37,12 @@ jobs:
     # pre-assertion. The macos-15 host ships multiple Xcodes preinstalled —
     # we pick Xcode 26 below for the macOS 26 SDK so glassEffect compiles.
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: select latest preinstalled Xcode 26
         # macos-latest (the macos-15 host) preinstalls multiple Xcodes
         # (16.x and 26.x). View+Modifiers.swift's glassEffect needs the

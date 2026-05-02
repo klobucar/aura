@@ -1,0 +1,14 @@
+# zizmor configuration. https://docs.zizmor.sh/configuration/
+
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # dtolnay/rust-toolchain is intentionally referenced by branch
+        # (`@stable`, `@nightly`, `@1.84`, etc.) per the action's documented
+        # usage — that's how it tracks the latest toolchain. SHA-pinning
+        # defeats the purpose. The action is widely depended on and
+        # maintained by a known, trusted Rust contributor.
+        dtolnay/rust-toolchain: ref-pin
+        # Default for everything else: full SHA pin required.
+        "*": hash-pin
