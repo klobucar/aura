@@ -1,0 +1,28 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+#
+# License checking is intentionally not enabled here yet — enable once the
+# transitive license set has been enumerated and a NOTICE file generated
+# (e.g. via `cargo about generate`). The CI workflow runs only the
+# `advisories bans sources` subcommands until then.
+
+[graph]
+all-features = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[bans]
+multiple-versions = "allow"
+wildcards = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
