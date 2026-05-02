@@ -1,0 +1,67 @@
+name: Bug report
+description: Something isn't working the way it's documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Aura is pre-alpha — the more detail you provide, the faster we can confirm and fix.
+        **Security issues:** do not file here. See [SECURITY.md](../../SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Aura version / commit
+      description: Run `git rev-parse --short HEAD` in your checkout, or paste the release tag.
+      placeholder: e.g. v0.1.0-alpha or 5ffd9377
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - aura-server
+        - aura-core
+        - aura-protocol
+        - macOS client
+        - Desktop (.NET) client
+        - Docs / build / CI
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: e.g. macOS 15.4, Ubuntu 24.04, Windows 11 24H2
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start server with `cargo run -p aura-server`
+        2. Connect client A as "alice"
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Server / client logs. `RUST_LOG=aura=debug` for the server is a good starting point. Trim to the relevant window if it's long.
+      render: shell

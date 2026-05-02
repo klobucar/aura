@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/klobucar/aura/security/advisories/new
+    about: Do not file a public issue. Use private vulnerability reporting (or see SECURITY.md).
+  - name: Question or discussion
+    url: https://github.com/klobucar/aura/discussions
+    about: For general questions, design discussion, or help getting set up.
