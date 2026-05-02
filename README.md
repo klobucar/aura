@@ -4,6 +4,8 @@ End-to-end encrypted VoIP with text chat. Rust core, native macOS and cross-plat
 
 > **Pre-alpha / experimental.** APIs, wire format, and on-disk schemas can change without notice. Do **not** use this for sensitive communication. See [`docs/08_security_review.md`](docs/08_security_review.md) for the in-tree security review, including open findings.
 
+![Aura macOS client in a channel](docs/images/channel.png)
+
 ---
 
 ## Why Aura?
@@ -143,6 +145,10 @@ The server listens on `0.0.0.0:8443` and writes `aura.db` to the working directo
 ### 2. Launch two clients
 
 In separate terminals (or one in Xcode and one via the desktop client), connect to `localhost:8443` with two distinct display names. Each client generates its own keypair on first run; whichever one connects first claims its display name.
+
+<p align="center">
+  <img src="docs/images/connect.png" alt="Aura macOS connect screen" width="420">
+</p>
 
 ### 3. Talk
 
