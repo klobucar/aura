@@ -130,6 +130,7 @@ public class QuicNetworkClient {
     private static let MSG_CREATE_CHANNEL: UInt8 = 0x40
     private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
     private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
+    private static let MSG_DELETE_CHANNEL: UInt8 = 0x43
     private static let MSG_UPDATE_STATUS: UInt8 = 0x45
     private static let MSG_PROFILE_UPDATED: UInt8 = 0x46 // Server → clients broadcast
     
@@ -885,7 +886,43 @@ public class QuicNetworkClient {
             print("[QuicClient] Failed to send update channel request: \(error)")
         }
     }
-    
+
+    /// Delete a channel (Admin only). The server replies with an `AdminResponse`
+    /// and broadcasts a fresh server snapshot (`MSG_CHANNEL_STATE`), so the
+    /// channel list refreshes for everyone without a response handler here.
+    public func deleteChannel(id: String) async {
+        guard isAdmin else { return }
+
+        // DeleteChannelRequest is a single proto field: `string channel_id = 1`.
+        // No generated encoder exists for it, so encode the one field inline:
+        // tag 0x0A (field 1, length-delimited) + varint length + UTF-8 bytes.
+        let idBytes = Array(id.utf8)
+        var payload = Data([0x0A])
+        var len = idBytes.count
+        repeat {
+            var byte = UInt8(len & 0x7F)
+            len >>= 7
+            if len > 0 { byte |= 0x80 }
+            payload.append(byte)
+        } while len > 0
+        payload.append(contentsOf: idBytes)
+
+        let mutStream: NWConnection? = await MainActor.run { self.controlStream }
+        guard let stream = mutStream else { return }
+
+        var msg = Data([Self.MSG_DELETE_CHANNEL]) // MSG_DELETE_CHANNEL
+        let frameLen = UInt32(payload.count).littleEndian
+        msg.append(Data(withUnsafeBytes(of: frameLen) { Array($0) }))
+        msg.append(payload)
+
+        do {
+            try await send(data: msg, on: stream)
+            print("[QuicClient] Delete channel request sent for \(id)")
+        } catch {
+            print("[QuicClient] Failed to send delete channel request: \(error)")
+        }
+    }
+
     // MARK: - Keepalive
     
     /// Start periodic keepalive pings to prevent session timeout

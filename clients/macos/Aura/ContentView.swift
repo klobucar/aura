@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var showingProfileEditor = false
     @State private var showingChannelEditor = false
     @State private var editingChannel: ChannelModel?
+    @State private var channelPendingDeletion: ChannelModel?
     @State private var pttCancellable: AnyCancellable?
     @State private var pttErrorMessage: String?
     
@@ -58,8 +59,25 @@ struct ContentView: View {
         } message: { msg in
             Text(msg)
         }
+        .confirmationDialog(
+            "Delete Channel",
+            isPresented: Binding(
+                get: { channelPendingDeletion != nil },
+                set: { if !$0 { channelPendingDeletion = nil } }
+            ),
+            presenting: channelPendingDeletion
+        ) { channel in
+            Button("Delete \"\(channel.name)\"", role: .destructive) {
+                let id = channel.id
+                channelPendingDeletion = nil
+                Task { await client?.deleteChannel(id: id) }
+            }
+            Button("Cancel", role: .cancel) { channelPendingDeletion = nil }
+        } message: { channel in
+            Text("This permanently deletes \"\(channel.name)\" and removes everyone from it. This cannot be undone.")
+        }
     }
-    
+
     // MARK: - Login View (Centered)
     
     @ViewBuilder
@@ -969,7 +987,7 @@ struct ContentView: View {
                                         Divider()
                                         
                                         Button(role: .destructive, action: {
-                                            // TODO: Implement delete
+                                            channelPendingDeletion = channel
                                         }) {
                                             Label("Delete Channel", systemImage: "trash")
                                         }
