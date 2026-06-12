@@ -17,6 +17,9 @@ public class AudioPlayback: ObservableObject {
     
     @Published public var isPlaying = false
     @Published public var framesPlayed: UInt64 = 0
+
+    /// Master output volume, 0.0–1.0. Applied to the engine's main mixer.
+    @Published public var volume: Float = 1.0
     
     // MARK: - Private Properties
     
@@ -53,7 +56,10 @@ public class AudioPlayback: ObservableObject {
             
             engine.attach(player)
             engine.connect(player, to: engine.mainMixerNode, format: format)
-            
+
+            // Apply the persisted master volume to the mixer output.
+            engine.mainMixerNode.outputVolume = volume
+
             try engine.start()
             player.play()
             
@@ -82,6 +88,14 @@ public class AudioPlayback: ObservableObject {
         print("[AudioPlayback] Stopped - \\(framesPlayed) frames played")
     }
     
+    /// Set master output volume (0.0–1.0). Takes effect immediately if playing,
+    /// and is reapplied on the next `start()`.
+    public func setVolume(_ newVolume: Float) {
+        let clamped = max(0, min(1, newVolume))
+        volume = clamped
+        audioEngine?.mainMixerNode.outputVolume = clamped
+    }
+
     /// Enqueue PCM samples for playback
     /// - Parameter pcm: Array of Int16 PCM samples (960 samples = 20ms)
     public func enqueue(pcm: [Int16]) {

@@ -240,6 +240,11 @@ public class QuicNetworkClient {
             print("[QuicClient] Jitter buffer set to \(ms)ms")
         }
 
+        if let volume = settings["masterVolume"] as? Float {
+            audioPlayback.setVolume(volume)
+            print("[QuicClient] Master volume: \(Int((volume * 100).rounded()))%")
+        }
+
         if let enabled = settings["vadEnabled"] as? Bool {
             audioSender?.setVadEnabled(enabled: enabled)
             print("[QuicClient] VAD: \(enabled ? "enabled" : "disabled")")
@@ -662,7 +667,10 @@ public class QuicNetworkClient {
 
                 audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
 
-                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms, VAD=\(vadEnabled)@\(thresholdDb)dB")
+                let masterVolume = UserDefaults.standard.object(forKey: "masterVolume") as? Double ?? 1.0
+                audioPlayback.setVolume(Float(masterVolume))
+
+                print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms, VAD=\(vadEnabled)@\(thresholdDb)dB, Volume=\(Int((masterVolume * 100).rounded()))%")
                 
                 // Text crypto will use MLS-derived keys per-sender (no initialization needed)
                 

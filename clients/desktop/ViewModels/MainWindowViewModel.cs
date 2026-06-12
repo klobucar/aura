@@ -96,7 +96,10 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     
     [ObservableProperty]
     private int _jitterBufferMs = 40;
-    
+
+    [ObservableProperty]
+    private int _masterVolume = 100;  // 0–100 %
+
     [ObservableProperty]
     private bool _showAudioSettings = false;
     
@@ -109,17 +112,57 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     [ObservableProperty]
     private string _certHost = "";
     
-    partial void OnRnnoiseEnabledChanged(bool value) => _audioManager?.SetNoiseSuppressionEnabled(value);
-    partial void OnAecEnabledChanged(bool value) => _audioManager?.SetWebrtcAecEnabled(value);
+    partial void OnRnnoiseEnabledChanged(bool value) { _audioManager?.SetNoiseSuppressionEnabled(value); SaveAudioSettings(); }
+    partial void OnAecEnabledChanged(bool value) { _audioManager?.SetWebrtcAecEnabled(value); SaveAudioSettings(); }
     partial void OnWebrtcNsEnabledChanged(bool value)
     {
         _audioManager?.SetWebrtcNsEnabled(value);
         // Auto-disable RNNoise when WebRTC NS is enabled
         if (value) RnnoiseEnabled = false;
+        SaveAudioSettings();
     }
-    partial void OnAgcEnabledChanged(bool value) => _audioManager?.SetWebrtcAgcEnabled(value);
-    partial void OnDredDurationChanged(int value) => _audioManager?.SetDredDuration(value);
-    partial void OnJitterBufferMsChanged(int value) => _audioManager?.SetJitterBufferMs((uint)value);
+    partial void OnAgcEnabledChanged(bool value) { _audioManager?.SetWebrtcAgcEnabled(value); SaveAudioSettings(); }
+    partial void OnDredDurationChanged(int value) { _audioManager?.SetDredDuration(value); SaveAudioSettings(); }
+    partial void OnJitterBufferMsChanged(int value) { _audioManager?.SetJitterBufferMs((uint)value); SaveAudioSettings(); }
+    partial void OnMasterVolumeChanged(int value)
+    {
+        if (_audioEngine != null) _audioEngine.Volume = value / 100f;
+        SaveAudioSettings();
+    }
+
+    /// <summary>True while loading persisted settings, to suppress redundant saves.</summary>
+    private bool _suppressSettingsSave;
+
+    /// <summary>Persist the current audio settings (no-op during initial load).</summary>
+    private void SaveAudioSettings()
+    {
+        if (_suppressSettingsSave) return;
+        new AppSettings
+        {
+            RnnoiseEnabled = RnnoiseEnabled,
+            AecEnabled = AecEnabled,
+            WebrtcNsEnabled = WebrtcNsEnabled,
+            AgcEnabled = AgcEnabled,
+            DredDuration = DredDuration,
+            JitterBufferMs = JitterBufferMs,
+            MasterVolume = MasterVolume,
+        }.Save();
+    }
+
+    /// <summary>Push the current settings into freshly-created audio components.</summary>
+    private void ApplyAudioSettings()
+    {
+        if (_audioManager != null)
+        {
+            _audioManager.SetNoiseSuppressionEnabled(RnnoiseEnabled);
+            _audioManager.SetWebrtcAecEnabled(AecEnabled);
+            _audioManager.SetWebrtcNsEnabled(WebrtcNsEnabled);
+            _audioManager.SetWebrtcAgcEnabled(AgcEnabled);
+            _audioManager.SetDredDuration(DredDuration);
+            _audioManager.SetJitterBufferMs((uint)JitterBufferMs);
+        }
+        if (_audioEngine != null) _audioEngine.Volume = MasterVolume / 100f;
+    }
     
     // ==========================================================================
     // Initialization
@@ -154,6 +197,19 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ConnectionStatus = $"Error loading identity: {ex.Message}";
         }
         
+        // Restore persisted audio settings (defaults if none saved). Suppress
+        // saves while loading so setting each property doesn't rewrite the file.
+        var settings = AppSettings.Load();
+        _suppressSettingsSave = true;
+        RnnoiseEnabled = settings.RnnoiseEnabled;
+        AecEnabled = settings.AecEnabled;
+        WebrtcNsEnabled = settings.WebrtcNsEnabled;
+        AgcEnabled = settings.AgcEnabled;
+        DredDuration = settings.DredDuration;
+        JitterBufferMs = settings.JitterBufferMs;
+        MasterVolume = settings.MasterVolume;
+        _suppressSettingsSave = false;
+
         // Start with empty channels - server will sync them on connect
         Channels = new ObservableCollection<Channel>();
     }
@@ -190,6 +246,8 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Console.WriteLine("[ViewModel] AudioManager created");
             _client.SetAudioEngine(_audioEngine);
             _client.SetAudioManager(_audioManager);
+            // Apply persisted audio settings to the freshly-created components.
+            ApplyAudioSettings();
             Console.WriteLine("[ViewModel] Audio components wired");
             
             // Listen for active speaker changes

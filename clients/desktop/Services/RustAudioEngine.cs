@@ -35,6 +35,9 @@ public class RustAudioEngine : IDisposable
     private bool _isCapturing;
     private CancellationTokenSource? _captureCts;
 
+    /// <summary>Master output volume, 0.0–1.0 (attenuation only). Applied to mixed playback.</summary>
+    public float Volume { get; set; } = 1.0f;
+
     public event Action<byte[]>? OnAudioData;
     public event Action<string>? OnError;
 
@@ -100,6 +103,14 @@ public class RustAudioEngine : IDisposable
         var sampleCount = pcmData.Length / 2;
         var sampleBuffer = new short[sampleCount];
         Buffer.BlockCopy(pcmData, 0, sampleBuffer, 0, pcmData.Length);
+
+        // Apply master volume (skip the per-sample multiply at unity gain).
+        var vol = Volume;
+        if (vol < 0.999f)
+        {
+            for (int i = 0; i < sampleCount; i++)
+                sampleBuffer[i] = (short)(sampleBuffer[i] * vol);
+        }
 
         aura_audio_write_playback(_handle, sampleBuffer, (nuint)sampleCount);
     }

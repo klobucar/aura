@@ -5,10 +5,33 @@ struct AudioSettingsView: View {
     @AppStorage("aecEnabled") private var aecEnabled = false
     @AppStorage("webrtcNsEnabled") private var webrtcNsEnabled = false
     @AppStorage("webrtcAgcEnabled") private var webrtcAgcEnabled = true
+    @AppStorage("masterVolume") private var masterVolume = 1.0
     @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
 
     var body: some View {
         Form {
+            Section {
+                HStack(spacing: 10) {
+                    Image(systemName: "speaker.fill")
+                        .foregroundStyle(.secondary)
+                    Slider(value: $masterVolume, in: 0...1)
+                        .onChange(of: masterVolume) { _, newValue in
+                            NotificationCenter.default.post(
+                                name: .audioSettingsChanged,
+                                object: ["masterVolume": Float(newValue)]
+                            )
+                        }
+                    Image(systemName: "speaker.wave.3.fill")
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("\(Int((masterVolume * 100).rounded()))% output volume")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Output")
+            }
+
             Section("Audio Quality") {
                 Toggle("Noise Suppression (RNNoise)", isOn: $noiseSuppressionEnabled)
                     .onChange(of: noiseSuppressionEnabled) { _, newValue in

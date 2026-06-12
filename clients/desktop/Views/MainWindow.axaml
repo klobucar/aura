@@ -465,6 +465,16 @@
                                           Foreground="#CDD6F4" FontSize="12"/>
 
                                 <Separator Background="#2A2A3C" Height="1" Margin="0,4"/>
+                                <TextBlock Text="OUTPUT" FontSize="9" FontWeight="Bold" Foreground="#585B70"/>
+
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="{Binding MasterVolume, StringFormat='Master Volume: {0}%'}"
+                                               FontSize="11" Foreground="#A6ADC8"/>
+                                    <Slider Minimum="0" Maximum="100" Value="{Binding MasterVolume}"
+                                            IsSnapToTickEnabled="True" TickFrequency="5"/>
+                                </StackPanel>
+
+                                <Separator Background="#2A2A3C" Height="1" Margin="0,4"/>
                                 <TextBlock Text="LATENCY" FontSize="9" FontWeight="Bold" Foreground="#585B70"/>
 
                                 <StackPanel Spacing="3">
