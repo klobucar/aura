@@ -2,8 +2,11 @@ import SwiftUI
 
 struct AudioSettingsView: View {
     @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
+    @AppStorage("aecEnabled") private var aecEnabled = false
+    @AppStorage("webrtcNsEnabled") private var webrtcNsEnabled = false
+    @AppStorage("webrtcAgcEnabled") private var webrtcAgcEnabled = true
     @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
-    
+
     var body: some View {
         Form {
             Section("Audio Quality") {
@@ -14,12 +17,44 @@ struct AudioSettingsView: View {
                             object: ["noiseSuppression": newValue]
                         )
                     }
-                
+
                 Text("Neural network-based background noise removal")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            
+
+            Section {
+                Toggle("Echo Cancellation (AEC)", isOn: $aecEnabled)
+                    .onChange(of: aecEnabled) { _, newValue in
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: ["aecEnabled": newValue]
+                        )
+                    }
+
+                Toggle("Noise Suppression (WebRTC)", isOn: $webrtcNsEnabled)
+                    .onChange(of: webrtcNsEnabled) { _, newValue in
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: ["webrtcNsEnabled": newValue]
+                        )
+                    }
+
+                Toggle("Automatic Gain Control (AGC)", isOn: $webrtcAgcEnabled)
+                    .onChange(of: webrtcAgcEnabled) { _, newValue in
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: ["webrtcAgcEnabled": newValue]
+                        )
+                    }
+
+                Text("WebRTC preprocessing. AEC removes speaker echo on open-mic setups; AGC normalizes input level.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Preprocessing")
+            }
+
             Section {
                 Picker("Jitter Buffer", selection: $jitterBufferMs) {
                     Text("0ms (Instant)").tag(0)
