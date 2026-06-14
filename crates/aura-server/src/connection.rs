@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_acme::{caches::DirCache, AcmeConfig, UseChallenge};
 use std::net::SocketAddr;
@@ -229,17 +230,13 @@ impl QuicServer {
 
     /// Configure manual TLS using certificates from the filesystem.
     fn configure_manual_tls(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
-        let cert_file = std::fs::File::open(cert_path)
-            .map_err(|e| anyhow!("Failed to open certificate file: {}", e))?;
-        let mut cert_reader = std::io::BufReader::new(cert_file);
-        let cert_chain: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut cert_reader).collect::<std::io::Result<Vec<_>>>()?;
+        let cert_chain: Vec<CertificateDer> = CertificateDer::pem_file_iter(cert_path)
+            .map_err(|e| anyhow!("Failed to read certificate file {:?}: {}", cert_path, e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow!("Failed to parse certificate in {:?}: {}", cert_path, e))?;
 
-        let key_file = std::fs::File::open(key_path)
-            .map_err(|e| anyhow!("Failed to open private key file: {}", e))?;
-        let mut key_reader = std::io::BufReader::new(key_file);
-        let key = rustls_pemfile::private_key(&mut key_reader)?
-            .ok_or_else(|| anyhow!("No private key found in {:?}", key_path))?;
+        let key = PrivateKeyDer::from_pem_file(key_path)
+            .map_err(|e| anyhow!("Failed to read private key from {:?}: {}", key_path, e))?;
 
         let mut server_crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()

@@ -30,6 +30,12 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Both are blocked on the upstream OpenMLS/libcrux chain (latest
+          # openmls 0.8.1 / openmls_rust_crypto 0.5.1 already in use); rationale
+          # and re-check trigger documented in deny.toml. Keep this list in sync.
+          #   RUSTSEC-2026-0124 — libcrux-chacha20poly1305 panic (not in our compiled graph)
+          #   RUSTSEC-2026-0173 — proc-macro-error2 unmaintained (build-time only)
+          ignore: RUSTSEC-2026-0124,RUSTSEC-2026-0173
 
   deny:
     name: cargo deny (advisories, bans, sources)

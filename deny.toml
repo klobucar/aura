@@ -12,7 +12,22 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-ignore = []
+# Both entries are blocked on the upstream OpenMLS/libcrux dependency chain —
+# we are already on the latest openmls 0.8.1 / openmls_rust_crypto 0.5.1, and
+# the fixes are not reachable from our manifests. Re-check on every openmls bump.
+ignore = [
+    # libcrux-chacha20poly1305 < 0.0.8 panics if handed an oversized ciphertext
+    # buffer. Unreachable here: libcrux-aead 0.0.7 pins it at "=0.0.7" (so 0.0.8
+    # cannot be selected), and our MLS ciphersuite uses AES-128-GCM for HPKE —
+    # the ChaCha backend is not in the compiled graph (`cargo tree -i` finds
+    # nothing). The panic also needs an attacker-controlled buffer length, which
+    # hpke-rs sizes internally, not from the wire.
+    { id = "RUSTSEC-2026-0124", reason = "fix pinned out by libcrux-aead 0.0.7; vulnerable AEAD not in our compiled graph" },
+    # proc-macro-error2 is unmaintained. Build-time only — it is used by
+    # hax-lib-macros (libcrux's formal-verification tooling) and is not linked
+    # into the shipped binary. No runtime exposure.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via hax-lib; not in shipped binary" },
+]
 
 [bans]
 multiple-versions = "allow"

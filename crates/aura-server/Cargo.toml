@@ -18,7 +18,7 @@ tokio-stream = { version = "0.1.18", features = ["net"] }
 rustls = { version = "0.23.37", default-features = false, features = ["ring"] }
 rustls-acme = { version = "0.15.1", features = ["tokio", "axum"] }
 axum = "0.8.9"
-rustls-pemfile = "2.2.0"
+rustls-pki-types = { version = "1.14.1", features = ["std"] }
 prost = "0.14.3"
 bytes = "1.11"
 rcgen = "0.14.7"
