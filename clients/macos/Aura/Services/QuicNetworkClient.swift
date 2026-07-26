@@ -133,6 +133,7 @@ public class QuicNetworkClient {
     private static let MSG_DELETE_CHANNEL: UInt8 = 0x43
     private static let MSG_UPDATE_STATUS: UInt8 = 0x45
     private static let MSG_PROFILE_UPDATED: UInt8 = 0x46 // Server → clients broadcast
+    private static let MSG_CHANNEL_DELETED: UInt8 = 0x47 // Server → occupants of a deleted channel
     
     // MLS Protocol message types
     private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
@@ -141,6 +142,8 @@ public class QuicNetworkClient {
     private static let MSG_MLS_ADD_MEMBER_REQ: UInt8 = 0x53 // Server forwards key package
     private static let MSG_MLS_COMMIT: UInt8 = 0x54         // Server broadcasts commit
     private static let MSG_MLS_WELCOME: UInt8 = 0x55        // Server broadcasts welcome
+    private static let MSG_MLS_RATCHET_REQUEST: UInt8 = 0x56 // Server asks us (founder) to ratchet
+    private static let MSG_MLS_RATCHET_COMMIT: UInt8 = 0x57  // We return the empty commit
     
     // Security limits
     private static let MAX_AUDIO_PACKET_SIZE = 65536
@@ -1141,12 +1144,18 @@ public class QuicNetworkClient {
             
         case Self.MSG_MLS_WELCOME: // 0x55 - Welcome message from founder
             await handleMlsWelcome(stream: stream)
+
+        case Self.MSG_MLS_RATCHET_REQUEST: // 0x56 - Server asks us to advance the epoch
+            await handleMlsRatchetRequest(stream: stream)
             
         case Self.MSG_UPDATE_STATUS: // 0x45
             await handleUserStatusUpdate(stream: stream)
 
         case Self.MSG_PROFILE_UPDATED: // 0x46 - Server broadcasts a user's profile change
             await handleProfileUpdated(stream: stream)
+
+        case Self.MSG_CHANNEL_DELETED: // 0x47 - The channel we were in was deleted
+            await handleChannelDeleted(stream: stream)
 
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
@@ -1218,6 +1227,11 @@ public class QuicNetworkClient {
                             print("[QuicClient] Not an MLS member for channel \(channelId), waiting for epoch advance to add sender \(sessionId)")
                         }
                     }
+
+                    // Warm a text key for them at the current epoch so their
+                    // first message survives the epoch bump their own join
+                    // causes.
+                    self.registerTextSender(channelId: channelId, sessionId: sessionId)
                 } else {
                     print("[QuicClient] Ignoring own UserJoined for channel \(channelId)")
                 }
@@ -1304,7 +1318,63 @@ public class QuicNetworkClient {
             print("[QuicClient] Failed to parse UserLeft: \(error)")
         }
     }
-    
+
+    /// Handle notification that the channel we were in has been deleted.
+    ///
+    /// The server has already torn down our MLS groups and told everyone we
+    /// left, so all that remains is to drop the local state and move somewhere
+    /// that still exists.
+    private func handleChannelDeleted(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let notice = try decodeChannelDeleted(data: payload)
+            let deletedId = notice.channelId
+
+            print("[QuicClient] Channel \(deletedId) was deleted")
+
+            let wasCurrent = await MainActor.run { () -> Bool in
+                let wasCurrent = self.currentChannelId == deletedId
+
+                // Drop everything scoped to the dead channel.
+                self.usersByChannel.removeValue(forKey: deletedId)
+                self.receivedMessages.removeAll { $0.channelId == deletedId }
+                self.systemEvents.removeAll { $0.channelId == deletedId }
+
+                if wasCurrent {
+                    self.currentChannelId = nil
+                    self.currentVoiceChannelId = nil
+                    self.connectionStatus = "Connected"
+                    self.systemEvents.append(
+                        SystemEvent(content: "This channel was deleted", channelId: "0"))
+                }
+                return wasCurrent
+            }
+
+            guard wasCurrent else { return }
+
+            // Fall back to the server's suggestion, else the lobby, else the
+            // first channel that still exists.
+            let fallback = await MainActor.run { () -> String? in
+                if !notice.fallbackChannelId.isEmpty,
+                   self.channels.contains(where: { $0.id == notice.fallbackChannelId }) {
+                    return notice.fallbackChannelId
+                }
+                return self.channels.first(where: { $0.isLobby })?.id
+                    ?? self.channels.first(where: { $0.id != deletedId })?.id
+            }
+
+            if let fallback {
+                do {
+                    try await joinChannel(fallback)
+                } catch {
+                    print("[QuicClient] Failed to move to fallback channel \(fallback): \(error)")
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse ChannelDeleted: \(error)")
+        }
+    }
+
     /// Handle ServerState snapshot (Protobuf via UniFFI)
     private func handleServerState(stream: NWConnection) async {
         do {
@@ -1359,7 +1429,13 @@ public class QuicNetworkClient {
                     }
                 }
                 self.usersByChannel = newUserMapping
-                
+
+                // Warm text keys for members who were already present before
+                // we connected — usersByChannel must be set first.
+                for c in snapshot.channels {
+                    self.refreshTextSenderKeys(channelId: c.channelId)
+                }
+
                 print("[QuicClient] ServerState sync complete: \(self.channels.count) channels, \(self.profiles.count) profiles")
             }
         } catch {
@@ -1385,15 +1461,27 @@ public class QuicNetworkClient {
                 return
             }
             
-            // Derive decryption key from MLS text group for this sender
-            // The MLS text group may not be established yet if we just joined —
-            // wait briefly for the Welcome handshake to complete.
+            // Derive the decryption key for the epoch this message was
+            // encrypted under — NOT the group's current epoch. A membership
+            // change between send and receive advances the epoch, and the
+            // epoch's keys are what the sender used.
+            //
+            // The MLS text group may not be established yet if we just joined,
+            // so retry while it settles.
             var senderKey: Data?
             for attempt in 1...10 {
                 do {
-                    let keyBytes = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
-                    senderKey = keyBytes
+                    senderKey = try mls.exportTextKey(
+                        channelId: channelId,
+                        senderSessionId: senderSessionId,
+                        epoch: epoch
+                    )
                     break
+                } catch MlsError.EpochUnavailable(let messageEpoch, let current) {
+                    // The epoch aged out of the retention window. Retrying
+                    // cannot help — the key material is gone for good.
+                    print("[QuicClient] Dropping message \(messageId): epoch \(messageEpoch) no longer retained (now at \(current))")
+                    return
                 } catch {
                     if attempt < 10 {
                         try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
@@ -1403,7 +1491,7 @@ public class QuicNetworkClient {
                     }
                 }
             }
-            
+
             guard let senderKey = senderKey else {
                 print("[QuicClient] Could not derive text key for sender \(senderSessionId)")
                 return
@@ -1510,6 +1598,8 @@ public class QuicNetworkClient {
             if isVoice, let session = sessionId {
                 try updateAudioKeysFromMls(channelId: channelId)
                 print("[QuicClient] Updated audio keys from MLS as founder")
+            } else if !isVoice {
+                await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
             }
         } catch {
             print("[QuicClient] Failed to create MLS group: \(error)")
@@ -1561,9 +1651,11 @@ public class QuicNetworkClient {
                 try await send(data: msg, on: stream)
                 print("[QuicClient] Sent commit/welcome for new member \(joinerSessionId)")
                 
-                // Update audio keys after epoch advance
+                // Update keys after epoch advance
                 if isVoice {
                     try updateAudioKeysFromMls(channelId: channelId)
+                } else {
+                    await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
                 }
             }
         } catch {
@@ -1585,10 +1677,12 @@ public class QuicNetworkClient {
             
             let newEpoch = try mls.processCommit(channelId: channelId, isVoice: isVoice, commitBytes: Data(commit))
             print("[QuicClient] Processed MLS commit from \(envelope.senderId), now at epoch \(newEpoch)")
-            
-            // Update audio keys after epoch advance
+
+            // Update keys after epoch advance
             if isVoice {
                 try updateAudioKeysFromMls(channelId: channelId)
+            } else {
+                await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
             }
         } catch {
             print("[QuicClient] Failed to process MLS commit: \(error)")
@@ -1610,15 +1704,102 @@ public class QuicNetworkClient {
             try mls.joinGroup(welcomeBytes: Data(welcome))
             print("[QuicClient] Joined MLS \(isVoice ? "voice" : "text") group via Welcome for channel \(channelId)")
             
-            // Update audio keys now that we're in the group
+            // Update keys now that we're in the group
             if isVoice {
                 try updateAudioKeysFromMls(channelId: channelId)
+            } else {
+                await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
             }
         } catch {
             print("[QuicClient] Failed to process MLS welcome: \(error)")
         }
     }
     
+    /// Handle the server asking us (as group founder) to advance the epoch.
+    ///
+    /// This is the batched PFS ratchet: an empty commit rotates the group
+    /// secret so keys from the previous epoch cannot decrypt future traffic.
+    private func handleMlsRatchetRequest(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let envelope = try decodeMlsEnvelope(data: payload)
+
+            let channelId = envelope.channelId
+            let isVoice = envelope.groupType == .voice
+
+            guard let mls = mlsWrapper, let controlStream else { return }
+            guard mls.isMember(channelId: channelId, isVoice: isVoice) else {
+                print("[QuicClient] Ratchet requested for a group we're not in: \(channelId)")
+                return
+            }
+
+            let commit = try mls.selfUpdate(channelId: channelId, isVoice: isVoice)
+
+            let envelopeOut = MlsEnvelopeRecord(
+                senderId: sessionId ?? userId,
+                channelId: channelId,
+                groupType: envelope.groupType,
+                targetSessionId: 0,
+                targetUuid: "",
+                epoch: 0,
+                keyPackage: nil,
+                commit: commit,
+                welcome: nil,
+                commitWelcome: nil
+            )
+
+            let responsePayload = encodeMlsEnvelope(envelope: envelopeOut)
+            var msg = Data([Self.MSG_MLS_RATCHET_COMMIT])
+            let len = UInt32(responsePayload.count).littleEndian
+            msg.append(withUnsafeBytes(of: len) { Data($0) })
+            msg.append(responsePayload)
+
+            try await send(data: msg, on: controlStream)
+
+            let newEpoch = try mls.currentEpoch(channelId: channelId, isVoice: isVoice)
+            print("[QuicClient] Ratcheted \(isVoice ? "voice" : "text") group \(channelId) to epoch \(newEpoch)")
+
+            if isVoice {
+                try updateAudioKeysFromMls(channelId: channelId)
+            } else {
+                await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
+            }
+        } catch {
+            print("[QuicClient] Failed to handle MLS ratchet request: \(error)")
+        }
+    }
+
+    // MARK: - Text Key Retention
+
+    /// Warm a retained text key for one sender at the group's current epoch.
+    ///
+    /// Deriving a key is what causes the core to retain it across the next
+    /// epoch change, so doing this eagerly is what keeps a member's first
+    /// message decryptable when their own join bumps the epoch.
+    private func registerTextSender(channelId: String, sessionId: UInt32) {
+        guard let mls = mlsWrapper,
+              mls.isMember(channelId: channelId, isVoice: false) else { return }
+        do {
+            try mls.registerTextSender(channelId: channelId, senderSessionId: sessionId)
+        } catch {
+            print("[QuicClient] Failed to register text sender \(sessionId): \(error)")
+        }
+    }
+
+    /// Warm retained text keys for ourselves and everyone currently visible in
+    /// the channel. Called whenever the text group's epoch changes.
+    private func refreshTextSenderKeys(channelId: String) {
+        guard let mls = mlsWrapper,
+              mls.isMember(channelId: channelId, isVoice: false) else { return }
+
+        if let session = sessionId {
+            registerTextSender(channelId: channelId, sessionId: session)
+        }
+        for user in usersByChannel[channelId] ?? [] {
+            registerTextSender(channelId: channelId, sessionId: user.id)
+        }
+    }
+
     /// Update audio sender/receiver keys from MLS
     private func updateAudioKeysFromMls(channelId: String) throws {
         guard let mls = mlsWrapper, let session = sessionId else { return }
@@ -1969,7 +2150,9 @@ public class QuicNetworkClient {
         var epoch: UInt64 = 0
         for attempt in 1...15 {
             do {
-                myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId)
+                // nil epoch = derive at the group's current epoch, which is
+                // what we stamp on the outgoing packet below.
+                myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId, epoch: nil)
                 epoch = try mls.currentEpoch(channelId: channelId, isVoice: false)
                 break
             } catch {

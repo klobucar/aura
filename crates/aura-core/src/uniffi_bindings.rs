@@ -646,6 +646,15 @@ pub struct JoinChannelRequestRecord {
     pub channel_id: String,
 }
 
+/// Notification that a channel the client was in has been deleted.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ChannelDeletedRecord {
+    pub channel_id: String,
+    /// Channel to fall back to (the lobby, when the server has one). Empty
+    /// when the server has no suggestion and the client should pick.
+    pub fallback_channel_id: String,
+}
+
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum MlsGroupType {
     Voice,
@@ -826,6 +835,17 @@ pub fn decode_user_left(data: Vec<u8>) -> Result<UserLeftRecord, AudioError> {
 }
 
 #[uniffi::export]
+pub fn decode_channel_deleted(data: Vec<u8>) -> Result<ChannelDeletedRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::ChannelDeleted::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(ChannelDeletedRecord {
+        channel_id: proto.channel_id,
+        fallback_channel_id: proto.fallback_channel_id,
+    })
+}
+
+#[uniffi::export]
 pub fn encode_join_channel_request(req: JoinChannelRequestRecord) -> Vec<u8> {
     use prost::Message;
     let proto = aura_protocol::JoinChannelRequest {
@@ -980,12 +1000,19 @@ pub enum MlsError {
     GroupNotFound,
     #[error("Invalid key package")]
     InvalidKeyPackage,
+    /// The message was encrypted under an epoch whose keys are no longer
+    /// retained. Callers should drop the message rather than retry.
+    #[error("No retained key for epoch {epoch} (current epoch is {current})")]
+    EpochUnavailable { epoch: u64, current: u64 },
 }
 
 impl From<InternalMlsError> for MlsError {
     fn from(e: InternalMlsError) -> Self {
         match e {
             InternalMlsError::GroupNotFound(_msg) => MlsError::GroupNotFound,
+            InternalMlsError::EpochUnavailable { epoch, current } => {
+                MlsError::EpochUnavailable { epoch, current }
+            }
             _ => MlsError::OperationFailed(e.to_string()),
         }
     }
@@ -1095,6 +1122,19 @@ impl MlsWrapper {
             .map_err(Into::into)
     }
 
+    /// Issue an empty commit to advance a group's epoch (PFS ratchet).
+    ///
+    /// Returns the serialized Commit for the caller to hand to the server for
+    /// distribution to the rest of the group.
+    pub fn self_update(&self, channel_id: String, is_voice: bool) -> Result<Vec<u8>, MlsError> {
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
+        client.self_update(&group_id).map_err(Into::into)
+    }
+
     /// Export encryption key for audio (voice group)
     ///
     /// # Arguments
@@ -1108,7 +1148,7 @@ impl MlsWrapper {
         channel_id: String,
         sender_session_id: u32,
     ) -> Result<Vec<u8>, MlsError> {
-        let client = self
+        let mut client = self
             .inner
             .lock()
             .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
@@ -1122,6 +1162,9 @@ impl MlsWrapper {
     /// # Arguments
     /// * `channel_id` - Numeric channel ID
     /// * `sender_session_id` - Session ID of the text sender
+    /// * `epoch` - Epoch the message was encrypted under. Pass the value from
+    ///   the received packet; `None` uses the group's current epoch (correct
+    ///   for the send path only).
     ///
     /// # Returns
     /// 32-byte encryption key for this sender
@@ -1129,14 +1172,44 @@ impl MlsWrapper {
         &self,
         channel_id: String,
         sender_session_id: u32,
+        epoch: Option<u64>,
     ) -> Result<Vec<u8>, MlsError> {
-        let client = self
+        let mut client = self
             .inner
             .lock()
             .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false).into_bytes();
-        let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
-        Ok(key.to_vec())
+
+        match epoch {
+            Some(epoch) => client
+                .export_sender_key_at_epoch(&group_id, sender_session_id, epoch)
+                .map(|key| key.to_vec())
+                .map_err(Into::into),
+            None => {
+                let (key, _epoch) = client.export_sender_key(&group_id, sender_session_id)?;
+                Ok(key.to_vec())
+            }
+        }
+    }
+
+    /// Pre-derive and retain a member's text key at the current epoch.
+    ///
+    /// Call this when a member becomes visible in a channel. It guarantees a
+    /// retained key exists for them, so their first message stays decryptable
+    /// even if it races a membership change.
+    pub fn register_text_sender(
+        &self,
+        channel_id: String,
+        sender_session_id: u32,
+    ) -> Result<(), MlsError> {
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, false).into_bytes();
+        client
+            .register_sender(&group_id, sender_session_id)
+            .map_err(Into::into)
     }
 
     /// Get current epoch for a group

@@ -50,6 +50,9 @@ public class AuraNetworkClient : IAsyncDisposable
     private const byte MSG_CHANNEL_STATE = 0x13;
     private const byte MSG_TEXT_PACKET = 0x30;
     private const byte MSG_UPDATE_STATUS = 0x45;
+    private const byte MSG_CHANNEL_DELETED = 0x47;
+    private const byte MSG_MLS_RATCHET_REQUEST = 0x56;
+    private const byte MSG_MLS_RATCHET_COMMIT = 0x57;
     private const byte MSG_MLS_JOIN = 0x50;           
     private const byte MSG_MLS_COMMIT_WELCOME = 0x51; 
     private const byte MSG_MLS_CREATE_GROUP = 0x52;   
@@ -499,8 +502,51 @@ public class AuraNetworkClient : IAsyncDisposable
     public event Action<string, uint, string>? OnUserJoined; // channelId, sessionId, name
     public event Action<string, uint>? OnUserLeft;           // channelId, sessionId
     public event Action<ServerState>? OnServerSnapshot;
+    public event Action<string, string>? OnChannelDeleted; // deletedChannelId, fallbackChannelId
 
     private CancellationTokenSource? _listenCts;
+
+    /// <summary>
+    /// Session IDs we've seen in each channel, used to warm retained text keys.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<uint, byte>> _channelMembers = new();
+
+    /// <summary>
+    /// Warm a retained text key for one sender at the group's current epoch.
+    /// Deriving the key is what makes the core retain it across the next epoch
+    /// change, which is what keeps a member's first message decryptable when
+    /// their own join bumps the epoch.
+    /// </summary>
+    private void RegisterTextSender(string channelId, uint sessionId)
+    {
+        if (_mlsWrapper == null || !_mlsWrapper.IsMember(channelId, isVoice: false)) return;
+        try
+        {
+            _mlsWrapper.RegisterTextSender(channelId, sessionId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to register text sender {sessionId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Warm retained text keys for ourselves and every member we know about in
+    /// the channel. Called whenever the text group's epoch changes.
+    /// </summary>
+    private void RefreshTextSenderKeys(string channelId)
+    {
+        if (_mlsWrapper == null || !_mlsWrapper.IsMember(channelId, isVoice: false)) return;
+
+        RegisterTextSender(channelId, _userId);
+        if (_channelMembers.TryGetValue(channelId, out var members))
+        {
+            foreach (var sessionId in members.Keys)
+            {
+                RegisterTextSender(channelId, sessionId);
+            }
+        }
+    }
 
     public void StartListening()
     {
@@ -560,7 +606,15 @@ public class AuraNetworkClient : IAsyncDisposable
                     case MSG_UPDATE_STATUS: // 0x45 - User status update
                         await HandleUserStatusUpdateAsync(ct);
                         break;
-                        
+
+                    case MSG_CHANNEL_DELETED: // 0x47 - The channel we were in was deleted
+                        await HandleChannelDeletedAsync(ct);
+                        break;
+
+                    case MSG_MLS_RATCHET_REQUEST: // 0x56 - Server asks us to advance the epoch
+                        await HandleMlsRatchetRequestAsync(ct);
+                        break;
+
                     default:
                         Console.WriteLine($"[AuraClient] Unknown message type: 0x{msgType:X2}");
                         break;
@@ -614,7 +668,12 @@ public class AuraNetworkClient : IAsyncDisposable
         string name = join.DisplayName;
 
         Console.WriteLine($"[AuraClient] UserJoined: {name} (ID: {sessionId}) in Channel {channelId}");
-        
+
+        _channelMembers.GetOrAdd(channelId, _ => new ConcurrentDictionary<uint, byte>())[sessionId] = 0;
+
+        // Warm a text key for them before their join advances the epoch.
+        RegisterTextSender(channelId, sessionId);
+
         // Register remote sender for audio decryption
         if (_audioManager != null && _mlsWrapper != null)
         {
@@ -644,11 +703,42 @@ public class AuraNetworkClient : IAsyncDisposable
         uint sessionId = left.SessionId;
         
         Console.WriteLine($"[AuraClient] UserLeft: ID {sessionId} from Channel {channelId}");
-        
+
+        if (_channelMembers.TryGetValue(channelId, out var members))
+        {
+            members.TryRemove(sessionId, out _);
+        }
+
         // Remove remote sender from audio decryption
         _audioManager?.RemoveRemoteSender(sessionId);
         
         OnUserLeft?.Invoke(channelId, sessionId);
+    }
+
+    /// <summary>
+    /// Handle notification that the channel we were in has been deleted. The
+    /// server has already torn down the MLS groups and told everyone we left,
+    /// so we just drop local state and let the ViewModel move us elsewhere.
+    /// </summary>
+    private async Task HandleChannelDeletedAsync(CancellationToken ct)
+    {
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+
+        try
+        {
+            var notice = Aura.V1Alpha1.ChannelDeleted.Parser.ParseFrom(packet);
+            Console.WriteLine($"[AuraClient] Channel {notice.ChannelId} was deleted");
+
+            _channelMembers.TryRemove(notice.ChannelId, out _);
+            _textGroupReady.TryRemove(notice.ChannelId, out _);
+            _voiceGroupReady.TryRemove(notice.ChannelId, out _);
+
+            OnChannelDeleted?.Invoke(notice.ChannelId, notice.FallbackChannelId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to parse ChannelDeleted: {ex.Message}");
+        }
     }
 
     private async Task HandleChannelStateAsync(CancellationToken ct)
@@ -660,7 +750,19 @@ public class AuraNetworkClient : IAsyncDisposable
             // 3. Parse Protobuf ServerState
             var snapshot = ServerState.Parser.ParseFrom(packet);
             Console.WriteLine($"[AuraClient] ServerSnapshot: {snapshot.Channels.Count} channels, {snapshot.Profiles.Count} profiles");
-            
+
+            // Learn the full roster so text keys can be warmed for members who
+            // were already present before we connected.
+            foreach (var channel in snapshot.Channels)
+            {
+                var members = _channelMembers.GetOrAdd(channel.ChannelId, _ => new ConcurrentDictionary<uint, byte>());
+                foreach (var user in channel.Users)
+                {
+                    members[user.SessionId] = 0;
+                }
+                RefreshTextSenderKeys(channel.ChannelId);
+            }
+
             OnServerSnapshot?.Invoke(snapshot);
         }
         catch (Exception ex)
@@ -706,7 +808,9 @@ public class AuraNetworkClient : IAsyncDisposable
                 Type = MediaType.Text
             };
             
-            var key = _mlsWrapper.ExportTextKey(channelId, _userId);
+            // null epoch = derive at the group's current epoch, which is what
+            // gets stamped on the outgoing packet below.
+            var key = _mlsWrapper.ExportTextKey(channelId, _userId, null);
             var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: false);
             
             // Native Encrypt takes TextMessageRecord and returns EncryptedTextPacketRecord
@@ -758,8 +862,22 @@ public class AuraNetworkClient : IAsyncDisposable
             
             if (_mlsWrapper != null && _mlsWrapper.IsMember(channelId, isVoice: false))
             {
-                // 1. Export the correct key for this sender and epoch
-                var senderKey = _mlsWrapper.ExportTextKey(channelId, packet.SenderSessionId);
+                // 1. Export the key for the epoch this message was encrypted
+                //    under. Deriving at the group's *current* epoch instead
+                //    would silently fail for anything in flight across a
+                //    membership change.
+                byte[] senderKey;
+                try
+                {
+                    senderKey = _mlsWrapper.ExportTextKey(channelId, packet.SenderSessionId, packet.Epoch);
+                }
+                catch (MlsException.EpochUnavailable ex)
+                {
+                    // Key material for that epoch has aged out; the message is
+                    // unrecoverable rather than merely delayed.
+                    Console.WriteLine($"[AuraClient] Dropping message {packet.MessageId}: epoch {ex.epoch} no longer retained (now at {ex.current})");
+                    return;
+                }
 
                 // 2. Build the native record
                 var nativePacket = new uniffi.aura_core.EncryptedTextPacketRecord(
@@ -869,6 +987,10 @@ public class AuraNetworkClient : IAsyncDisposable
             {
                 UpdateAudioKeysFromMls(channelId);
             }
+            else
+            {
+                RefreshTextSenderKeys(channelId);
+            }
         }
         catch (Exception ex)
         {
@@ -916,10 +1038,14 @@ public class AuraNetworkClient : IAsyncDisposable
             await SendProtoRequestAsync(MSG_MLS_COMMIT_WELCOME, envelopeOut, ct);
             Console.WriteLine($"[AuraClient] Sent commit/welcome for new member {joinerSessionId}");
             
-            // Update audio keys after epoch advance
+            // Update keys after epoch advance
             if (isVoice)
             {
                 UpdateAudioKeysFromMls(channelId);
+            }
+            else
+            {
+                RefreshTextSenderKeys(channelId);
             }
         }
         catch (Exception ex)
@@ -946,8 +1072,9 @@ public class AuraNetworkClient : IAsyncDisposable
             
             var newEpoch = _mlsWrapper.ProcessCommit(channelId, isVoice, commit);
             Console.WriteLine($"[AuraClient] Processed MLS commit from {envelope.SenderId}, now at epoch {newEpoch}");
-            
+
             if (isVoice) UpdateAudioKeysFromMls(channelId);
+            else RefreshTextSenderKeys(channelId);
         }
         catch (Exception ex)
         {
@@ -979,6 +1106,7 @@ public class AuraNetworkClient : IAsyncDisposable
             trackers.GetOrAdd(channelId, _ => new TaskCompletionSource()).TrySetResult();
 
             if (isVoice) UpdateAudioKeysFromMls(channelId);
+            else RefreshTextSenderKeys(channelId);
         }
         catch (Exception ex)
         {
@@ -986,6 +1114,51 @@ public class AuraNetworkClient : IAsyncDisposable
         }
     }
     
+    /// <summary>
+    /// Handle the server asking us (as group founder) to advance the epoch.
+    /// This is the batched PFS ratchet: an empty commit rotates the group
+    /// secret so previous-epoch keys cannot decrypt future traffic.
+    /// </summary>
+    private async Task HandleMlsRatchetRequestAsync(CancellationToken ct)
+    {
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+
+        try
+        {
+            var envelope = MlsEnvelope.Parser.ParseFrom(packet);
+            string channelId = envelope.ChannelId;
+            bool isVoice = envelope.GroupType == Aura.V1Alpha1.MlsGroupType.Voice;
+
+            if (_mlsWrapper == null || _controlStream == null) return;
+            if (!_mlsWrapper.IsMember(channelId, isVoice))
+            {
+                Console.WriteLine($"[AuraClient] Ratchet requested for a group we're not in: {channelId}");
+                return;
+            }
+
+            var commit = _mlsWrapper.SelfUpdate(channelId, isVoice);
+
+            var envelopeOut = new MlsEnvelope {
+                SenderId = _userId,
+                ChannelId = channelId,
+                GroupType = envelope.GroupType,
+                Commit = ByteString.CopyFrom(commit)
+            };
+
+            await SendProtoRequestAsync(MSG_MLS_RATCHET_COMMIT, envelopeOut, ct);
+
+            var newEpoch = _mlsWrapper.CurrentEpoch(channelId, isVoice);
+            Console.WriteLine($"[AuraClient] Ratcheted {(isVoice ? "voice" : "text")} group {channelId} to epoch {newEpoch}");
+
+            if (isVoice) UpdateAudioKeysFromMls(channelId);
+            else RefreshTextSenderKeys(channelId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to handle MLS ratchet request: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Update audio sender/receiver keys from MLS.
     /// </summary>

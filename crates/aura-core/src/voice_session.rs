@@ -192,7 +192,7 @@ impl VoiceSession {
     ///
     /// Called when another member joins the channel
     pub fn add_remote_sender(&self, remote_session_id: u32) -> Result<(), VoiceSessionError> {
-        let mls = self.mls.read().unwrap();
+        let mut mls = self.mls.write().unwrap();
         let group_id = self
             .group_id
             .read()
@@ -210,7 +210,7 @@ impl VoiceSession {
 
     /// Update all remote senders' keys (after epoch advance)
     pub fn update_remote_keys(&self, remote_session_ids: &[u32]) -> Result<(), VoiceSessionError> {
-        let mls = self.mls.read().unwrap();
+        let mut mls = self.mls.write().unwrap();
         let group_id = self
             .group_id
             .read()

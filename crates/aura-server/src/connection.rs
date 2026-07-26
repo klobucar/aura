@@ -32,6 +32,8 @@ const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
 const MSG_UPDATE_PROFILE: u8 = 0x42;
 const MSG_PROFILE_UPDATED: u8 = 0x46;
+/// Server → occupants of a channel that was just deleted.
+const MSG_CHANNEL_DELETED: u8 = 0x47;
 const MSG_DELETE_CHANNEL: u8 = 0x43;
 const MSG_DELETE_USER: u8 = 0x44;
 const MSG_UPDATE_STATUS: u8 = 0x45;
@@ -39,6 +41,8 @@ const MSG_UPDATE_STATUS: u8 = 0x45;
 // MLS Protocol messages
 const MSG_MLS_JOIN: u8 = 0x50; // Client sends key package on channel join
 const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after adding member
+const MSG_MLS_RATCHET_REQUEST: u8 = 0x56; // Server asks founder to advance the epoch
+const MSG_MLS_RATCHET_COMMIT: u8 = 0x57; // Founder returns the empty commit
 
 // Security limits
 const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
@@ -745,9 +749,21 @@ impl ConnectionContext {
                     self.remote, packet.sender_session_id, packet.channel_id, packet.message_id
                 );
 
-                self.state
+                let channel_id_for_ratchet = packet.channel_id.clone();
+
+                // The relay tells us when the group has crossed its ratchet
+                // threshold; acting on it is what makes batched PFS ratcheting
+                // real rather than a counter nobody reads.
+                let should_ratchet = self
+                    .state
                     .broadcast_text_message(self.session_id, packet)
                     .await;
+
+                if should_ratchet {
+                    self.state
+                        .request_text_ratchet(channel_id_for_ratchet)
+                        .await;
+                }
             }
             MSG_CREATE_CHANNEL => {
                 let buf = self.read_frame_payload().await?;
@@ -1016,6 +1032,28 @@ impl ConnectionContext {
                     )
                     .await;
             }
+            MSG_MLS_RATCHET_COMMIT => {
+                let buf = self.read_frame_payload().await?;
+                let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
+                let channel_id = envelope.channel_id.clone();
+                let is_voice = envelope.group_type() == aura_protocol::MlsGroupType::Voice;
+
+                let Some(aura_protocol::mls_envelope::Content::Commit(commit)) = envelope.content
+                else {
+                    return Err(anyhow!("MLS ratchet envelope must contain commit"));
+                };
+
+                info!(
+                    "[{}] MLS ratchet commit for {} channel {}",
+                    self.remote,
+                    if is_voice { "voice" } else { "text" },
+                    channel_id
+                );
+
+                self.state
+                    .handle_mls_ratchet_commit(channel_id, is_voice, self.session_id, commit)
+                    .await;
+            }
             _ => {
                 // Unknown message
                 warn!("[{}] Unknown message type: 0x{:02x}", self.remote, msg_type);
@@ -1176,6 +1214,44 @@ impl ConnectionContext {
             }
             ServiceMessage::ProfileUpdated(profile) => {
                 self.send_proto_response(MSG_PROFILE_UPDATED, profile)
+                    .await?;
+            }
+            ServiceMessage::ChannelDeleted {
+                channel_id,
+                fallback_channel_id,
+            } => {
+                // Stop tracking the dead channel, otherwise the disconnect
+                // cleanup path would later try to leave a channel that no
+                // longer exists.
+                if self.current_channel_id.as_deref() == Some(channel_id.as_str()) {
+                    self.current_channel_id = None;
+                }
+
+                let notice = aura_protocol::ChannelDeleted {
+                    channel_id,
+                    fallback_channel_id,
+                };
+                self.send_proto_response(MSG_CHANNEL_DELETED, notice)
+                    .await?;
+            }
+            ServiceMessage::MlsRatchetRequest {
+                channel_id,
+                is_voice,
+            } => {
+                let envelope = aura_protocol::MlsEnvelope {
+                    sender_id: 0,
+                    channel_id,
+                    group_type: if is_voice {
+                        aura_protocol::MlsGroupType::Voice as i32
+                    } else {
+                        aura_protocol::MlsGroupType::Text as i32
+                    },
+                    epoch: 0,
+                    target_session_id: 0,
+                    target_uuid: String::new(),
+                    content: None,
+                };
+                self.send_proto_response(MSG_MLS_RATCHET_REQUEST, envelope)
                     .await?;
             }
         }

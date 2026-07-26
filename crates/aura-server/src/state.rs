@@ -110,6 +110,18 @@ pub enum ServiceMessage {
     /// A user's profile (bio, avatar, display name) changed - broadcast to everyone
     /// so other clients can refresh their local caches without a full snapshot.
     ProfileUpdated(UserProfile),
+    /// The channel this session is in was deleted. Sent only to its occupants
+    /// so they can clear their channel state and move somewhere else.
+    ChannelDeleted {
+        channel_id: String,
+        fallback_channel_id: String,
+    },
+    /// Ask the group founder to issue an empty commit, advancing the epoch for
+    /// forward secrecy. Sent when a text group crosses its ratchet threshold.
+    MlsRatchetRequest {
+        channel_id: String,
+        is_voice: bool,
+    },
 }
 
 /// Static metadata for a channel (persisted in DB)
@@ -729,6 +741,101 @@ impl ServerState {
         msg_count >= TEXT_RATCHET_MESSAGE_THRESHOLD || elapsed >= TEXT_RATCHET_TIME_THRESHOLD_SECS
     }
 
+    /// Ask a text group's founder to advance the epoch for forward secrecy.
+    ///
+    /// The server is the MLS Delivery Service and cannot commit on its own — it
+    /// can only nudge the member that owns the group. The ratchet counters are
+    /// reset up front so a burst of messages doesn't queue up a request per
+    /// message while the first one is still in flight.
+    pub async fn request_text_ratchet(&self, channel_id: String) {
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
+        let Some(group_lock) = self.text_groups.get(&group_id).map(|g| g.clone()) else {
+            return;
+        };
+
+        let founder_session_id = {
+            let mut group = group_lock.write().await;
+            // Reset before dispatching so concurrent senders don't each trigger
+            // their own request for the same threshold crossing.
+            group.message_count.store(0, Ordering::Relaxed);
+            group.last_ratchet = Instant::now();
+            group.founder_session_id
+        };
+
+        let Some(founder_session_id) = founder_session_id else {
+            return;
+        };
+
+        if let Some(founder) = self.sessions.get(&founder_session_id) {
+            info!(
+                "Asking founder {} to ratchet text group {}",
+                founder_session_id, channel_id
+            );
+            let _ = founder.sender.send(ServiceMessage::MlsRatchetRequest {
+                channel_id,
+                is_voice: false,
+            });
+        }
+    }
+
+    /// Distribute a ratchet (empty) commit to every group member but the
+    /// committer, and advance the server's epoch counter.
+    ///
+    /// Distinct from [`handle_mls_commit_welcome`](Self::handle_mls_commit_welcome):
+    /// there is no new member and no Welcome, so nothing must be added to the
+    /// member set.
+    pub async fn handle_mls_ratchet_commit(
+        &self,
+        channel_id: String,
+        is_voice: bool,
+        committer_session_id: u32,
+        commit: Vec<u8>,
+    ) {
+        let members: Vec<u32> = if is_voice {
+            let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
+            match self.voice_groups.get(&group_id) {
+                Some(group_lock) => {
+                    let mut group = group_lock.write().await;
+                    group.current_epoch += 1;
+                    group.members.iter().map(|id| *id).collect()
+                }
+                None => return,
+            }
+        } else {
+            let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
+            match self.text_groups.get(&group_id) {
+                Some(group_lock) => {
+                    let mut group = group_lock.write().await;
+                    group.current_epoch += 1;
+                    group.members.iter().map(|id| *id).collect()
+                }
+                None => return,
+            }
+        };
+
+        let mut delivered = 0;
+        for member_id in members {
+            if member_id == committer_session_id {
+                continue;
+            }
+            if let Some(session) = self.sessions.get(&member_id) {
+                let _ = session.sender.send(ServiceMessage::MlsCommit {
+                    channel_id: channel_id.clone(),
+                    is_voice,
+                    commit: commit.clone(),
+                });
+                delivered += 1;
+            }
+        }
+
+        info!(
+            "[MLS] Distributed ratchet commit for {} group {} to {} member(s)",
+            if is_voice { "voice" } else { "text" },
+            channel_id,
+            delivered
+        );
+    }
+
     /// Reset ratchet counters after a successful epoch advance.
     pub async fn reset_text_ratchet_counters(&self, channel_id: String) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
@@ -1322,6 +1429,11 @@ impl ServerState {
     }
 
     /// Delete a channel persistently.
+    ///
+    /// Occupants are evicted explicitly: they get a `UserLeft` broadcast (so
+    /// every client drops them from the roster) and a `ChannelDeleted` notice
+    /// (so their own client stops treating the dead channel as current).
+    /// Without both, occupants linger in a channel that no longer exists.
     pub async fn delete_channel_persistent(&self, channel_id: &str) -> Result<()> {
         // Update DB
         self.db.delete_channel(channel_id)?;
@@ -1329,11 +1441,15 @@ impl ServerState {
         // Update in-memory metadata
         self.channel_metadata.remove(channel_id);
 
-        // Force everyone out of the channel groups in-memory
+        // Collect occupants before tearing the groups down, so they can be
+        // notified afterwards.
         let voice_group_id = aura_protocol::make_mls_group_id(channel_id, true);
+        let mut occupants: Vec<u32> = Vec::new();
+
         if let Some(voice_group) = self.voice_groups.get(&voice_group_id) {
             let members = { voice_group.read().await.members.clone() };
             for session_id in members {
+                occupants.push(session_id);
                 self.remove_from_voice_group(channel_id.to_string(), session_id)
                     .await;
             }
@@ -1344,11 +1460,46 @@ impl ServerState {
         if let Some(text_group) = self.text_groups.get(&text_group_id) {
             let members = { text_group.read().await.members.clone() };
             for session_id in members {
+                if !occupants.contains(&session_id) {
+                    occupants.push(session_id);
+                }
                 self.remove_from_text_group(channel_id.to_string(), session_id)
                     .await;
             }
         }
         self.text_groups.remove(&text_group_id);
+
+        // Tell everyone the occupants are gone from this channel.
+        for session_id in &occupants {
+            self.broadcast_user_left(channel_id.to_string(), *session_id)
+                .await;
+        }
+
+        // Suggest the lobby as a landing spot, if the server has one.
+        let fallback_channel_id = self
+            .channel_metadata
+            .iter()
+            .find(|entry| entry.channel_type == 1)
+            .map(|entry| entry.id.clone())
+            .unwrap_or_default();
+
+        // Tell the occupants themselves that their channel is gone.
+        for session_id in &occupants {
+            if let Some(session) = self.sessions.get(session_id) {
+                let _ = session.sender.send(ServiceMessage::ChannelDeleted {
+                    channel_id: channel_id.to_string(),
+                    fallback_channel_id: fallback_channel_id.clone(),
+                });
+            }
+        }
+
+        if !occupants.is_empty() {
+            info!(
+                "Evicted {} session(s) from deleted channel {}",
+                occupants.len(),
+                channel_id
+            );
+        }
 
         // Broadcast full state update to everyone
         let snapshot = self.get_server_snapshot().await;

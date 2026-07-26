@@ -270,6 +270,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             
             _client.OnUserStatusUpdated += (sid, muted, deafened) =>
                 Dispatcher.UIThread.Post(() => HandleUserStatusUpdate(sid, muted, deafened));
+
+            _client.OnChannelDeleted += (deletedId, fallbackId) =>
+                Dispatcher.UIThread.Post(() => _ = HandleChannelDeletedAsync(deletedId, fallbackId));
             
             ConnectionStatus = "Connecting...";
             Console.WriteLine($"[ViewModel] Connecting to {ServerAddress}:{ServerPort}...");
@@ -526,6 +529,30 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Content = content,
             IsFromCurrentUser = false
         });
+    }
+
+    /// <summary>
+    /// The channel we were in was deleted. Drop it from the list and move to a
+    /// channel that still exists so we aren't left pointing at nothing.
+    /// </summary>
+    private async Task HandleChannelDeletedAsync(string deletedChannelId, string fallbackChannelId)
+    {
+        var wasCurrent = SelectedChannel?.Id == deletedChannelId;
+
+        var deleted = Channels.FirstOrDefault(c => c.Id == deletedChannelId);
+        if (deleted != null) Channels.Remove(deleted);
+
+        if (!wasCurrent) return;
+
+        SelectedChannel = null;
+        Messages.Add(new ChatMessage { Content = "This channel was deleted", System = true });
+
+        var fallback = Channels.FirstOrDefault(c => c.Id == fallbackChannelId)
+                       ?? Channels.FirstOrDefault();
+        if (fallback != null)
+        {
+            await JoinChannelAsync(fallback);
+        }
     }
 
     private void HandleUserStatusUpdate(uint sessionId, bool isMuted, bool isDeafened)

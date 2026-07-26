@@ -329,6 +329,16 @@ message DeleteChannelRequest {
     string channel_id = 1;
 }
 
+// Server → client notification that a channel the recipient was in has been
+// deleted. Sent only to that channel's occupants; everyone else learns about
+// the removal from the ServerState snapshot that follows.
+message ChannelDeleted {
+    string channel_id = 1;
+    // Channel the client should fall back to (the lobby, when one exists).
+    // Empty if the server has no suggestion, in which case the client picks.
+    string fallback_channel_id = 2;
+}
+
 // Request to delete a user/profile
 message DeleteUserRequest {
     string user_uuid = 1;
