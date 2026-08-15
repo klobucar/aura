@@ -96,7 +96,29 @@ final class TalkSegmentStore: ObservableObject {
     @Published private(set) var talkSegments: [TalkSegment] = []
 
     /// Who has the floor. Held for 1200ms past the end of their speech.
+    ///
+    /// Never us — see `localSessionId`.
     @Published private(set) var currentSpeakerId: UInt32?
+
+    /// Our own session, excluded from the current-speaker card.
+    ///
+    /// The hero answers "who has the floor", which is only ever a question
+    /// about other people — you already know when you are talking, and the
+    /// HUD's input meter says so continuously. Promoting yourself there put a
+    /// mirror next to that meter and attached a talk-share figure to it, which
+    /// read as a scold rather than information. Lanes still include you: there
+    /// the number is about balance, which is the one place it earns its keep.
+    var localSessionId: UInt32?
+
+    /// True when we are the only one talking. Distinguishes "nobody has said
+    /// anything" from "you are talking to an empty room", which want different
+    /// copy in the rail's empty state.
+    var isOnlyLocalSpeaking: Bool {
+        guard let localSessionId else { return false }
+        let open = talkSegments.filter { $0.end == nil }
+        return open.contains { $0.sessionId == localSessionId }
+            && !open.contains { $0.sessionId != localSessionId }
+    }
 
     /// Fraction of the observed window each participant spent talking.
     /// Derived; recomputed on every trim. Can exceed 1.0 in aggregate because
@@ -250,6 +272,10 @@ final class TalkSegmentStore: ObservableObject {
     /// `currentSpeakerHold`. Someone starting *while* the incumbent still has
     /// the floor does not steal it — that is the whole point of the hold.
     private func resolveCurrentSpeaker(active: Set<UInt32>, now: Date) {
+        // Our own voice never takes the floor here; someone else talking over
+        // us still does.
+        let active = active.subtracting(localSessionId.map { [$0] } ?? [])
+
         if let current = currentSpeakerId, active.contains(current) {
             holdUntil = nil
             return

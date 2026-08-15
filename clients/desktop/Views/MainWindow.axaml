@@ -687,7 +687,7 @@
                                     Padding="14,12"
                                     HorizontalAlignment="Center"
                                     IsVisible="{Binding VoiceRail.ShowEmptyState}">
-                                <TextBlock Text="No one is speaking yet"
+                                <TextBlock Text="{Binding VoiceRail.EmptyStateText}"
                                            FontSize="{StaticResource AuraFont12}"
                                            Foreground="{DynamicResource AuraTextDimBrush}"/>
                             </Border>

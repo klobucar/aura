@@ -459,14 +459,12 @@ struct ContentView: View {
         )
         .onAppear {
             // The store owns the sampling cadence; it just needs to know where
-            // the level comes from. Local capture level while you hold the
-            // floor, mixed receive level while somebody else does.
-            talkStore.levelProvider = { [weak client, weak talkStore] in
-                guard let client = client, let talkStore = talkStore else { return 0 }
-                let db = talkStore.currentSpeakerId == client.sessionId
-                    ? client.inputLevelDb
-                    : client.outputLevelDb
-                return VoiceLevel.normalized(db)
+            // the level comes from. The hero is always someone else now, so the
+            // waveform is always the mixed receive level — our own capture
+            // level belongs to the HUD's input meter, not here.
+            talkStore.levelProvider = { [weak client] in
+                guard let client else { return 0 }
+                return VoiceLevel.normalized(client.outputLevelDb)
             }
             pushSpeakingState(client: client)
         }
@@ -539,6 +537,11 @@ struct ContentView: View {
     /// remote-only by construction — it is populated from the receiver's mixer —
     /// so the local lane comes from `isLocalSpeaking` instead.
     private func pushSpeakingState(client: QuicNetworkClient) {
+        // Our session id is learned after connect, so keep the store in step
+        // rather than setting it once — until it knows, it cannot tell our lane
+        // apart from anyone else's and would put us back in the hero card.
+        talkStore.localSessionId = client.sessionId
+
         var speaking = client.activeSpeakers
         if client.isLocalSpeaking, let sessionId = client.sessionId {
             speaking.insert(sessionId)

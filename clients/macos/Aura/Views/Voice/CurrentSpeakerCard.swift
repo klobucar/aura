@@ -175,10 +175,13 @@ struct CurrentSpeakerCard: View {
     // MARK: Empty state
 
     /// A chip, never a spinner.
+    ///
+    /// Two readings, because "no one is speaking" is plainly wrong while you
+    /// are mid-sentence — the hero just does not put you in it.
     private var emptyChip: some View {
         HStack {
             Spacer()
-            Text("No one is speaking yet")
+            Text(store.isOnlyLocalSpeaking ? "No one else is speaking" : "No one is speaking yet")
                 .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12))
                 .foregroundStyle(AuraTheme.Colors.textDim)
                 .padding(.horizontal, AuraTheme.Spacing.s16)

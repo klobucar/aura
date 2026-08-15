@@ -44,6 +44,54 @@ public class TalkSegmentStoreTests
     }
 
     [Fact]
+    public void CurrentSpeaker_NeverPromotesTheLocalUser()
+    {
+        // The hero answers "who has the floor", which is only a question about
+        // other people. Watching yourself talk beside the HUD meter that
+        // already says you are live reads as a mirror, not information.
+        var (store, clock) = NewStore();
+        store.LocalSessionId = 1;
+
+        store.SetSpeaking(1, true);
+        clock.Advance(2000);
+
+        Assert.Null(store.CurrentSpeakerId);
+        Assert.True(store.IsOnlyLocalSpeaking);
+    }
+
+    [Fact]
+    public void CurrentSpeaker_RemoteSpeakerStillTakesTheFloorOverLocal()
+    {
+        // Excluding ourselves must not exclude whoever talks over us.
+        var (store, clock) = NewStore();
+        store.LocalSessionId = 1;
+
+        store.SetSpeaking(1, true);
+        clock.Advance(500);
+        store.SetSpeaking(2, true);
+        clock.Advance(500);
+
+        Assert.Equal(2u, store.CurrentSpeakerId);
+        Assert.False(store.IsOnlyLocalSpeaking);
+    }
+
+    [Fact]
+    public void IsOnlyLocalSpeaking_FalseWhenSilent()
+    {
+        var (store, clock) = NewStore();
+        store.LocalSessionId = 1;
+
+        Assert.False(store.IsOnlyLocalSpeaking);
+
+        store.SetSpeaking(1, true);
+        clock.Advance(500);
+        store.SetSpeaking(1, false);
+
+        // Stopped talking — back to "no one is speaking yet", not "no one else".
+        Assert.False(store.IsOnlyLocalSpeaking);
+    }
+
+    [Fact]
     public void CurrentSpeaker_LiveSpeakerWinsOverHeldOne()
     {
         var (store, clock) = NewStore();

@@ -67,6 +67,18 @@ public sealed class TalkSegmentStore
     private uint? _lastSpeakerId;
     private DateTime _lastSpeechEnd = DateTime.MinValue;
 
+    /// <summary>
+    /// Our own session, excluded from the current-speaker card.
+    ///
+    /// The hero answers "who has the floor", which is only ever a question
+    /// about other people — you already know when you are talking, and the
+    /// HUD's input meter says so continuously. Promoting yourself there put a
+    /// mirror next to that meter and attached a talk-share figure to it, which
+    /// read as a scold rather than information. Lanes still include you: there
+    /// the number is about balance, which is the one place it earns its keep.
+    /// </summary>
+    public uint? LocalSessionId { get; set; }
+
     public TalkSegmentStore(Func<DateTime>? clock = null)
     {
         _clock = clock ?? (() => DateTime.UtcNow);
@@ -86,12 +98,31 @@ public sealed class TalkSegmentStore
     {
         get
         {
-            var open = _segments.LastOrDefault(s => s.IsOpen);
+            // Skip our own open segment rather than the whole lookup: someone
+            // else talking over us should still take the floor.
+            var open = _segments.LastOrDefault(s => s.IsOpen && s.SessionId != LocalSessionId);
             if (open != null) return open.SessionId;
-            if (_lastSpeakerId != null && _clock() - _lastSpeechEnd < SpeakerHold) return _lastSpeakerId;
+
+            if (_lastSpeakerId != null
+                && _lastSpeakerId != LocalSessionId
+                && _clock() - _lastSpeechEnd < SpeakerHold)
+            {
+                return _lastSpeakerId;
+            }
+
             return null;
         }
     }
+
+    /// <summary>
+    /// True when we are the only one talking. Distinguishes "nobody has said
+    /// anything" from "you are talking to an empty room", which want different
+    /// copy in the rail's empty state.
+    /// </summary>
+    public bool IsOnlyLocalSpeaking =>
+        LocalSessionId != null
+        && _segments.Any(s => s.IsOpen && s.SessionId == LocalSessionId)
+        && !_segments.Any(s => s.IsOpen && s.SessionId != LocalSessionId);
 
     /// <summary>
     /// How long the current speaker has held the floor, for `speaking 0:12`.

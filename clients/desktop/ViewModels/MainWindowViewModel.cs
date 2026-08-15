@@ -560,6 +560,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         if (_client != null && IsAuthenticated)
         {
+            // Our session id is learned after connect, so keep the store in
+            // step rather than setting it once — until it knows, it cannot tell
+            // our lane apart from anyone else's and would put us back in the
+            // hero card.
+            _talkStore.LocalSessionId = _client.UserId;
+
             var speaking = IsMicEnabled && producedPacket && level >= LocalSpeechGate;
             _talkStore.SetSpeaking(_client.UserId, speaking);
         }

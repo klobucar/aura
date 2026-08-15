@@ -73,10 +73,24 @@ public partial class VoiceRailViewModel : ObservableObject
     private bool _isEmpty = true;
 
     /// <summary>
-    /// The empty chip, which must not appear next to a live speaker card during
-    /// the first second of speech (before the lanes are laid out).
+    /// The empty chip fills the hero slot whenever nobody else has the floor.
+    ///
+    /// Keyed only on the speaker card, not on whether lanes exist: talking to
+    /// an empty room gives us a lane of our own but still no hero, and leaving
+    /// a hole there looked like a rendering bug.
     /// </summary>
-    public bool ShowEmptyState => IsEmpty && CurrentSpeaker == null;
+    public bool ShowEmptyState => CurrentSpeaker == null;
+
+    /// <summary>
+    /// Two readings, because "no one is speaking" is plainly wrong while you
+    /// are mid-sentence — the hero just does not put you in it.
+    /// </summary>
+    public string EmptyStateText =>
+        IsOnlyLocalSpeaking ? "No one else is speaking" : "No one is speaking yet";
+
+    [ObservableProperty] private bool _isOnlyLocalSpeaking;
+
+    partial void OnIsOnlyLocalSpeakingChanged(bool value) => OnPropertyChanged(nameof(EmptyStateText));
 
     partial void OnIsEmptyChanged(bool value) => OnPropertyChanged(nameof(ShowEmptyState));
 
@@ -179,6 +193,8 @@ public partial class VoiceRailViewModel : ObservableObject
         TalkSegmentStore store,
         IReadOnlyDictionary<uint, double> share)
     {
+        IsOnlyLocalSpeaking = store.IsOnlyLocalSpeaking;
+
         var speakerId = store.CurrentSpeakerId;
         if (speakerId == null || !byId.TryGetValue(speakerId.Value, out var participant))
         {
