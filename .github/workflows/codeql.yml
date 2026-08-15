@@ -1,0 +1,231 @@
+name: CodeQL
+
+# Advanced setup. The reason this lives in a workflow file (rather than the
+# repo's "Default setup" UI) is that swift and csharp here both need a real
+# manual build before the analyzer can see anything useful:
+#   - Swift sources live in a nested Xcode project (clients/macos) that
+#     consumes UniFFI-generated bindings and a Rust dylib produced by
+#     scripts/build_macos.sh. Default setup couldn't drive xcodebuild from
+#     the repo root and gave up.
+#   - C# sources in clients/desktop also depend on UniFFI-generated bindings
+#     (Generated/aura_core.cs + libaura_core.so) that don't exist on a fresh
+#     checkout. Default setup's build-mode: none for csharp produced a thin,
+#     low-confidence database; running dotnet build against generated code
+#     gives the analyzer real type info.
+# Rust and actions stay on build-mode: none — they don't benefit from a
+# manual build. They live in this file because adding any advanced workflow
+# disables default setup repo-wide, so all four languages must be covered
+# here once we override.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # PRs that touch only docs/config don't need to burn macOS minutes.
+    # push-to-main and the weekly schedule cover everything regardless.
+    paths:
+      - 'clients/**'
+      - 'crates/**'
+      - 'scripts/build_macos.sh'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/**'
+  schedule:
+    # Tuesdays 07:23 UTC — offset from security.yml (Mon 06:17) and chosen
+    # off the hour to spread runner load.
+    - cron: '23 7 * * 2'
+  workflow_dispatch:
+
+# macOS minutes are 10x; cancel obsolete PR runs aggressively. Push and
+# schedule runs are kept (each commit on main produces a SARIF for the
+# code-scanning timeline).
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep this in sync with .github/workflows/ci.yml, macos.yml, desktop.yml,
+  # and vendor/opus/autogen.sh.
+  OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
+  # Match desktop.yml so generated aura_core.cs lines up with aura-core's
+  # UniFFI runtime version.
+  UNIFFI_BINDGEN_CS_TAG: v0.10.0+v0.29.4
+
+permissions: {}
+
+jobs:
+  analyze-rust:
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: rust
+          build-mode: none
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: '/language:rust'
+
+  analyze-actions:
+    name: Analyze (actions)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: actions
+          build-mode: none
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: '/language:actions'
+
+  analyze-csharp:
+    name: Analyze (csharp)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "${{ env.OPUS_MODEL_CHECKSUM }}"
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
+      - name: build Rust core
+        # libaura_core.so is what uniffi-bindgen-cs reads metadata from and
+        # what the C# runtime would load via UniFFI at runtime.
+        run: cargo build --release -p aura-core
+      - name: install uniffi-bindgen-cs
+        run: |
+          if ! command -v uniffi-bindgen-cs >/dev/null; then
+            cargo install \
+              --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+              --tag "${{ env.UNIFFI_BINDGEN_CS_TAG }}" \
+              uniffi-bindgen-cs
+          fi
+      - name: generate C# bindings
+        # Without this step, clients/desktop/Generated/aura_core.cs doesn't
+        # exist on a fresh checkout and the analyzer sees a half-broken
+        # project full of unresolved symbols.
+        run: |
+          mkdir -p clients/desktop/Generated
+          uniffi-bindgen-cs \
+            --library target/release/libaura_core.so \
+            --out-dir clients/desktop/Generated
+          cp target/release/libaura_core.so clients/desktop/Generated/
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: csharp
+          build-mode: manual
+      - name: build C# (traced)
+        # Build the app project against generated bindings under the tracer.
+        # Tests live in a separate csproj and don't ship — out of scope for
+        # security analysis.
+        working-directory: clients/desktop
+        run: |
+          dotnet restore Aura.Desktop.csproj
+          dotnet build Aura.Desktop.csproj --no-restore -c Release
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: '/language:csharp'
+
+  analyze-swift:
+    name: Analyze (swift)
+    # macos-latest (the macos-15 host) preinstalls multiple Xcodes including
+    # 26.x — see macos.yml for the full reasoning behind not switching to
+    # macos-26.
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: select latest preinstalled Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Selecting: $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "${{ env.OPUS_MODEL_CHECKSUM }}"
+      - name: install build deps
+        run: brew install protobuf
+      - name: build Rust core + Swift bindings (pre-trace)
+        # This produces clients/macos/Aura/Generated/{aura_coreFFI.h,
+        # aura_core.swift, libaura_core.{a,dylib}, module.modulemap}. We
+        # run it BEFORE codeql/init so xcodebuild under the tracer sees a
+        # fully wired-up project. The Swift compilations CodeQL needs to
+        # observe happen in the next step.
+        run: ./scripts/build_macos.sh release
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: swift
+          build-mode: manual
+      - name: build Swift app (traced)
+        # Building the Aura scheme compiles the app target only — tests
+        # are out of scope for security analysis. We use 'clean build' so
+        # nothing is incrementally skipped past the tracer; CodeQL needs
+        # to see every swiftc invocation.
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -project clients/macos/Aura.xcodeproj \
+            -scheme Aura \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: '/language:swift'
