@@ -38,6 +38,9 @@ struct ContentView: View {
     // Management views
     @State private var showingServerManagement = false
     @State private var showingProfileManagement = false
+
+    /// Identity verification (§7).
+    @StateObject private var trustSheet = TrustSheetModel()
     @StateObject private var serverManager = ServerManager()
     @StateObject private var profileManager = ProfileManager()
     
@@ -198,6 +201,33 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingProfileManagement) {
             ProfileListView()
+        }
+        // Trust sheet (§7). Presented over the channel so the room stays
+        // visible behind it, which is the point of the material.
+        .sheet(isPresented: $trustSheet.isPresented) {
+            TrustSheetView(model: trustSheet)
+        }
+    }
+
+    /// Open the trust sheet for the current channel, optionally focused on one
+    /// member — the roster and the rail's `verify key` row both arrive here
+    /// with someone in mind.
+    private func openTrustSheet(focusUuid: String? = nil) {
+        guard let client else { return }
+        let channelId = currentChannelId(for: client)
+        let name = client.channels.first { $0.id == channelId }?.name ?? ""
+
+        trustSheet.nameForUuid = { [weak client] uuid in
+            client?.displayName(forUuid: uuid)
+        }
+
+        Task {
+            await trustSheet.open(
+                mls: client.mls,
+                channelId: channelId,
+                channelName: name,
+                focusUuid: focusUuid
+            )
         }
     }
     
@@ -540,6 +570,22 @@ struct ContentView: View {
                 .offset(y: -2) // Pixel-perfect horizontal alignment with "Aura" text
             
             Spacer()
+
+            // E2EE pill (§2 header). Clicking opens the trust sheet — the
+            // badge that claims the channel is encrypted is also the way to
+            // check that claim, rather than a reassurance with nothing behind it.
+            Button { openTrustSheet() } label: {
+                Text("E2EE")
+                    .font(AuraTheme.Typography.mono(10.5))
+                    .foregroundStyle(AuraTheme.Colors.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(AuraTheme.Colors.accent.opacity(0.13)))
+                    .overlay(Capsule().strokeBorder(AuraTheme.Colors.accent.opacity(0.30), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .help("Verify who you are talking to")
+            .auraFluidHover()
 
             layoutModeToggle
 

@@ -830,6 +830,33 @@ public class QuicNetworkClient {
         sessionToUuid.removeValue(forKey: sessionId)
     }
 
+    /// The stable user id behind an ephemeral session, if we've been told it.
+    func uuidForSession(_ sessionId: UInt32) -> String? {
+        sessionToUuid[sessionId]
+    }
+
+    /// Resolve an MLS credential identity (a user UUID) to the display name the
+    /// roster knows, if any member currently in view maps to it.
+    ///
+    /// Only ever a label: identity is the key, and a name that cannot be
+    /// resolved is not a reason to trust or distrust anything.
+    func displayName(forUuid uuid: String) -> String? {
+        guard !uuid.isEmpty else { return nil }
+
+        for users in usersByChannel.values {
+            for user in users where sessionToUuid[user.id] == uuid {
+                return user.displayName
+            }
+        }
+        return nil
+    }
+
+    /// The MLS client, exposed for reading group membership during identity
+    /// verification. Member keys must come from here — the authenticated
+    /// ratchet tree — and never from the server's user list, which carries no
+    /// key material precisely so it cannot be used to assert identity.
+    var mls: MlsWrapper? { mlsWrapper }
+
     // MARK: Local Mixer Persistence
 
     private func loadLocalMixerPrefs() {
