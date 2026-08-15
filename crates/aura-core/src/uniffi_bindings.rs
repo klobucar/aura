@@ -1235,6 +1235,33 @@ impl MlsWrapper {
             false
         }
     }
+
+    /// Every member of a group with their MLS-vouched signature key.
+    ///
+    /// The only trustworthy source of other users' identity keys: they come
+    /// from the authenticated ratchet tree, not from a server-supplied list.
+    /// Feed these into `derive_pairwise_verification` to build a trust sheet.
+    pub fn group_members(
+        &self,
+        channel_id: String,
+        is_voice: bool,
+    ) -> Result<Vec<MlsGroupMemberRecord>, MlsError> {
+        let client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
+
+        Ok(client
+            .group_members(&group_id)?
+            .into_iter()
+            .map(|m| MlsGroupMemberRecord {
+                identity: m.identity,
+                signature_key: m.signature_key,
+                is_self: m.is_self,
+            })
+            .collect())
+    }
 }
 
 // Internal helper to generate group IDs (outside UniFFI export)
@@ -1314,4 +1341,105 @@ pub fn encode_update_channel(
         position,
     };
     req.encode_to_vec()
+}
+
+// ============================================================================
+// Identity verification — safety words and fingerprints
+//
+// See `crate::verification` for the construction and `docs/protocol.md`
+// § Verification Fingerprint for the spec it follows.
+// ============================================================================
+
+/// Verification error surfaced to the clients.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum VerificationError {
+    #[error("public key must be 32 bytes, got {got}")]
+    BadPublicKeyLength { got: u32 },
+    #[error("user identifier must not be empty")]
+    EmptyIdentifier,
+    #[error("key derivation failed: {message}")]
+    Kdf { message: String },
+}
+
+impl From<crate::verification::VerificationError> for VerificationError {
+    fn from(e: crate::verification::VerificationError) -> Self {
+        use crate::verification::VerificationError as Inner;
+        match e {
+            Inner::BadPublicKeyLength { got, .. } => {
+                VerificationError::BadPublicKeyLength { got: got as u32 }
+            }
+            Inner::EmptyIdentifier => VerificationError::EmptyIdentifier,
+            Inner::Kdf(message) => VerificationError::Kdf { message },
+        }
+    }
+}
+
+/// One member of an MLS group, with the key material MLS itself vouches for.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MlsGroupMemberRecord {
+    /// Credential identity — the user's UUID.
+    pub identity: String,
+    /// Ed25519 signature public key (32 bytes).
+    pub signature_key: Vec<u8>,
+    /// True for the local user's own leaf.
+    pub is_self: bool,
+}
+
+/// Everything the trust sheet renders for one pair of identities.
+///
+/// Returned as a unit because deriving it costs an scrypt run (~100 ms); the
+/// UI should make this call once when the sheet opens, not once per field.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PairwiseVerificationRecord {
+    /// Six BIP-39 words the two users read to each other.
+    pub safety_words: Vec<String>,
+    /// Local identity fingerprint, grouped hex.
+    pub local_fingerprint: String,
+    /// Remote identity fingerprint, grouped hex.
+    pub remote_fingerprint: String,
+}
+
+/// Derive the safety words and fingerprint pair for two identities.
+///
+/// Both devices produce identical output regardless of which side calls it —
+/// that symmetry is what makes comparing the words meaningful.
+///
+/// Expensive (scrypt, N=16384). Call on a background thread.
+#[uniffi::export]
+pub fn derive_pairwise_verification(
+    local_public_key: Vec<u8>,
+    local_id: String,
+    remote_public_key: Vec<u8>,
+    remote_id: String,
+) -> Result<PairwiseVerificationRecord, VerificationError> {
+    use crate::verification as v;
+
+    let pairwise =
+        v::pairwise_fingerprint(&local_public_key, &local_id, &remote_public_key, &remote_id)?;
+
+    Ok(PairwiseVerificationRecord {
+        safety_words: v::safety_words(&pairwise).to_vec(),
+        local_fingerprint: v::format_fingerprint(&v::key_fingerprint(&local_public_key)?),
+        remote_fingerprint: v::format_fingerprint(&v::key_fingerprint(&remote_public_key)?),
+    })
+}
+
+/// Per-key identity fingerprint as grouped hex: `3f8a 91c2 be04 77dd …`.
+///
+/// Cheap — a single SHA-256. Safe to call per roster row. This identifies a
+/// key; it does not prove anything on its own. Comparison out of band must use
+/// [`derive_pairwise_verification`].
+#[uniffi::export]
+pub fn identity_fingerprint(public_key: Vec<u8>) -> Result<String, VerificationError> {
+    let fp = crate::verification::key_fingerprint(&public_key)?;
+    Ok(crate::verification::format_fingerprint(&fp))
+}
+
+/// Head-and-tail identity fingerprint for tight UI: `3f8a…5503`.
+///
+/// A display truncation, never a trust decision.
+#[uniffi::export]
+pub fn identity_fingerprint_short(public_key: Vec<u8>) -> Result<String, VerificationError> {
+    let fp = crate::verification::key_fingerprint(&public_key)?;
+    Ok(crate::verification::format_fingerprint_short(&fp))
 }

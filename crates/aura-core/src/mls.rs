@@ -40,6 +40,18 @@ pub enum MlsError {
     EpochUnavailable { epoch: u64, current: u64 },
 }
 
+/// One member of an MLS group, as the ratchet tree sees them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupMember {
+    /// The credential identity — a user UUID in Aura.
+    pub identity: String,
+    /// Ed25519 signature public key, 32 bytes.
+    pub signature_key: Vec<u8>,
+    /// True for the local user's own leaf, so callers can skip verifying
+    /// themselves against themselves.
+    pub is_self: bool,
+}
+
 /// Stored identity for the MLS client
 struct ClientIdentity {
     credential_with_key: CredentialWithKey,
@@ -315,6 +327,35 @@ impl MlsClient {
     /// Check if we are a member of a group
     pub fn is_member(&self, group_id: &[u8]) -> bool {
         self.groups.contains_key(group_id)
+    }
+
+    /// Every member of a group, with the identity and signature key MLS
+    /// itself vouches for.
+    ///
+    /// This is the trustworthy source for identity verification: the keys come
+    /// out of the ratchet tree, which is authenticated, rather than from a
+    /// server-supplied user list the server could lie about. `UserInfo` on the
+    /// wire deliberately carries no key material for exactly this reason.
+    ///
+    /// The identity is whatever was passed to [`MlsClient::new`] — the user's
+    /// UUID — and pairs with the signature key as input to
+    /// [`crate::verification::pairwise_fingerprint`].
+    pub fn group_members(&self, group_id: &[u8]) -> Result<Vec<GroupMember>, MlsError> {
+        let group = self
+            .groups
+            .get(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
+
+        let own_index = group.own_leaf_index();
+
+        Ok(group
+            .members()
+            .map(|m| GroupMember {
+                identity: String::from_utf8_lossy(m.credential.serialized_content()).into_owned(),
+                signature_key: m.signature_key,
+                is_self: m.index == own_index,
+            })
+            .collect())
     }
 
     // ============================================================================

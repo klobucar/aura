@@ -19,6 +19,7 @@ pub mod text_crypto;
 pub mod tts;
 pub mod uniffi_bindings;
 pub mod vad;
+pub mod verification;
 pub mod voice_session;
 #[cfg(feature = "webrtc-audio")]
 pub mod webrtc_processor;
