@@ -69,8 +69,42 @@ public class QuicNetworkClient {
     /// Audio playback engine
     private let audioPlayback = AudioPlayback()
     
-    /// Track which users are currently speaking (for UI indicators)
+    /// Track which users are currently speaking (for UI indicators).
+    ///
+    /// This is fed from `receiver.popMixed()`, so it only ever contains
+    /// *remote* senders — our own audio never round-trips through the
+    /// receiver. Use `isLocalSpeaking` for the local talking signal.
     public var activeSpeakers: Set<UInt32> = []
+
+    /// True while the local send path is actually emitting packets, i.e. the
+    /// VAD gate is open and the frame is loud enough to be speech.
+    ///
+    /// The talk lanes need the local user's lane filled in too, and
+    /// `activeSpeakers` structurally cannot provide it (see above), so the
+    /// signal is lifted off the send path in `sendAudioDatagram` instead.
+    public var isLocalSpeaking = false
+
+    /// Level of the most recent captured frame, in dBFS, floored at -60.
+    /// Drives the Command HUD input meter.
+    public var inputLevelDb: Float = QuicNetworkClient.levelFloorDb
+
+    /// Level of the most recent mixed *received* frame, in dBFS, floored at
+    /// -60. With one remote speaker this is that speaker's level, which is
+    /// what the current-speaker waveform wants.
+    public var outputLevelDb: Float = QuicNetworkClient.levelFloorDb
+
+    /// Quietest level the meters represent; everything below reads as silence.
+    static let levelFloorDb: Float = -60
+
+    /// Local speech is judged over by the sender's VAD, but VAD is only
+    /// enabled in voice-activation mode — in always-on and PTT modes every
+    /// frame produces a packet. This floor keeps the local lane from filling
+    /// solid with room noise in those modes.
+    private static let localSpeechFloorDb: Float = -45
+
+    /// Clears `isLocalSpeaking` once frames stop being produced. Mirrors the
+    /// receive-side `speakerTimeouts` window so both lanes fringe alike.
+    private var localSpeakingTimeout: Task<Void, Never>?
 
     /// Local-only per-user playback gain, keyed by stable user UUID.
     /// 1.0 = unchanged, 0.0..2.0 is the UI-allowed range.
@@ -1877,6 +1911,11 @@ public class QuicNetworkClient {
     /// Send audio frame via QUIC datagram (or control stream for now)
     /// - Parameter rawPcmBytes: Raw PCM data from AudioCapture (Int16 samples)
     public func sendAudioDatagram(_ floatPcm: [Float]) async throws {
+        // Meter every captured frame, gated or not, so the HUD input meter
+        // still moves while VAD is holding the transmit gate shut.
+        let frameLevelDb = Self.levelDb(floatPcm)
+        if frameLevelDb != inputLevelDb { inputLevelDb = frameLevelDb }
+
         guard isAuthenticated, let sender = audioSender else { return }
 
         // Process through audio sender (Opus + Encrypt) using high-fidelity float path.
@@ -1891,7 +1930,13 @@ public class QuicNetworkClient {
             print("[QuicClient] Audio encoding error: \(error)")
             return
         }
-        
+
+        // A packet came out of the gate, so we are talking — that is the local
+        // half of the talk-lane signal.
+        if frameLevelDb > Self.localSpeechFloorDb {
+            markLocalSpeaking()
+        }
+
         // Send via QUIC datagram (unreliable, low-latency)
         guard let group = quicGroup else {
             print("[QuicClient] Cannot send audio: no connection group")
@@ -1911,7 +1956,56 @@ public class QuicNetworkClient {
         
         sequenceNumber &+= 1
     }
-    
+
+    /// Raise `isLocalSpeaking` and (re)arm the trailing timeout that lowers it.
+    private func markLocalSpeaking() {
+        if !isLocalSpeaking { isLocalSpeaking = true }
+
+        localSpeakingTimeout?.cancel()
+        localSpeakingTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000) // 500ms, matching speakerTimeouts
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.isLocalSpeaking = false
+                self?.localSpeakingTimeout = nil
+            }
+        }
+    }
+
+    /// Drop the local talking signal immediately — used when capture stops so
+    /// the lane does not keep a live segment open for another 500ms.
+    public func clearLocalSpeaking() {
+        localSpeakingTimeout?.cancel()
+        localSpeakingTimeout = nil
+        isLocalSpeaking = false
+        inputLevelDb = Self.levelFloorDb
+    }
+
+    /// RMS of a PCM frame in dBFS, floored at `levelFloorDb`.
+    private static func levelDb(_ pcm: [Float]) -> Float {
+        guard !pcm.isEmpty else { return levelFloorDb }
+        var sumSquares: Float = 0
+        for sample in pcm { sumSquares += sample * sample }
+        let rms = (sumSquares / Float(pcm.count)).squareRoot()
+        guard rms > 0 else { return levelFloorDb }
+        // Quantized to whole dB: the meters read in integers anyway, and it
+        // keeps float jitter from republishing on every 20ms frame.
+        return max(levelFloorDb, (20 * log10(rms)).rounded())
+    }
+
+    /// RMS of an Int16 PCM frame in dBFS, floored at `levelFloorDb`.
+    private static func levelDb(_ pcm: [Int16]) -> Float {
+        guard !pcm.isEmpty else { return levelFloorDb }
+        var sumSquares: Double = 0
+        for sample in pcm {
+            let normalized = Double(sample) / 32768.0
+            sumSquares += normalized * normalized
+        }
+        let rms = (sumSquares / Double(pcm.count)).squareRoot()
+        guard rms > 0 else { return levelFloorDb }
+        return max(levelFloorDb, Float((20 * log10(rms)).rounded()))
+    }
+
     /// Handle incoming audio packet and play it
     /// - Parameter packetData: Raw packet bytes from network
     private func processIncomingAudioPacket(_ packetData: Data) {
@@ -1950,6 +2044,9 @@ public class QuicNetworkClient {
                                 guard let self = self else { return }
                                 self.activeSpeakers.remove(speakerId)
                                 self.speakerTimeouts.removeValue(forKey: speakerId)
+                                if self.activeSpeakers.isEmpty {
+                                    self.outputLevelDb = Self.levelFloorDb
+                                }
                                 print("[QuicClient] Speaker \(speakerId) timed out (silence detected)")
                                 
                                 // Post notification
@@ -1962,6 +2059,12 @@ public class QuicNetworkClient {
                     }
                 }
                 
+                // Level of the mixed remote audio, for the current-speaker
+                // waveform. Per-speaker levels would need a Rust change; the
+                // mix is the honest signal available here.
+                let mixedLevelDb = Self.levelDb(result.pcm)
+                if mixedLevelDb != outputLevelDb { outputLevelDb = mixedLevelDb }
+
                 // Audio processing (immediate, not blocked by UI)
                 audioPlayback.enqueue(pcm: result.pcm)
             }

@@ -24,12 +24,17 @@ struct ContentView: View {
     @State private var channelPendingDeletion: ChannelModel?
     @State private var pttCancellable: AnyCancellable?
     @State private var pttErrorMessage: String?
-    
+    /// When the PTT key went down, for the HUD's `held 0:04` readout.
+    @State private var pttHeldSince: Date?
+
     // Chat state
     @State private var messageText = ""
-    @State private var showingChat = true
     @State private var replyingTo: ChatMessage?
-    
+
+    // Layout + voice surface state
+    @StateObject private var appSettings = AppSettings.shared
+    @StateObject private var talkStore = TalkSegmentStore()
+
     // Management views
     @State private var showingServerManagement = false
     @State private var showingProfileManagement = false
@@ -134,7 +139,7 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .frame(height: 56)
+                .frame(height: AuraTheme.Layout.headerHeight)
                 .padding(.top, 28) // Synced top offset
                 
                 // User info header
@@ -144,13 +149,14 @@ struct ContentView: View {
                 channelList(client: client)
                     .padding(.top, 8)
             }
-            .frame(minWidth: 220, maxWidth: 280)
+            .frame(width: AuraTheme.Layout.rosterWidth)
             .background(VisualEffectBlur(auraMaterial: .sidebar, blendingMode: .withinWindow).opacity(0.8))
+            .navigationSplitViewColumnWidth(AuraTheme.Layout.rosterWidth)
         } detail: {
             // Main content area
             ZStack(alignment: .bottom) {
-                channelDetailView(client: client)
-                
+                channelDetailView(client: client, identity: identity)
+
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -298,32 +304,219 @@ struct ContentView: View {
             SettingsView(settings: audioSettings, ttsManager: tts)
         }
         .onAppear {
-            if client.isConnected && client.currentChannelId == nil, let lobbyId = lobbyId {
-                switchChannel(to: lobbyId, client: client)
-            }
+            autoJoinLobbyIfNeeded(client: client)
         }
+        // The channel list is empty until the ServerState snapshot lands after
+        // auth, which is usually *after* this view first appears — so onAppear
+        // alone would find no lobby to join and never fire again, leaving
+        // currentChannelId nil. Nothing looks wrong (the header falls back to
+        // the first channel) but chat is filtered on currentChannelId, so every
+        // message silently vanishes. Re-check whenever the roster arrives.
+        .onChange(of: client.channels) { _, _ in
+            autoJoinLobbyIfNeeded(client: client)
+        }
+        .onChange(of: client.isConnected) { _, _ in
+            autoJoinLobbyIfNeeded(client: client)
+        }
+    }
+
+    /// Join the lobby once we are connected and know what channels exist.
+    /// Safe to call repeatedly — `switchChannel` no-ops once we are in a
+    /// channel, and this does nothing until the roster is known.
+    private func autoJoinLobbyIfNeeded(client: QuicNetworkClient) {
+        guard client.isConnected, client.currentChannelId == nil else { return }
+        guard let target = client.channels.first(where: { $0.isLobby })?.id
+            ?? client.channels.first?.id
+        else { return }
+        switchChannel(to: target, client: client)
     }
 
     
     // MARK: - Channel Detail View
     
     @ViewBuilder
-    private func channelDetailView(client: QuicNetworkClient) -> some View {
-        VStack(spacing: 0) {
-            channelHeader(client: client)
-            
-            Divider().opacity(0.1)
-            
-            HSplitView {
-                voiceStatusPanel(client: client)
-                
-                if showingChat {
-                    chatPanel(client: client)
+    private func channelDetailView(client: QuicNetworkClient, identity: UserIdentity) -> some View {
+        // Each column carries its own 52px header so the two line up into one
+        // unified toolbar with the divider running through it, as in the mock.
+        channelColumns(client: client, identity: identity)
+    }
+
+    // MARK: - Channel Columns
+    //
+    // Chat-first: chat flex · voice rail 336. Voice-focus: voice flex · chat
+    // 320. Only the two widths animate; the roster is untouched by the swap.
+
+    /// The two swappable columns of the channel window.
+    private enum ChannelColumn: Hashable {
+        case chat
+        case voice
+    }
+
+    private var layoutMode: AuraLayoutMode { appSettings.layoutMode }
+
+    /// Floors for a cramped window — the column that is supposed to be wide
+    /// keeps at least this much before the other one starts giving ground.
+    private static let minChatWidth: CGFloat = 280
+    private static let minRailWidth: CGFloat = 300
+
+    private var columnOrder: [ChannelColumn] {
+        layoutMode == .chatFirst ? [.chat, .voice] : [.voice, .chat]
+    }
+
+    @ViewBuilder
+    private func channelColumns(client: QuicNetworkClient, identity: UserIdentity) -> some View {
+        GeometryReader { geometry in
+            // Both widths are concrete numbers so the spring has something to
+            // interpolate; handing one column a nil frame and letting the
+            // stack decide would snap instead of glide. The narrow column
+            // yields first on a cramped window so neither ever hits zero.
+            let total = geometry.size.width
+            let chatWidth: CGFloat = layoutMode == .chatFirst
+                ? max(0, total - min(AuraTheme.Layout.voiceRailWidth, max(0, total - Self.minChatWidth)))
+                : min(AuraTheme.Layout.chatNarrowWidth, max(0, total - Self.minRailWidth))
+            let voiceWidth = max(0, total - chatWidth)
+
+            HStack(spacing: 0) {
+                // ForEach over the order — rather than an if/else — so each
+                // column keeps its identity across the swap. That is what
+                // preserves the chat scroll position the handoff asks for.
+                ForEach(columnOrder, id: \.self) { column in
+                    switch column {
+                    case .chat:
+                        chatColumn(client: client)
+                            .frame(width: chatWidth)
+                    case .voice:
+                        voiceRail(client: client, identity: identity)
+                            .frame(width: voiceWidth)
+                            // Seam between the two columns, on whichever side
+                            // chat happens to be.
+                            .overlay(alignment: layoutMode == .chatFirst ? .leading : .trailing) {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.08))
+                                    .frame(width: 1)
+                            }
+                    }
                 }
             }
+            .animation(AuraTheme.Motion.modeSwap, value: layoutMode)
         }
     }
-    
+
+    @ViewBuilder
+    private func chatColumn(client: QuicNetworkClient) -> some View {
+        VStack(spacing: 0) {
+            channelHeader(client: client)
+
+            Divider().opacity(0.1)
+
+            chatPanel(client: client)
+        }
+    }
+
+    @ViewBuilder
+    private func voiceRail(client: QuicNetworkClient, identity: UserIdentity) -> some View {
+        VoiceRailView(
+            store: talkStore,
+            client: client,
+            context: voiceContext(client: client, identity: identity),
+            actions: VoiceRailActions(
+                toggleMic: { toggleMic(client: client) },
+                toggleDeafen: { toggleDeafen(client: client) },
+                localVolume: { client.localVolume(for: $0) },
+                setLocalVolume: { client.setLocalVolume(sessionId: $0, volume: $1) }
+            ),
+            mode: layoutMode
+        )
+        .onAppear {
+            // The store owns the sampling cadence; it just needs to know where
+            // the level comes from. Local capture level while you hold the
+            // floor, mixed receive level while somebody else does.
+            talkStore.levelProvider = { [weak client, weak talkStore] in
+                guard let client = client, let talkStore = talkStore else { return 0 }
+                let db = talkStore.currentSpeakerId == client.sessionId
+                    ? client.inputLevelDb
+                    : client.outputLevelDb
+                return VoiceLevel.normalized(db)
+            }
+            pushSpeakingState(client: client)
+        }
+        .onChange(of: client.activeSpeakers) { _, _ in
+            pushSpeakingState(client: client)
+        }
+        .onChange(of: client.isLocalSpeaking) { _, _ in
+            pushSpeakingState(client: client)
+        }
+        .onChange(of: client.currentChannelId) { _, _ in
+            // A different channel is a different conversation; the lanes must
+            // not carry the previous room's history over.
+            talkStore.reset()
+        }
+        .onChange(of: hotkeyManager.isPTTActive) { _, isActive in
+            pttHeldSince = isActive ? Date() : nil
+        }
+    }
+
+    /// Everything the voice surface needs, gathered in one place.
+    private func voiceContext(client: QuicNetworkClient, identity: UserIdentity) -> VoiceRailContext {
+        let localAvatar = client.sessionId
+            .flatMap { client.profiles[$0]?.avatarData }
+            .flatMap { $0.isEmpty ? nil : $0 }
+
+        var participants: [VoiceParticipant] = []
+        if let sessionId = client.sessionId {
+            participants.append(VoiceParticipant(
+                id: sessionId,
+                displayName: identity.displayName,
+                avatarData: localAvatar,
+                isLocal: true,
+                isMuted: !isMicEnabled,
+                isDeafened: isDeafened,
+                isDisconnected: false
+            ))
+        }
+        let currentId = currentChannelId(for: client)
+        for user in client.usersByChannel[currentId] ?? [] {
+            participants.append(VoiceParticipant(
+                id: user.id,
+                displayName: user.displayName,
+                avatarData: user.avatarData,
+                isLocal: false,
+                isMuted: user.isMuted,
+                isDeafened: user.isDeafened,
+                isDisconnected: user.isDisconnected
+            ))
+        }
+
+        let isPTT = audioSettings.transmissionMode == .pushToTalk
+        let transmissionLabel = isPTT
+            ? (audioSettings.pttHotkey?.displayString ?? "unset")
+            : audioSettings.transmissionMode.displayName.lowercased()
+
+        return VoiceRailContext(
+            participants: participants,
+            latencyMs: client.latencyMs,
+            isReconnecting: !client.isConnected,
+            isMicEnabled: isMicEnabled,
+            isDeafened: isDeafened,
+            isPTTHeld: hotkeyManager.isPTTActive,
+            pttHeldSince: pttHeldSince,
+            transmissionLabel: transmissionLabel,
+            isPushToTalk: isPTT
+        )
+    }
+
+    /// Feeds both talking sources into the segment store. `activeSpeakers` is
+    /// remote-only by construction — it is populated from the receiver's mixer —
+    /// so the local lane comes from `isLocalSpeaking` instead.
+    private func pushSpeakingState(client: QuicNetworkClient) {
+        var speaking = client.activeSpeakers
+        if client.isLocalSpeaking, let sessionId = client.sessionId {
+            speaking.insert(sessionId)
+        }
+        talkStore.setSpeaking(speaking)
+    }
+
+
     @ViewBuilder
     private func channelHeader(client: QuicNetworkClient) -> some View {
         let channel = currentChannel(for: client)
@@ -347,20 +540,9 @@ struct ContentView: View {
                 .offset(y: -2) // Pixel-perfect horizontal alignment with "Aura" text
             
             Spacer()
-            
-            // Toggle chat button
-            Button(action: { 
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    showingChat.toggle()
-                }
-            }) {
-                Image(systemName: showingChat ? "bubble.left.fill" : "bubble.left")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(showingChat ? AuraTheme.Colors.primary : Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .auraFluidHover()
-            
+
+            layoutModeToggle
+
             // User count badge
             Text("\(userCount)")
                 .font(.system(size: 10, weight: .bold))
@@ -370,150 +552,29 @@ struct ContentView: View {
                 .auraGlass(cornerRadius: 10)
         }
         .padding(.horizontal, 16)
-        .frame(height: 56)
+        .frame(height: AuraTheme.Layout.headerHeight)
         .padding(.top, 28) // Synced with sidebar header at 28
         .background(VisualEffectBlur(auraMaterial: .header, blendingMode: .withinWindow))
     }
     
-    /// Compact round-trip latency indicator.
-    /// `nil` latency (haven't heard back yet) reads as "…",
-    /// <80ms = green, <200ms = yellow, >=200ms = red.
-    @ViewBuilder
-    private func latencyPill(client: QuicNetworkClient) -> some View {
-        let ms = client.latencyMs
-        let color: Color = {
-            guard let ms = ms else { return .secondary }
-            if ms < 80 { return .green }
-            if ms < 200 { return .yellow }
-            return .red
-        }()
-        HStack(spacing: 4) {
-            Image(systemName: "network")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(color)
-            Text(ms.map { "\($0) ms" } ?? "… ms")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
+    /// Flips the channel window between Chat-first and Voice-focus. The icon
+    /// shows the mode you are in, following the header's existing idiom.
+    private var layoutModeToggle: some View {
+        Button {
+            withAnimation(AuraTheme.Motion.modeSwap) {
+                appSettings.toggleLayoutMode()
+            }
+        } label: {
+            Image(systemName: layoutMode.iconName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(AuraTheme.Colors.primary)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Capsule().fill(Color.white.opacity(0.05)))
-        .help("Round-trip to server")
+        .buttonStyle(.plain)
+        .auraFluidHover()
+        .keyboardShortcut("v", modifiers: [.command, .option])
+        .help("Switch to \(layoutMode.other.displayName) layout (⌘⌥V)")
     }
 
-    private func voiceStatusPanel(client: QuicNetworkClient) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
-            
-            ZStack {
-                // Outer glow - smaller and more subtle
-                Circle()
-                    .fill(isMicEnabled ? AuraTheme.Colors.accent.opacity(0.12) : Color.white.opacity(0.03))
-                    .frame(width: 120, height: 120)
-                    .blur(radius: 15)
-                
-                // Refined glass ring
-                Circle()
-                    .stroke(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.2), Color.white.opacity(0.05)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-                    .frame(width: 100, height: 100)
-                
-                if !isMicEnabled {
-                    Circle()
-                        .fill(Color.primary.opacity(0.05))
-                        .frame(width: 80, height: 80)
-                        .auraGlass(cornerRadius: 40, material: .ultraThin)
-                } else {
-                    Circle()
-                        .fill(AuraTheme.Gradients.lushMint)
-                        .frame(width: 80, height: 80)
-                        .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.accent))
-                }
-                
-                Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
-                    .font(.system(size: 32, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: isMicEnabled)
-            
-            VStack(spacing: 8) {
-                Text(isDeafened ? "Deafened" : (isMicEnabled ? "Transmitting" : "Muted"))
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(isDeafened ? Color.secondary : Color.primary)
-
-                HStack(spacing: 6) {
-                    if isMicEnabled && !isDeafened {
-                        HStack(spacing: 4) {
-                            Circle().fill(Color.green).frame(width: 6, height: 6)
-                            Text("\(audioCapture.packetsSent) pkts")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.white.opacity(0.05)))
-                    } else if isDeafened {
-                        Text("You cannot hear or speak")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary.opacity(0.7))
-                    } else {
-                        Text("Your audio is currently private")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary.opacity(0.7))
-                    }
-
-                    latencyPill(client: client)
-                }
-            }
-            
-            // Lush Control Duo: Compact Icon Capsule
-            HStack(spacing: 0) {
-                // Mic Toggle
-                Button(action: { toggleMic(client: client) }) {
-                    Image(systemName: isMicEnabled ? "mic.fill" : "mic.slash.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(isMicEnabled ? .white : Color.secondary)
-                        .frame(width: 44, height: 42)
-                        .background(
-                            isMicEnabled ? 
-                            AnyShapeStyle(AuraTheme.Gradients.lushIndigo) : 
-                            AnyShapeStyle(Color.primary.opacity(0.05))
-                        )
-                        .clipShape(.rect(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .help(isMicEnabled ? "Mute" : "Unmute")
-                
-                Divider()
-                    .frame(height: 20)
-                    .padding(.horizontal, 8)
-                
-                // Deafen Toggle
-                Button(action: { toggleDeafen(client: client) }) {
-                    Image(systemName: isDeafened ? "headphones.slash" : "headphones")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(isDeafened ? .white : Color.secondary)
-                        .frame(width: 44, height: 42)
-                        .background(isDeafened ? Color.red.opacity(0.6) : Color.primary.opacity(0.05))
-                        .clipShape(.rect(cornerRadius: 10))
-                }
-                .buttonStyle(.plain)
-                .help(isDeafened ? "Undeafen" : "Deafen")
-            }
-            .padding(8)
-            .auraGlass(cornerRadius: 16)
-            .auraActivePulse(isActive: isMicEnabled)
-            
-            Spacer()
-        }
-        .frame(minWidth: 200)
-    }
     @ViewBuilder
     private func chatPanel(client: QuicNetworkClient) -> some View {
         let currentMessages = computedChatMessages(client: client)
@@ -555,7 +616,6 @@ struct ContentView: View {
             
             messageInputArea(client: client)
         }
-        .frame(minWidth: 250)
         .background(AuraTheme.Colors.background.opacity(0.5))
         .onChange(of: client.receivedMessages) { oldValue, newValue in
             let newMsgs = newValue.filter { newMsg in oldValue.first(where: { $0.id == newMsg.id }) == nil }
@@ -720,8 +780,15 @@ struct ContentView: View {
     // MARK: - Helpers
     
     private func currentChannel(for client: QuicNetworkClient) -> ChannelModel? {
-        let channelId = client.currentChannelId ?? client.channels.first?.id ?? "0"
+        let channelId = currentChannelId(for: client)
         return client.channels.first { $0.id == channelId }
+    }
+
+    private func currentChannelId(for client: QuicNetworkClient) -> String {
+        client.currentChannelId
+            ?? client.channels.first(where: { $0.isLobby })?.id
+            ?? client.channels.first?.id
+            ?? "0"
     }
     
     private func switchChannel(to channelId: String, client: QuicNetworkClient) {
@@ -764,6 +831,7 @@ struct ContentView: View {
                 pttCancellable = nil
                 hotkeyManager.unregisterHotkey()
                 audioCapture.stop()
+                client.clearLocalSpeaking()
                 isMicEnabled = false
                 client.isMuted = true
                 Task { await client.updateStatus(isMuted: true, isDeafened: isDeafened) }
@@ -794,6 +862,7 @@ struct ContentView: View {
                             }
                         } else {
                             audioCapture?.stop()
+                            client.clearLocalSpeaking()
                         }
                     }
                 isMicEnabled = true
@@ -805,6 +874,7 @@ struct ContentView: View {
             // Always transmit when enabled
             if isMicEnabled {
                 audioCapture.stop()
+                client.clearLocalSpeaking()
                 isMicEnabled = false
                 client.isMuted = true
             } else {
@@ -822,6 +892,7 @@ struct ContentView: View {
             // VAD mode - audio capture with voice detection
             if isMicEnabled {
                 audioCapture.stop()
+                client.clearLocalSpeaking()
                 isMicEnabled = false
                 client.isMuted = true
             } else {
@@ -859,25 +930,35 @@ struct ContentView: View {
     
     private func disconnect() {
         audioCapture.stop()
+        client?.clearLocalSpeaking()
         client?.disconnect()
         client = nil
         identity = nil
         isConnected = false
         isMicEnabled = false
         messageText = ""
+        talkStore.reset()
     }
     
     private func sendMessage(client: QuicNetworkClient) {
         guard !messageText.isEmpty else { return }
         
+        // Without a channel there is nowhere to put the message: the optimistic
+        // copy would be filed under a placeholder id that the chat filter never
+        // matches, so it would vanish on send. Say so instead of losing it.
+        guard let channelId = client.currentChannelId else {
+            client.systemEvents.append(
+                SystemEvent(content: "Not in a channel yet — message not sent", channelId: "0"))
+            return
+        }
+
         let content = messageText
         let replying = replyingTo
         messageText = "" // Clear immediately for UX
         replyingTo = nil // Clear reply state
         let timestamp = Date()
         let sessionId = client.sessionId ?? 0
-        let channelId = client.currentChannelId ?? "0"
-        
+
         // Use UUID message ID
         let messageId = "msg_\(UUID().uuidString)"
         
