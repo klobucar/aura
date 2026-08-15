@@ -1,0 +1,187 @@
+<!-- Shared control styles built on the design tokens. Fluent idioms only:
+     flat panels with a single 1px rim, `white @ 6%` hover with no scale,
+     8/6/4 radii, accent-underlined TextBox. -->
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================ Type ============================ -->
+
+    <!-- Mono is load-bearing: numerics, fingerprints, keycaps, section labels. -->
+    <Style Selector="TextBlock.mono">
+        <Setter Property="FontFamily" Value="{StaticResource AuraMonoFontFamily}"/>
+    </Style>
+    <Style Selector="SelectableTextBlock.mono">
+        <Setter Property="FontFamily" Value="{StaticResource AuraMonoFontFamily}"/>
+    </Style>
+
+    <!-- `ROSTER · 7 ONLINE`, `LAST 3 MIN`, `SILENT`, `INPUT` -->
+    <Style Selector="TextBlock.monoLabel">
+        <Setter Property="FontFamily" Value="{StaticResource AuraMonoFontFamily}"/>
+        <Setter Property="FontSize" Value="{StaticResource AuraMono10}"/>
+        <Setter Property="LetterSpacing" Value="{StaticResource AuraMonoLabelTracking}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextDimBrush}"/>
+    </Style>
+
+    <Style Selector="TextBlock.title">
+        <Setter Property="FontSize" Value="{StaticResource AuraFont14}"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="LetterSpacing" Value="-0.14"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+    </Style>
+
+    <!-- ========================== Surfaces ========================== -->
+
+    <!-- Tinted panel: the rail / stage only. Never glass on glass. -->
+    <Style Selector="Border.panel">
+        <Setter Property="Background" Value="{DynamicResource AuraPanelFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPanelBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
+    </Style>
+
+    <!-- Inset well for segmented controls and meters -->
+    <Style Selector="Border.well">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+    </Style>
+
+    <!-- Mono badge / pill -->
+    <Style Selector="Border.badge">
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusBadge}"/>
+        <Setter Property="Padding" Value="7,2"/>
+    </Style>
+
+    <!-- ============================ Rows ============================ -->
+
+    <!-- Channel / member / silent rows. Hover is a white @ 6% overlay with no
+         scale — the desktop translation of macOS's auraFluidHover. -->
+    <Style Selector="Button.row">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
+        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Padding" Value="11,8"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.row /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Transitions">
+            <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.12"/>
+            </Transitions>
+        </Setter>
+    </Style>
+    <Style Selector="Button.row:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+    <Style Selector="Button.row:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+
+    <!-- Flat icon button (header toggles, HUD segments, attach) -->
+    <Style Selector="Button.icon">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+        <Setter Property="Padding" Value="8,6"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextDimBrush}"/>
+    </Style>
+    <Style Selector="Button.icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+
+    <!-- ===================== Command HUD segments ==================== -->
+
+    <!-- Mic / deafen pair. The active segment is 42×34 on the brand gradient;
+         inactive is a textDim glyph on nothing. macOS glows here; on desktop the
+         gradient fill alone carries the state. -->
+    <Style Selector="ToggleButton.hudSegment">
+        <Setter Property="Width" Value="42"/>
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+        <Setter Property="HorizontalContentAlignment" Value="Center"/>
+        <Setter Property="VerticalContentAlignment" Value="Center"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="ToggleButton.hudSegment /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+    </Style>
+    <Style Selector="ToggleButton.hudSegment:checked /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+    </Style>
+    <Style Selector="ToggleButton.hudSegment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+    <Style Selector="ToggleButton.hudSegment:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+    </Style>
+
+    <!-- ========================= Text input ========================= -->
+
+    <!-- Mapping table: TextBox with a 2px accent underline on focus. -->
+    <Style Selector="TextBox.aura">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FontSize" Value="{StaticResource AuraFont13}"/>
+        <Setter Property="Padding" Value="10,9"/>
+    </Style>
+    <Style Selector="TextBox.aura /template/ Border#PART_BorderElement">
+        <Setter Property="BorderThickness" Value="0,0,0,2"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+    </Style>
+    <Style Selector="TextBox.aura:focus /template/ Border#PART_BorderElement">
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraAccentBrush}"/>
+    </Style>
+
+    <!-- ========================= Animations ========================= -->
+
+    <!-- Speaking ring: 1.4s ease-in-out, opacity 0.35 -> 0.85, scale 1 -> 1.05 -->
+    <Style Selector="Border.pulseRing">
+        <Setter Property="RenderTransformOrigin" Value="50%,50%"/>
+        <Style.Animations>
+            <Animation Duration="0:0:1.4" IterationCount="INFINITE" Easing="SineEaseInOut">
+                <KeyFrame Cue="0%">
+                    <Setter Property="Opacity" Value="0.35"/>
+                    <Setter Property="ScaleTransform.ScaleX" Value="1"/>
+                    <Setter Property="ScaleTransform.ScaleY" Value="1"/>
+                </KeyFrame>
+                <KeyFrame Cue="50%">
+                    <Setter Property="Opacity" Value="0.85"/>
+                    <Setter Property="ScaleTransform.ScaleX" Value="1.05"/>
+                    <Setter Property="ScaleTransform.ScaleY" Value="1.05"/>
+                </KeyFrame>
+                <KeyFrame Cue="100%">
+                    <Setter Property="Opacity" Value="0.35"/>
+                    <Setter Property="ScaleTransform.ScaleX" Value="1"/>
+                    <Setter Property="ScaleTransform.ScaleY" Value="1"/>
+                </KeyFrame>
+            </Animation>
+        </Style.Animations>
+    </Style>
+
+    <!-- Mode swap: only the column widths move (cubic ease-out 300ms). -->
+    <Style Selector="Border.modeColumn">
+        <Setter Property="Transitions">
+            <Transitions>
+                <DoubleTransition Property="Width" Duration="0:0:0.3" Easing="CubicEaseOut"/>
+            </Transitions>
+        </Setter>
+    </Style>
+
+    <!-- Content that only exists in one mode cross-fades over 160ms. -->
+    <Style Selector=":is(Control).modeFade">
+        <Setter Property="Transitions">
+            <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.16"/>
+                <DoubleTransition Property="Width" Duration="0:0:0.16"/>
+                <DoubleTransition Property="Height" Duration="0:0:0.16"/>
+            </Transitions>
+        </Setter>
+    </Style>
+
+</Styles>
