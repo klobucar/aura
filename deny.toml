@@ -27,6 +27,28 @@ ignore = [
     # hax-lib-macros (libcrux's formal-verification tooling) and is not linked
     # into the shipped binary. No runtime exposure.
     { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via hax-lib; not in shipped binary" },
+    # libcrux-secrets' aarch64 cswap/select bug lives in libcrux-traits'
+    # aead/kem/ecdh trait modules. libcrux-sha3 (our only path to
+    # libcrux-traits) uses just its unrelated `digest` module. The other path
+    # to libcrux-secrets is via libcrux-aead 0.0.7 (same pin as -0124) through
+    # the optional hpke-rs-libcrux PQ backend, which openmls_rust_crypto does
+    # not select (it uses hpke-rs-rust-crypto). `cargo update -p
+    # libcrux-secrets --precise 0.0.6` confirms the pin can't move without an
+    # hpke-rs/openmls_rust_crypto release.
+    { id = "RUSTSEC-2026-0212", reason = "vulnerable cswap/select path not reachable; fix pinned out by libcrux-aead 0.0.7 / hpke-rs" },
+    # libcrux-sha3's incremental-squeeze bug needs multiple squeeze() calls
+    # with a non-RATE-aligned length; our only call site (hpke-rs's
+    # derive_key_pair, for XWingDraft06/MlKem768/MlKem1024) uses the one-shot
+    # shake256::<N>() function instead. That call site is itself dead code —
+    # aura's ciphersuite is MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
+    # (crates/aura-core/src/mls.rs), a classical X25519 DH-KEM, so the
+    # PQ/hybrid KEM branch that reaches libcrux-sha3 never executes.
+    { id = "RUSTSEC-2026-0207", reason = "hpke-rs uses one-shot shake256(), not incremental squeeze; call site is dead code for our X25519 ciphersuite" },
+    # Same call site as -0207. The AVX2 SHAKE-256 panic needs an output
+    # length > 32 and not divisible by 8; hpke-rs only ever requests 32 or 64
+    # bytes there (both divisible by 8), and the call site is unreachable for
+    # the same reason (classical X25519 ciphersuite, not PQ/hybrid KEM).
+    { id = "RUSTSEC-2026-0208", reason = "call site always requests 8-divisible lengths (32/64B) and is dead code for our X25519 ciphersuite" },
 ]
 
 [bans]
