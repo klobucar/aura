@@ -124,6 +124,63 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// <summary>The voice rail (§3) / stage (§4).</summary>
     public VoiceRailViewModel VoiceRail { get; } = new();
 
+    /// <summary>
+    /// Backing store for everything persisted, held rather than rebuilt so the
+    /// <see cref="TrustStore"/> has somewhere durable to write.
+    /// </summary>
+    private AppSettings _settings = new();
+
+    private TrustStore? _trustStore;
+
+    /// <summary>Verification bookkeeping; see <see cref="TrustStore"/>.</summary>
+    private TrustStore Trust => _trustStore ??= new TrustStore(_settings, SaveSettings);
+
+    /// <summary>The trust sheet (§7), opened over the channel.</summary>
+    public TrustSheetViewModel TrustSheet => _trustSheet ??=
+        new TrustSheetViewModel(Trust, NameForUuid);
+
+    private TrustSheetViewModel? _trustSheet;
+
+    /// <summary>
+    /// Resolve an MLS credential identity (a user UUID) to the display name the
+    /// roster knows. Names are labels for a key here, never the thing trusted.
+    /// </summary>
+    private string? NameForUuid(string uuid)
+    {
+        if (_client == null || string.IsNullOrEmpty(uuid)) return null;
+
+        foreach (var channel in Channels)
+        {
+            foreach (var user in channel.Users)
+            {
+                if (_client.UuidForSession(user.Id) == uuid) return user.Name;
+            }
+        }
+
+        return _client.UserUuid == uuid ? DisplayName : null;
+    }
+
+    /// <summary>
+    /// Open the trust sheet for the current channel. Reached from the roster,
+    /// and from the rail's `verify key` row with that member preselected.
+    /// </summary>
+    [RelayCommand]
+    private async Task OpenTrustSheet(string? focusUuid)
+    {
+        var mls = _client?.Mls;
+        if (mls == null)
+        {
+            TrustSheet.IsOpen = true;
+            TrustSheet.Error = "Connect to a channel before verifying identities.";
+            return;
+        }
+
+        var channel = Channels.FirstOrDefault(c => c.IsCurrent);
+        if (channel == null) return;
+
+        await TrustSheet.OpenAsync(mls, channel.Id, channel.Name, focusUuid);
+    }
+
     public bool IsChatFirst => LayoutMode == LayoutMode.ChatFirst;
     public bool IsVoiceFocus => LayoutMode == LayoutMode.VoiceFocus;
 
@@ -347,6 +404,13 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Theme = AuraThemeManager.ToSettingValue(AuraThemeManager.Current),
             LocalVolumes = _localVolumes,
             LocallyMutedUsers = _locallyMutedUsers,
+            // Carried across from the loaded settings rather than rebuilt: the
+            // TrustStore mutates these in place, and rebuilding from scratch
+            // here would silently discard every verification the user has made.
+            VerifiedKeys = _settings.VerifiedKeys,
+            BlockedKeys = _settings.BlockedKeys,
+            KnownUserKeys = _settings.KnownUserKeys,
+            KeyChangedAt = _settings.KeyChangedAt,
         }.Save();
     }
 
@@ -401,6 +465,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         // Restore persisted audio settings (defaults if none saved). Suppress
         // saves while loading so setting each property doesn't rewrite the file.
         var settings = AppSettings.Load();
+        _settings = settings;
         _suppressSettingsSave = true;
         RnnoiseEnabled = settings.RnnoiseEnabled;
         AecEnabled = settings.AecEnabled;

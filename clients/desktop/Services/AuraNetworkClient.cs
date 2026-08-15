@@ -82,6 +82,19 @@ public class AuraNetworkClient : IAsyncDisposable
     public bool IsConnected => _connection != null;
 
     /// <summary>
+    /// Our own stable user id — the same value our MLS credential carries, so
+    /// it matches what <see cref="Mls"/> reports for our own leaf.
+    /// </summary>
+    public string? UserUuid => _userUuid;
+
+    /// <summary>
+    /// The MLS client, exposed for reading group membership during identity
+    /// verification. Member keys must come from here — the authenticated
+    /// ratchet tree — and never from the server's user list.
+    /// </summary>
+    internal MlsWrapper? Mls => _mlsWrapper;
+
+    /// <summary>
     /// The channel's current MLS text-group epoch, for the `E2EE · epoch N`
     /// badge. Null when there is no group yet (not joined, or MLS unavailable).
     /// </summary>

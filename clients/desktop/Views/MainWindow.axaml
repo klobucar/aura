@@ -942,5 +942,236 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- ================================================================
+             Trust sheet (§7) — makes E2EE legible.
+
+             A sheet over the channel rather than a separate window: the room
+             stays visible behind it, which is the point of the material. The
+             scrim also swallows clicks, so the sheet is modal without a dialog.
+             ================================================================ -->
+        <Border IsVisible="{Binding TrustSheet.IsOpen}"
+                Background="#99000000">
+            <Border Width="560"
+                    MaxHeight="720"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="{StaticResource AuraSpace18}">
+                <DockPanel LastChildFill="True">
+
+                    <!-- Header -->
+                    <StackPanel DockPanel.Dock="Top" Spacing="{StaticResource AuraSpace3}">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Grid.Column="0"
+                                       Text="CHANNEL SECURITY"
+                                       Classes="monoLabel"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"/>
+                            <Button Grid.Column="1"
+                                    Classes="icon"
+                                    Command="{Binding TrustSheet.CloseCommand}"
+                                    Content="✕"
+                                    ToolTip.Tip="Close"/>
+                        </Grid>
+
+                        <TextBlock FontSize="{StaticResource AuraFont14}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource AuraTextBrush}"
+                                   TextWrapping="Wrap">
+                            <Run Text="{Binding TrustSheet.ChannelName, Mode=OneWay}"/><Run Text=" is end-to-end encrypted"/>
+                        </TextBlock>
+
+                        <TextBlock Text="{Binding TrustSheet.SecurityLine}"
+                                   Classes="mono"
+                                   FontSize="{StaticResource AuraMono11}"
+                                   Foreground="{DynamicResource AuraTextDimBrush}"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Your server relays ciphertext only."
+                                   FontSize="{StaticResource AuraFont12}"
+                                   Foreground="{DynamicResource AuraTextFaintBrush}"
+                                   TextWrapping="Wrap"/>
+
+                        <!-- Something went wrong reading the group. -->
+                        <Border IsVisible="{Binding TrustSheet.HasError}"
+                                Background="{DynamicResource AuraDangerFillBrush}"
+                                BorderBrush="{DynamicResource AuraDangerBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Padding="{StaticResource AuraSpace11}"
+                                Margin="0,8,0,0">
+                            <TextBlock Text="{Binding TrustSheet.Error}"
+                                       FontSize="{StaticResource AuraFont12}"
+                                       Foreground="{DynamicResource AuraTextBrush}"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+
+                        <!-- Key-changed banner. Amber, not red: a reinstall and a
+                             takeover look identical from here, so it warns rather
+                             than accuses. -->
+                        <Border IsVisible="{Binding TrustSheet.ShowKeyChangedBanner}"
+                                Background="{DynamicResource AuraCautionFillBrush}"
+                                BorderBrush="{DynamicResource AuraCautionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Padding="{StaticResource AuraSpace11}"
+                                Margin="0,10,0,0">
+                            <StackPanel Spacing="{StaticResource AuraSpace3}">
+                                <TextBlock Text="{Binding TrustSheet.KeyChangedTitle}"
+                                           FontSize="{StaticResource AuraFont13}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource AuraCautionTextBrush}"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock Text="{Binding TrustSheet.KeyChangedBody}"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Actions, pinned to the bottom so they stay reachable
+                         however long the member list gets. -->
+                    <Grid DockPanel.Dock="Bottom"
+                          ColumnDefinitions="*,Auto"
+                          Margin="0,14,0,0"
+                          IsVisible="{Binding TrustSheet.CanAct}">
+                        <Button Grid.Column="0"
+                                Command="{Binding TrustSheet.MarkVerifiedCommand}"
+                                Background="{DynamicResource AuraBrandGradientBrush}"
+                                Foreground="White"
+                                FontSize="{StaticResource AuraFont13}"
+                                FontWeight="SemiBold"
+                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Padding="14,9"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                Content="They match — mark verified"/>
+                        <Button Grid.Column="1"
+                                Command="{Binding TrustSheet.BlockCommand}"
+                                Background="{DynamicResource AuraDangerFillBrush}"
+                                BorderBrush="{DynamicResource AuraDangerBorderBrush}"
+                                BorderThickness="1"
+                                Foreground="{DynamicResource AuraDangerBrush}"
+                                FontSize="{StaticResource AuraFont13}"
+                                FontWeight="SemiBold"
+                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Padding="14,9"
+                                Margin="8,0,0,0"
+                                Content="Block"/>
+                    </Grid>
+
+                    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Spacing="{StaticResource AuraSpace14}" Margin="0,14,0,0">
+
+                            <!-- Safety words -->
+                            <StackPanel Spacing="{StaticResource AuraSpace8}"
+                                        IsVisible="{Binding TrustSheet.PairLabel, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                <TextBlock Text="{Binding TrustSheet.PairLabel}"
+                                           Classes="monoLabel"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+
+                                <ItemsControl ItemsSource="{Binding TrustSheet.SafetyWords}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <UniformGrid Columns="3"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Background="{DynamicResource AuraWellBrush}"
+                                                    BorderBrush="{DynamicResource AuraTrackBorderBrush}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="{StaticResource AuraRadiusControl}"
+                                                    Padding="10,8"
+                                                    Margin="0,0,6,6">
+                                                <!-- Selectable: users paste these into
+                                                     whatever out-of-band channel they trust. -->
+                                                <SelectableTextBlock Text="{Binding}"
+                                                                     Classes="mono"
+                                                                     FontSize="{StaticResource AuraMono13}"
+                                                                     Foreground="{DynamicResource AuraTextBrush}"
+                                                                     HorizontalAlignment="Center"/>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+
+                            <!-- Deriving takes an scrypt run; a chip, never a spinner. -->
+                            <Border IsVisible="{Binding TrustSheet.IsDeriving}"
+                                    Background="{DynamicResource AuraWellBrush}"
+                                    CornerRadius="{StaticResource AuraRadiusControl}"
+                                    Padding="12,9"
+                                    HorizontalAlignment="Center">
+                                <TextBlock Text="deriving safety words…"
+                                           Classes="mono"
+                                           FontSize="{StaticResource AuraMono11}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+                            </Border>
+
+                            <!-- The full fingerprint pair: the authoritative
+                                 comparison the words are a convenience over. -->
+                            <StackPanel Spacing="{StaticResource AuraSpace5}"
+                                        IsVisible="{Binding TrustSheet.RemoteFingerprint, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                <SelectableTextBlock Text="{Binding TrustSheet.RemoteFingerprint}"
+                                                     Classes="mono"
+                                                     FontSize="{StaticResource AuraMono11}"
+                                                     Foreground="{DynamicResource AuraTextMidBrush}"
+                                                     TextWrapping="Wrap"/>
+                                <SelectableTextBlock Text="{Binding TrustSheet.LocalFingerprint}"
+                                                     Classes="mono"
+                                                     FontSize="{StaticResource AuraMono11}"
+                                                     Foreground="{DynamicResource AuraTextDimBrush}"
+                                                     TextWrapping="Wrap"/>
+                            </StackPanel>
+
+                            <!-- Members -->
+                            <StackPanel Spacing="{StaticResource AuraSpace5}">
+                                <TextBlock Text="MEMBERS"
+                                           Classes="monoLabel"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+
+                                <ItemsControl ItemsSource="{Binding TrustSheet.Members}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:TrustMemberViewModel">
+                                            <Button Classes="row"
+                                                    HorizontalAlignment="Stretch"
+                                                    HorizontalContentAlignment="Stretch"
+                                                    Command="{Binding $parent[ItemsControl].((vm:TrustSheetViewModel)DataContext).SelectCommand}"
+                                                    CommandParameter="{Binding}">
+                                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                                    <Border Grid.Column="0"
+                                                            Width="3" Height="18"
+                                                            CornerRadius="2"
+                                                            Margin="0,0,9,0"
+                                                            Background="{DynamicResource AuraAccentBrush}"
+                                                            IsVisible="{Binding IsSelected}"/>
+
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding Name}"
+                                                               FontSize="{StaticResource AuraFont13}"
+                                                               Foreground="{DynamicResource AuraTextBrush}"
+                                                               VerticalAlignment="Center"/>
+
+                                                    <TextBlock Grid.Column="2"
+                                                               Text="{Binding StateLabel}"
+                                                               Classes="mono"
+                                                               FontSize="{StaticResource AuraMono10}"
+                                                               VerticalAlignment="Center"/>
+                                                </Grid>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Border>
     </Panel>
 </Window>

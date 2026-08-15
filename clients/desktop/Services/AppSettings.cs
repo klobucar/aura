@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -64,6 +65,41 @@ public class AppSettings
     /// </summary>
     [JsonPropertyName("AuraLocallyMutedUsers")]
     public List<string> LocallyMutedUsers { get; set; } = new();
+
+    /// <summary>
+    /// Identity keys the user compared out of band and accepted, keyed by
+    /// lowercase hex of the Ed25519 public key and valued with when it happened.
+    ///
+    /// Keyed by <em>key</em>, never by user: that is what makes a key rotation
+    /// drop back to unverified instead of silently inheriting the old key's
+    /// trust. macOS key: AuraVerifiedKeys.
+    /// </summary>
+    [JsonPropertyName("AuraVerifiedKeys")]
+    public Dictionary<string, DateTimeOffset> VerifiedKeys { get; set; } = new();
+
+    /// <summary>
+    /// Identity keys the user rejected from the trust sheet. Also keyed by key
+    /// hex, so an impostor cannot clear a block by reconnecting.
+    /// macOS key: AuraBlockedKeys.
+    /// </summary>
+    [JsonPropertyName("AuraBlockedKeys")]
+    public Dictionary<string, DateTimeOffset> BlockedKeys { get; set; } = new();
+
+    /// <summary>
+    /// First key seen for each user UUID — the TOFU baseline. A later key that
+    /// disagrees with this is what raises "key changed"; without it a takeover
+    /// would be indistinguishable from a first sighting.
+    /// macOS key: AuraKnownUserKeys.
+    /// </summary>
+    [JsonPropertyName("AuraKnownUserKeys")]
+    public Dictionary<string, string> KnownUserKeys { get; set; } = new();
+
+    /// <summary>
+    /// When a user's key was first seen to differ from its baseline, so the UI
+    /// can say "key changed today". macOS key: AuraKeyChangedAt.
+    /// </summary>
+    [JsonPropertyName("AuraKeyChangedAt")]
+    public Dictionary<string, DateTimeOffset> KeyChangedAt { get; set; } = new();
 
     /// <summary>Load settings, falling back to defaults if missing or unreadable.</summary>
     public static AppSettings Load()
