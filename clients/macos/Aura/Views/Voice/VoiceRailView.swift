@@ -22,6 +22,17 @@ struct VoiceRailView: View {
         context.participants.filter { (store.talkShare[$0.id] ?? 0) <= 0 }
     }
 
+    /// Nobody else is in the channel.
+    ///
+    /// Everything the rail measures is comparative — talk-share against other
+    /// people, overlap with them, round-trip to them — so alone it renders a
+    /// wall of statistics about an empty room: a lane showing you at 61% of
+    /// nothing, a legend for overlaps that cannot happen, a latency reading to
+    /// nobody. The HUD stays, because meters and mute still mean something.
+    private var isAlone: Bool {
+        !context.participants.contains { !$0.isLocal }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -35,17 +46,20 @@ struct VoiceRailView: View {
                         waveformBuffer: store.waveform,
                         context: context,
                         actions: actions,
-                        metrics: metrics
+                        metrics: metrics,
+                        isAlone: isAlone
                     )
 
-                    TalkLanesPanel(
-                        store: store,
-                        context: context,
-                        metrics: metrics
-                    )
+                    if !isAlone {
+                        TalkLanesPanel(
+                            store: store,
+                            context: context,
+                            metrics: metrics
+                        )
 
-                    if !silentParticipants.isEmpty {
-                        silentList
+                        if !silentParticipants.isEmpty {
+                            silentList
+                        }
                     }
                 }
                 .padding(.horizontal, AuraTheme.Spacing.s14)
@@ -67,7 +81,10 @@ struct VoiceRailView: View {
                 .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
                 .foregroundStyle(AuraTheme.Colors.text)
             Spacer()
-            LatencyPill(latencyMs: context.latencyMs, isReconnecting: context.isReconnecting)
+            // Hidden when alone: a round-trip to nobody is not a measurement.
+            if !isAlone {
+                LatencyPill(latencyMs: context.latencyMs, isReconnecting: context.isReconnecting)
+            }
         }
         .padding(.horizontal, AuraTheme.Spacing.s14)
         .frame(height: AuraTheme.Layout.headerHeight)

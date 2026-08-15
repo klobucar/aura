@@ -625,6 +625,26 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    /// The chat column had no empty state at all — a full-height void with the
+    /// composer stranded at the bottom, which is the first thing every new user
+    /// sees. The dead space now carries the one claim worth making here.
+    private var chatEmptyState: some View {
+        VStack(spacing: AuraTheme.Spacing.s8) {
+            Text("No messages yet")
+                .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
+                .foregroundStyle(AuraTheme.Colors.text)
+            Text("Messages here are end-to-end encrypted. Your server relays ciphertext only.")
+                .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12))
+                .foregroundStyle(AuraTheme.Colors.textDim)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, AuraTheme.Spacing.s20)
+        .padding(.vertical, AuraTheme.Spacing.s16)
+        .frame(maxWidth: 360)
+        .auraGlass(cornerRadius: AuraTheme.Radii.r20)
+    }
+
     private func chatPanel(client: QuicNetworkClient) -> some View {
         let currentMessages = computedChatMessages(client: client)
         
@@ -646,6 +666,13 @@ struct ContentView: View {
                         }
                     }
                     .padding()
+                }
+                // Join notices alone still leave the column looking unused, so
+                // they do not count as content here.
+                .overlay {
+                    if !currentMessages.contains(where: { $0.type != .info }) {
+                        chatEmptyState
+                    }
                 }
                 .onChange(of: currentMessages.count) { _, _ in
                     if let lastMessage = currentMessages.last {

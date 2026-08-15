@@ -447,8 +447,32 @@
                 </Border>
 
                 <!-- ── Messages ── -->
-                <ScrollViewer Grid.Row="1"
-                              HorizontalScrollBarVisibility="Disabled"
+                <Panel Grid.Row="1">
+
+                <!-- Empty state. The column is otherwise a full-height void with
+                     the composer stranded at the bottom, and it is the first
+                     thing every new user sees. -->
+                <Border IsVisible="{Binding ShowChatEmptyState}"
+                        Classes="panel"
+                        Padding="20,16"
+                        MaxWidth="360"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center">
+                    <StackPanel Spacing="{StaticResource AuraSpace8}">
+                        <TextBlock Text="No messages yet"
+                                   FontSize="{StaticResource AuraFont13}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource AuraTextBrush}"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="Messages here are end-to-end encrypted. Your server relays ciphertext only."
+                                   FontSize="{StaticResource AuraFont12}"
+                                   Foreground="{DynamicResource AuraTextDimBrush}"
+                                   TextWrapping="Wrap"
+                                   TextAlignment="Center"/>
+                    </StackPanel>
+                </Border>
+
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                               VerticalScrollBarVisibility="Auto"
                               Padding="20,20,20,8">
                     <ItemsControl ItemsSource="{Binding Messages}">
@@ -510,6 +534,7 @@
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                 </ScrollViewer>
+                </Panel>
 
                 <!-- ── Composer ── -->
                 <Border Grid.Row="2"
@@ -576,9 +601,12 @@
                                        Foreground="{DynamicResource AuraTextBrush}"
                                        VerticalAlignment="Center"/>
 
+                            <!-- Hidden when alone: a round-trip to nobody is not
+                                 a measurement. -->
                             <Border Grid.Column="1" Classes="badge"
                                     Background="{DynamicResource AuraWellBrush}"
-                                    VerticalAlignment="Center">
+                                    VerticalAlignment="Center"
+                                    IsVisible="{Binding VoiceRail.ShowLatency}">
                                 <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace5}">
                                     <Ellipse Width="6" Height="6" VerticalAlignment="Center"
                                              Fill="{Binding LatencyBrush}"/>
@@ -692,9 +720,12 @@
                                            Foreground="{DynamicResource AuraTextDimBrush}"/>
                             </Border>
 
-                            <!-- ============ b. LAST 3 MIN lanes ============ -->
+                            <!-- ============ b. LAST 3 MIN lanes ============
+                                 Lanes are a comparison between people. Alone
+                                 they showed one lane at "61%" of nothing, under
+                                 a legend for overlaps that cannot happen. -->
                             <Border Classes="panel" Padding="14,13"
-                                    IsVisible="{Binding VoiceRail.IsEmpty, Converter={StaticResource InverseBoolConverter}}">
+                                    IsVisible="{Binding VoiceRail.ShowLanes}">
                                 <StackPanel Spacing="{StaticResource AuraSpace9}">
 
                                     <Grid ColumnDefinitions="*,Auto">
@@ -807,7 +838,7 @@
 
                             <!-- ============ c. SILENT ============ -->
                             <StackPanel Spacing="{StaticResource AuraSpace8}"
-                                        IsVisible="{Binding VoiceRail.HasSilentMembers}">
+                                        IsVisible="{Binding VoiceRail.ShowSilent}">
                                 <TextBlock Classes="monoLabel" Text="SILENT"/>
                                 <ItemsControl ItemsSource="{Binding VoiceRail.SilentMembers}">
                                     <ItemsControl.ItemTemplate>

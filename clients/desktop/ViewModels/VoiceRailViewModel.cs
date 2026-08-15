@@ -82,17 +82,54 @@ public partial class VoiceRailViewModel : ObservableObject
     public bool ShowEmptyState => CurrentSpeaker == null;
 
     /// <summary>
-    /// Two readings, because "no one is speaking" is plainly wrong while you
-    /// are mid-sentence — the hero just does not put you in it.
+    /// Three readings. "No one is speaking" is plainly wrong while you are
+    /// mid-sentence — the hero just does not put you in it — and both phrasings
+    /// are wrong when there is nobody else in the room to speak.
     /// </summary>
     public string EmptyStateText =>
-        IsOnlyLocalSpeaking ? "No one else is speaking" : "No one is speaking yet";
+        IsAlone ? "You're the only one here"
+        : IsOnlyLocalSpeaking ? "No one else is speaking"
+        : "No one is speaking yet";
 
     [ObservableProperty] private bool _isOnlyLocalSpeaking;
 
     partial void OnIsOnlyLocalSpeakingChanged(bool value) => OnPropertyChanged(nameof(EmptyStateText));
 
-    partial void OnIsEmptyChanged(bool value) => OnPropertyChanged(nameof(ShowEmptyState));
+    /// <summary>
+    /// Nobody else is in the channel.
+    ///
+    /// Everything the rail measures is comparative — talk-share against other
+    /// people, overlap with them, round-trip to them — so alone it renders a
+    /// wall of statistics about an empty room: a lane showing you at 61% of
+    /// nothing, a legend for overlaps that cannot happen, a latency reading to
+    /// nobody. The HUD stays, because meters and mute still mean something.
+    /// </summary>
+    [ObservableProperty] private bool _isAlone;
+
+    partial void OnIsAloneChanged(bool value)
+    {
+        OnPropertyChanged(nameof(EmptyStateText));
+        OnPropertyChanged(nameof(ShowLanes));
+        OnPropertyChanged(nameof(ShowLatency));
+    }
+
+    /// <summary>Lanes are a comparison; with nobody to compare against, hide them.</summary>
+    public bool ShowLanes => !IsAlone && !IsEmpty;
+
+    /// <summary>Round-trip to nobody is not a measurement.</summary>
+    public bool ShowLatency => !IsAlone;
+
+    /// <summary>
+    /// A "SILENT" heading over a list containing only yourself is a list of one
+    /// obvious fact.
+    /// </summary>
+    public bool ShowSilent => !IsAlone && HasSilentMembers;
+
+    partial void OnIsEmptyChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowEmptyState));
+        OnPropertyChanged(nameof(ShowLanes));
+    }
 
     partial void OnCurrentSpeakerChanged(SpeakerCardViewModel? value) => OnPropertyChanged(nameof(ShowEmptyState));
 
@@ -146,6 +183,8 @@ public partial class VoiceRailViewModel : ObservableObject
     {
         var byId = participants.ToDictionary(p => p.SessionId);
         var share = store.TalkShare;
+
+        IsAlone = !participants.Any(p => !p.IsLocal);
 
         // Lanes: everyone who spoke in the window, most talkative first, capped
         // at the top 5 with the rest behind an "N others" row.

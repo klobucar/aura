@@ -609,7 +609,18 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var today = DateTime.Now.Date;
         var count = Messages.Count(m => !m.System && m.Timestamp.Date == today);
         MessagesTodayLabel = count == 1 ? "1 message today" : $"{count} messages today";
+
+        // Join notices alone still leave the column looking unused, so they do
+        // not count as content here.
+        ShowChatEmptyState = !Messages.Any(m => !m.System);
     }
+
+    /// <summary>
+    /// The chat column had no empty state at all — a full-height void with the
+    /// composer stranded at the bottom, which is the first thing every new user
+    /// sees. The dead space now carries the one claim worth making here.
+    /// </summary>
+    [ObservableProperty] private bool _showChatEmptyState = true;
 
     // ==========================================================================
     // Push to talk. In-window only for now: the low-level keyboard hook the

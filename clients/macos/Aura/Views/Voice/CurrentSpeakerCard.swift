@@ -11,6 +11,9 @@ struct CurrentSpeakerCard: View {
     let actions: VoiceRailActions
     let metrics: VoiceMetrics
 
+    /// Nobody else in the channel — changes what the empty chip can honestly say.
+    var isAlone: Bool = false
+
     var body: some View {
         if let speakerId = store.currentSpeakerId, let speaker = context.participant(speakerId) {
             card(speaker: speaker)
@@ -174,14 +177,19 @@ struct CurrentSpeakerCard: View {
 
     // MARK: Empty state
 
+    /// Three readings. "No one is speaking" is plainly wrong while you are
+    /// mid-sentence — the hero just does not put you in it — and both phrasings
+    /// are wrong when there is nobody else in the room to speak.
+    private var emptyText: String {
+        if isAlone { return "You're the only one here" }
+        return store.isOnlyLocalSpeaking ? "No one else is speaking" : "No one is speaking yet"
+    }
+
     /// A chip, never a spinner.
-    ///
-    /// Two readings, because "no one is speaking" is plainly wrong while you
-    /// are mid-sentence — the hero just does not put you in it.
     private var emptyChip: some View {
         HStack {
             Spacer()
-            Text(store.isOnlyLocalSpeaking ? "No one else is speaking" : "No one is speaking yet")
+            Text(emptyText)
                 .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12))
                 .foregroundStyle(AuraTheme.Colors.textDim)
                 .padding(.horizontal, AuraTheme.Spacing.s16)
