@@ -102,9 +102,35 @@
                         </Grid>
                     </Border>
 
+                    <!-- ── QUIC unavailable ──
+                         Danger, not caution: this is not a risk to weigh, it is
+                         the app being unable to run here. The remedy differs per
+                         platform (a missing package on Linux, an OS floor on
+                         Windows), so it is carried in the text rather than
+                         implied. -->
+                    <StackPanel Grid.Row="2">
+                    <Border Margin="0,0,0,8"
+                            Padding="12"
+                            CornerRadius="{StaticResource AuraRadiusTile}"
+                            Background="{DynamicResource AuraDangerFillBrush}"
+                            BorderBrush="{DynamicResource AuraDangerBorderBrush}"
+                            BorderThickness="1"
+                            IsVisible="{Binding ShowQuicUnavailable}">
+                        <StackPanel Spacing="{StaticResource AuraSpace9}">
+                            <TextBlock Text="{Binding QuicUnavailableHeadline}"
+                                       FontSize="{StaticResource AuraFont13}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource AuraDangerBrush}"
+                                       TextWrapping="Wrap"/>
+                            <SelectableTextBlock Text="{Binding QuicUnavailableRemedy}"
+                                                 FontSize="{StaticResource AuraFont11}"
+                                                 Foreground="{DynamicResource AuraTextDimBrush}"
+                                                 TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
                     <!-- ── Certificate warning (untrusted server key) ── -->
-                    <Border Grid.Row="2"
-                            Margin="0,0,0,8"
+                    <Border Margin="0,0,0,8"
                             Padding="12"
                             CornerRadius="{StaticResource AuraRadiusTile}"
                             Background="{DynamicResource AuraCautionFillBrush}"
@@ -152,6 +178,7 @@
                                     Content="Cancel"/>
                         </StackPanel>
                     </Border>
+                    </StackPanel>
 
                     <!-- ── Channels + occupants, or the connection form ── -->
                     <ScrollViewer Grid.Row="3" HorizontalScrollBarVisibility="Disabled">

@@ -125,6 +125,20 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public VoiceRailViewModel VoiceRail { get; } = new();
 
     /// <summary>
+    /// The QUIC banner, raised on a connect attempt that cannot succeed. Not
+    /// shown at startup: on a machine that can never run Aura, an unprompted
+    /// wall of remedy text on first launch is worse than the status line, which
+    /// already says what is wrong.
+    /// </summary>
+    [ObservableProperty] private bool _showQuicUnavailable;
+
+    /// <summary>Headline for the QUIC banner.</summary>
+    public string QuicUnavailableHeadline => QuicSupport.Availability.Headline;
+
+    /// <summary>The concrete fix for <em>this</em> platform.</summary>
+    public string QuicUnavailableRemedy => QuicSupport.Availability.Remedy ?? "";
+
+    /// <summary>
     /// Backing store for everything persisted, held rather than rebuilt so the
     /// <see cref="TrustStore"/> has somewhere durable to write.
     /// </summary>
@@ -437,10 +451,10 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         // Try to load libmsquic explicitly on macOS
         MsQuicLoader.TryLoadMsQuic();
-        
+
         // Check QUIC support
         QuicSupport.CheckQuicSupport();
-        
+
         // Try to load existing identity
         var identityPath = UserIdentity.GetIdentityFilePath();
         try
@@ -461,7 +475,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             ConnectionStatus = $"Error loading identity: {ex.Message}";
         }
-        
+
+        // Say so up front rather than at the first failed connect. Aura speaks
+        // QUIC and nothing else, so this is not a degraded mode to discover
+        // later — the app cannot work at all here.
+        if (!QuicSupport.Availability.IsSupported)
+        {
+            ConnectionStatus = QuicSupport.Availability.Headline;
+        }
+
         // Restore persisted audio settings (defaults if none saved). Suppress
         // saves while loading so setting each property doesn't rewrite the file.
         var settings = AppSettings.Load();
@@ -659,12 +681,22 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     [RelayCommand]
     private async Task ConnectAsync()
     {
+        // Checked before anything else: without QUIC the attempt cannot get off
+        // the ground, and a generic timeout would send the user looking for a
+        // bug in Aura rather than installing a package or reading the OS floor.
+        if (!QuicSupport.Availability.IsSupported)
+        {
+            ShowQuicUnavailable = true;
+            ConnectionStatus = QuicSupport.Availability.Headline;
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(DisplayName))
         {
             ConnectionStatus = "Error: Display name required";
             return;
         }
-        
+
         try
         {
             Console.WriteLine("[ViewModel] Starting connection...");
