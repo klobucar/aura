@@ -167,6 +167,31 @@ jobs:
 
   analyze-swift:
     name: Analyze (swift)
+    # ========================================================================
+    # Currently cannot succeed. CodeQL's Swift extractor produces an empty
+    # database from anything Xcode 26 builds ("CodeQL could not process any
+    # code written in Swift"), which is upstream, not a misconfiguration here:
+    #   github/codeql-action#3111, github/codeql#20669
+    #
+    # All three ways out are closed:
+    #   - Build with Xcode 16, which CodeQL handles: the app calls
+    #     .glassEffect() from the macOS 26 SDK, and #available gates runtime,
+    #     not compilation. It does not build.
+    #   - build-mode: none, skipping the tracer: unsupported for Swift, which
+    #     offers only autobuild and manual.
+    #   - Keep failing on every PR: this runs on macOS at 10x minutes to fail,
+    #     and gates checks on something no change to this repo can fix.
+    #
+    # So it is off the PR path and left on the weekly schedule as a canary:
+    # when CodeQL gains Xcode 26 support this goes green by itself, and the
+    # only edit needed is deleting continue-on-error.
+    #
+    # Until then Swift has no CodeQL coverage — worth knowing, since the MLS
+    # key handling and trust sheet live in this client. zizmor, cargo-deny and
+    # the rust/actions/csharp CodeQL jobs are unaffected.
+    # ========================================================================
+    if: github.event_name != 'pull_request' && github.event_name != 'push'
+    continue-on-error: true
     # macos-latest (the macos-15 host) preinstalls multiple Xcodes including
     # 26.x — see macos.yml for the full reasoning behind not switching to
     # macos-26.
