@@ -158,9 +158,35 @@ struct MlsProtocolTests {
         
         // Keys should be different between voice and text
         let voiceKey = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
-        let textKey = try wrapper.exportTextKey(channelId: "1", senderSessionId: 1)
-        
+        let textKey = try wrapper.exportTextKey(channelId: "1", senderSessionId: 1, epoch: nil)
+
         #expect(voiceKey != textKey)
+    }
+
+    @Test func testTextKeyRetainedAcrossEpochChange() async throws {
+        // A message encrypted at epoch 0 must stay decryptable once a join has
+        // advanced the group to epoch 1.
+        let founder = try MlsWrapper(identityName: "founder")
+        try founder.createGroup(channelId: "1", isVoice: false)
+
+        let senderSessionId: UInt32 = 77
+        let keyAtEpoch0 = try founder.exportTextKey(
+            channelId: "1", senderSessionId: senderSessionId, epoch: 0)
+
+        // A joiner advances the epoch.
+        let joiner = try MlsWrapper(identityName: "joiner")
+        let keyPackage = try joiner.createKeyPackage()
+        _ = try founder.addMember(channelId: "1", isVoice: false, keyPackageBytes: keyPackage)
+        #expect(try founder.currentEpoch(channelId: "1", isVoice: false) == 1)
+
+        // The epoch-0 key is still available and differs from epoch 1's.
+        let retained = try founder.exportTextKey(
+            channelId: "1", senderSessionId: senderSessionId, epoch: 0)
+        let keyAtEpoch1 = try founder.exportTextKey(
+            channelId: "1", senderSessionId: senderSessionId, epoch: 1)
+
+        #expect(retained == keyAtEpoch0)
+        #expect(retained != keyAtEpoch1)
     }
     
     // MARK: - Protocol Message Tests

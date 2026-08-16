@@ -29,7 +29,14 @@ struct AuraGlassModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(
-                VisualEffectBlur(auraMaterial: material, blendingMode: .behindWindow)
+                // withinWindow, not behindWindow: this samples the window's own
+                // background rather than the user's desktop. Panels, cards and
+                // the composer are *content*, and content showing the wallpaper
+                // through it is a compositor demo, not a material — it also
+                // breaks the handoff's rule of one translucent layer per depth
+                // level. The window root (AuraApp) is that single layer, and it
+                // is the only place behindWindow belongs.
+                VisualEffectBlur(auraMaterial: material, blendingMode: .withinWindow)
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             )
             .overlay {
@@ -248,8 +255,10 @@ struct AuraGlassButtonStyle: ButtonStyle {
             .padding(.vertical, 8)
             .background {
                 ZStack {
-                    VisualEffectBlur(auraMaterial: .thin, blendingMode: .behindWindow)
-                    
+                    // Buttons sit on top of window content, so they sample it —
+                    // never the desktop behind the window.
+                    VisualEffectBlur(auraMaterial: .thin, blendingMode: .withinWindow)
+
                     if isHovering {
                         Color.white.opacity(0.08)
                     }
@@ -282,12 +291,16 @@ struct VisualEffectBlur: NSViewRepresentable {
     var material: NSVisualEffectView.Material
     var blendingMode: NSVisualEffectView.BlendingMode
     
-    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode = .behindWindow) {
+    /// Defaults to `.withinWindow`. Sampling the desktop is the rarer, more
+    /// disruptive choice — exactly one view in the app (the window root) should
+    /// do it — so the default points at the safe option and `behindWindow` has
+    /// to be asked for by name.
+    init(material: NSVisualEffectView.Material, blendingMode: NSVisualEffectView.BlendingMode = .withinWindow) {
         self.material = material
         self.blendingMode = blendingMode
     }
-    
-    init(auraMaterial: AuraMaterial, blendingMode: NSVisualEffectView.BlendingMode = .behindWindow) {
+
+    init(auraMaterial: AuraMaterial, blendingMode: NSVisualEffectView.BlendingMode = .withinWindow) {
         self.material = auraMaterial.nsValue
         self.blendingMode = blendingMode
     }

@@ -1,0 +1,149 @@
+<!-- Theme-independent design tokens: semantic color aliases, the Fluent glass
+     translation, and the spacing / radii / type scales from the handoff.
+
+     Palette tokens (AuraAccentBrush, AuraPrimaryBrush, …) live in Zenith.axaml
+     / Frost.axaml / Bloom.axaml; exactly one of those is merged at a time by
+     AuraThemeManager. Everything here is the same in all three themes.
+
+     Colors are split into Dark / Light theme dictionaries and must be consumed
+     with DynamicResource so a variant switch is picked up. The numeric scales
+     are variant-independent and can be StaticResource. -->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="using:System">
+
+    <ResourceDictionary.ThemeDictionaries>
+
+        <ResourceDictionary x:Key="Dark">
+            <!-- Semantic text aliases -->
+            <SolidColorBrush x:Key="AuraTextBrush">#E8EAEE</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextMidBrush">#DDE2EA</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextDimBrush">#B3BAC6</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextFaintBrush">#8B929E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraLinkBrush">#5AB4FF</SolidColorBrush>
+
+            <!-- State aliases. warn = muted, caution = key changed -->
+            <SolidColorBrush x:Key="AuraWarnBrush">#FF9D78</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionBrush">#FFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionTextBrush">#FFD489</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionFillBrush">#1FFFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionBorderBrush">#4DFFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerBrush">#FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerFillBrush">#29FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerBorderBrush">#61FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraGoodBrush">#27C93F</SolidColorBrush>
+            <!-- "talked over" marker, drawn on top of the later speaker's lane -->
+            <SolidColorBrush x:Key="AuraOverlapBrush">#E6FFBD2E</SolidColorBrush>
+
+            <!-- Glass, translated to Fluent: one flat fill + a single 1px rim.
+                 No specular top highlight (see the platform mapping table). -->
+            <LinearGradientBrush x:Key="AuraPanelFillBrush" StartPoint="0%,0%" EndPoint="35%,100%">
+                <GradientStop Color="#21FFFFFF" Offset="0"/>
+                <GradientStop Color="#0DFFFFFF" Offset="1"/>
+            </LinearGradientBrush>
+            <SolidColorBrush x:Key="AuraPanelBorderBrush">#26FFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraWellBrush">#29FFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTrackBrush">#0DFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTrackBorderBrush">#14FFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDividerBrush">#14FFFFFF</SolidColorBrush>
+            <!-- Desktop hover: white @ 6%, no scale -->
+            <SolidColorBrush x:Key="AuraHoverOverlayBrush">#0FFFFFFF</SolidColorBrush>
+            <!-- Vibrancy layers: sidebar / chat sit on the acrylic, tinted only -->
+            <SolidColorBrush x:Key="AuraSidebarOverlayBrush">#14000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraChromeOverlayBrush">#1F000000</SolidColorBrush>
+        </ResourceDictionary>
+
+        <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="AuraTextBrush">#12141A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextMidBrush">#2A2F38</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextDimBrush">#5A616D</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTextFaintBrush">#8B929E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraLinkBrush">#5AB4FF</SolidColorBrush>
+
+            <SolidColorBrush x:Key="AuraWarnBrush">#FF9D78</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionBrush">#FFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionTextBrush">#FFD489</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionFillBrush">#1FFFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraCautionBorderBrush">#4DFFBD2E</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerBrush">#FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerFillBrush">#29FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDangerBorderBrush">#61FF5F56</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraGoodBrush">#27C93F</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraOverlapBrush">#E6FFBD2E</SolidColorBrush>
+
+            <LinearGradientBrush x:Key="AuraPanelFillBrush" StartPoint="0%,0%" EndPoint="35%,100%">
+                <GradientStop Color="#B8FFFFFF" Offset="0"/>
+                <GradientStop Color="#6BFFFFFF" Offset="1"/>
+            </LinearGradientBrush>
+            <SolidColorBrush x:Key="AuraPanelBorderBrush">#8CFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraWellBrush">#1A000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTrackBrush">#14000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraTrackBorderBrush">#1F000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraDividerBrush">#1F000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraHoverOverlayBrush">#0F000000</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSidebarOverlayBrush">#0AFFFFFF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraChromeOverlayBrush">#14FFFFFF</SolidColorBrush>
+        </ResourceDictionary>
+
+    </ResourceDictionary.ThemeDictionaries>
+
+    <!-- ==================================================================
+         Type scale. The handoff's sub-pixel sizes are a scaled-canvas
+         artifact; Avalonia rounds to 11 / 12 / 13 / 14 / 18.
+         Mono is load-bearing — it is how the UI signals "machine truth" —
+         and carries the numerics, fingerprints, keycaps, section labels.
+         ================================================================== -->
+    <FontFamily x:Key="AuraMonoFontFamily">IBM Plex Mono,Cascadia Mono,SF Mono,Menlo,Consolas,monospace</FontFamily>
+
+    <sys:Double x:Key="AuraFont11">11</sys:Double>
+    <sys:Double x:Key="AuraFont12">12</sys:Double>
+    <sys:Double x:Key="AuraFont13">13</sys:Double>
+    <sys:Double x:Key="AuraFont14">14</sys:Double>
+    <sys:Double x:Key="AuraFont18">18</sys:Double>
+
+    <sys:Double x:Key="AuraMono9">9</sys:Double>
+    <sys:Double x:Key="AuraMono10">10</sys:Double>
+    <sys:Double x:Key="AuraMono11">11</sys:Double>
+    <sys:Double x:Key="AuraMono13">13</sys:Double>
+
+    <!-- 0.14em on a 10px mono section label -->
+    <sys:Double x:Key="AuraMonoLabelTracking">1.4</sys:Double>
+
+    <!-- ==================================================================
+         Spacing scale: 2 · 3 · 5 · 8 · 9 · 11 · 12 · 14 · 16 · 18 · 20 · 22
+         ================================================================== -->
+    <sys:Double x:Key="AuraSpace2">2</sys:Double>
+    <sys:Double x:Key="AuraSpace3">3</sys:Double>
+    <sys:Double x:Key="AuraSpace5">5</sys:Double>
+    <sys:Double x:Key="AuraSpace8">8</sys:Double>
+    <sys:Double x:Key="AuraSpace9">9</sys:Double>
+    <sys:Double x:Key="AuraSpace11">11</sys:Double>
+    <sys:Double x:Key="AuraSpace12">12</sys:Double>
+    <sys:Double x:Key="AuraSpace14">14</sys:Double>
+    <sys:Double x:Key="AuraSpace16">16</sys:Double>
+    <sys:Double x:Key="AuraSpace18">18</sys:Double>
+    <sys:Double x:Key="AuraSpace20">20</sys:Double>
+    <sys:Double x:Key="AuraSpace22">22</sys:Double>
+
+    <!-- ==================================================================
+         Radii — the Avalonia scale, not macOS's: 8 tiles / 6 controls /
+         4 mono badges, plus a capsule for pills and the avatar's rounded
+         square (mapping table: "avatars are 4–6px rounded squares").
+         ================================================================== -->
+    <CornerRadius x:Key="AuraRadiusBadge">4</CornerRadius>
+    <CornerRadius x:Key="AuraRadiusControl">6</CornerRadius>
+    <CornerRadius x:Key="AuraRadiusTile">8</CornerRadius>
+    <CornerRadius x:Key="AuraRadiusPill">20</CornerRadius>
+    <CornerRadius x:Key="AuraRadiusAvatarSmall">4</CornerRadius>
+    <CornerRadius x:Key="AuraRadiusAvatar">6</CornerRadius>
+
+    <!-- ==================================================================
+         Layout grid (handoff Overview). Chat-first: roster 268 · chat flex ·
+         rail 336. Voice-focus: roster 268 · stage flex · chat 320.
+         ================================================================== -->
+    <sys:Double x:Key="AuraRosterWidth">268</sys:Double>
+    <sys:Double x:Key="AuraVoiceRailWidth">336</sys:Double>
+    <sys:Double x:Key="AuraNarrowChatWidth">320</sys:Double>
+    <sys:Double x:Key="AuraHeaderHeight">46</sys:Double>
+
+</ResourceDictionary>

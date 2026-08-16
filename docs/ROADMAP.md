@@ -77,7 +77,9 @@
 
 **Milestone**: Users can send/receive encrypted text in channels ✅
 
-**Note**: Currently using plaintext for testing. MLS-derived DAVE encryption ready but not wired up yet.
+**Note**: Text is encrypted with DAVE using MLS-derived per-sender keys. Messages
+carry the epoch they were encrypted under, and clients retain keys for the last
+few epochs so a message in flight across a membership change still decrypts.
 
 ---
 
@@ -105,7 +107,7 @@
 ### 4.1 Channel Management
 - [x] Create/Update channels (Admin)
 - [x] Move between channels (via `MSG_JOIN_CHANNEL`)
-- [ ] Delete channels (Admin)
+- [x] Delete channels (Admin) — occupants are evicted and moved to the lobby
 - [ ] Temporary channels
 - [x] Channel descriptions/MOTD (via `comment` field)
 - [ ] ACL system (view/speak/enter permissions)

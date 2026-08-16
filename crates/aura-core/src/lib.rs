@@ -14,10 +14,12 @@ pub mod mls;
 pub mod noise_suppression;
 pub mod opus;
 pub mod opus16;
+pub mod profile;
 pub mod text_crypto;
 pub mod tts;
 pub mod uniffi_bindings;
 pub mod vad;
+pub mod verification;
 pub mod voice_session;
 #[cfg(feature = "webrtc-audio")]
 pub mod webrtc_processor;
@@ -169,3 +171,5 @@ pub unsafe extern "C" fn aura_audio_write_playback(
 mod tests_audio;
 #[cfg(test)]
 mod tests_crypto;
+#[cfg(test)]
+mod tests_text_e2e;

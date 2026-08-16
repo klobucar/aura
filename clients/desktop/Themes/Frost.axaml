@@ -1,0 +1,87 @@
+<!-- Aura "frost" palette, dark + light. The palette is shared byte-for-byte
+     with clients/macos (AuraTheme.swift) — change both or neither.
+     Alpha-tinted variants are the same base hex at the opacities the design
+     calls for, so a tint can never drift from its base color. -->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Dark">
+            <!-- Palette (handoff: Design tokens > Themes) -->
+            <Color x:Key="AuraBackgroundColor">#0D1219</Color>
+            <Color x:Key="AuraPrimaryColor">#00D1D4</Color>
+            <Color x:Key="AuraSecondaryColor">#2E85DE</Color>
+            <Color x:Key="AuraAccentColor">#FF9E42</Color>
+            <Color x:Key="AuraLushIndigoColor">#0099CC</Color>
+            <SolidColorBrush x:Key="AuraBackgroundBrush">#0D1219</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimaryBrush">#00D1D4</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSecondaryBrush">#2E85DE</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentBrush">#FF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraLushIndigoBrush">#0099CC</SolidColorBrush>
+
+            <!-- Accent tints: speaker card, pills, speaking rows, pulse ring -->
+            <SolidColorBrush x:Key="AuraAccentTintBrush">#26FF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentBorderBrush">#5CFF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentPillFillBrush">#21FF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentPillBorderBrush">#4CFF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentRowFillBrush">#17FF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentRingBrush">#80FF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentSoftBrush">#66FF9E42</SolidColorBrush>
+
+            <!-- Primary tints: current channel row, reply bar -->
+            <SolidColorBrush x:Key="AuraPrimaryTintBrush">#3300D1D4</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimaryBorderBrush">#5200D1D4</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimarySoftBrush">#B200D1D4</SolidColorBrush>
+
+            <!-- Talk-lane segment colors, by speaker slot (handoff §3b) -->
+            <SolidColorBrush x:Key="AuraSegment1Brush">#BFFF9E42</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegment2Brush">#BF2E85DE</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegment3Brush">#BF00D1D4</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegmentLiveBrush">#FF9E42</SolidColorBrush>
+
+            <!-- primary -> secondary, the brand gradient (avatars, send, active HUD) -->
+            <LinearGradientBrush x:Key="AuraBrandGradientBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+                <GradientStop Color="#00D1D4" Offset="0"/>
+                <GradientStop Color="#2E85DE" Offset="1"/>
+            </LinearGradientBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Light">
+            <!-- Palette (handoff: Design tokens > Themes) -->
+            <Color x:Key="AuraBackgroundColor">#F0F7FF</Color>
+            <Color x:Key="AuraPrimaryColor">#0099B3</Color>
+            <Color x:Key="AuraSecondaryColor">#1A66CC</Color>
+            <Color x:Key="AuraAccentColor">#E6801A</Color>
+            <Color x:Key="AuraLushIndigoColor">#1A80B3</Color>
+            <SolidColorBrush x:Key="AuraBackgroundBrush">#F0F7FF</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimaryBrush">#0099B3</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSecondaryBrush">#1A66CC</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentBrush">#E6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraLushIndigoBrush">#1A80B3</SolidColorBrush>
+
+            <!-- Accent tints: speaker card, pills, speaking rows, pulse ring -->
+            <SolidColorBrush x:Key="AuraAccentTintBrush">#26E6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentBorderBrush">#5CE6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentPillFillBrush">#21E6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentPillBorderBrush">#4CE6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentRowFillBrush">#17E6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentRingBrush">#80E6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraAccentSoftBrush">#66E6801A</SolidColorBrush>
+
+            <!-- Primary tints: current channel row, reply bar -->
+            <SolidColorBrush x:Key="AuraPrimaryTintBrush">#330099B3</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimaryBorderBrush">#520099B3</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraPrimarySoftBrush">#B20099B3</SolidColorBrush>
+
+            <!-- Talk-lane segment colors, by speaker slot (handoff §3b) -->
+            <SolidColorBrush x:Key="AuraSegment1Brush">#BFE6801A</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegment2Brush">#BF1A66CC</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegment3Brush">#BF0099B3</SolidColorBrush>
+            <SolidColorBrush x:Key="AuraSegmentLiveBrush">#E6801A</SolidColorBrush>
+
+            <!-- primary -> secondary, the brand gradient (avatars, send, active HUD) -->
+            <LinearGradientBrush x:Key="AuraBrandGradientBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+                <GradientStop Color="#0099B3" Offset="0"/>
+                <GradientStop Color="#1A66CC" Offset="1"/>
+            </LinearGradientBrush>
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

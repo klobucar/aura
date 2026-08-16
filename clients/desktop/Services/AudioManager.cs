@@ -15,9 +15,22 @@ public class AudioManager : IDisposable
     private AudioReceiverWrapper? _receiver;
     
     /// <summary>
-    /// Event fired when active speakers change (for UI indicators)
+    /// Event fired when active speakers change (for UI indicators).
+    ///
+    /// This comes off the jitter buffer, i.e. from *decoded incoming* audio, so
+    /// it can never contain the local session id. The local talking signal is
+    /// <see cref="OnLocalCapture"/> — anything that needs "who is talking"
+    /// including us has to merge the two.
     /// </summary>
     public event Action<HashSet<uint>>? OnActiveSpeakersChanged;
+
+    /// <summary>
+    /// Fired for every captured frame with whether the frame produced a packet.
+    /// False means the send path dropped it — today only the VAD gate does that
+    /// (opt-in, off by default), so callers should combine this with the capture
+    /// level rather than trusting it alone. Fires on the capture thread.
+    /// </summary>
+    public event Action<bool>? OnLocalCapture;
     
     /// <summary>
     /// Last known active speakers
@@ -88,10 +101,12 @@ public class AudioManager : IDisposable
         try
         {
             var packet = _sender.ProcessFloat(floatSamples);
+            OnLocalCapture?.Invoke(packet != null);
             return packet;
         }
         catch (Exception)
         {
+            OnLocalCapture?.Invoke(false);
             return null;
         }
     }
@@ -110,6 +125,24 @@ public class AudioManager : IDisposable
     public void RemoveRemoteSender(uint sessionId)
     {
         _receiver?.RemoveSender(sessionId);
+    }
+
+    /// <summary>
+    /// Set one sender's local playback gain (1.0 = unchanged). Local only — the
+    /// server is never told, and nobody else's mix is affected.
+    /// </summary>
+    public void SetSenderGain(uint sessionId, float gain)
+    {
+        _receiver?.SetSenderGain(sessionId, gain);
+    }
+
+    /// <summary>
+    /// Mute one sender locally. The sender keeps decoding so its Opus state
+    /// stays consistent; the mixer just drops the samples.
+    /// </summary>
+    public void SetSenderMuted(uint sessionId, bool muted)
+    {
+        _receiver?.SetSenderMuted(sessionId, muted);
     }
     
     /// <summary>

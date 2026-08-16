@@ -41,6 +41,15 @@ public class RustAudioEngine : IDisposable
     public event Action<byte[]>? OnAudioData;
     public event Action<string>? OnError;
 
+    /// <summary>
+    /// RMS level of each captured frame, 0..1 linear. Fires ~50×/s on the
+    /// capture thread, so consumers must accumulate rather than marshal per
+    /// frame. This is the only local level signal the client has: it drives the
+    /// HUD input meter, the speaker card waveform, and — with the packet gate —
+    /// the local user's talk lane.
+    /// </summary>
+    public event Action<float>? OnCaptureLevel;
+
     public RustAudioEngine()
     {
         _handle = aura_audio_new();
@@ -86,6 +95,7 @@ public class RustAudioEngine : IDisposable
                 var data = new byte[read * 2];
                 Array.Copy(byteBuffer, data, read * 2);
                 OnAudioData?.Invoke(data);
+                OnCaptureLevel?.Invoke(FrameLevel(sampleBuffer, read));
             }
             else
             {
@@ -93,6 +103,21 @@ public class RustAudioEngine : IDisposable
                 await Task.Delay(5, ct);
             }
         }
+    }
+
+    /// <summary>RMS of one captured frame, normalised to 0..1.</summary>
+    private static float FrameLevel(short[] samples, int count)
+    {
+        if (count <= 0) return 0f;
+
+        double sum = 0;
+        for (int i = 0; i < count; i++)
+        {
+            double sample = samples[i] / 32768.0;
+            sum += sample * sample;
+        }
+
+        return (float)Math.Sqrt(sum / count);
     }
 
     public void PlayAudio(byte[] pcmData)
