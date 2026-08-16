@@ -655,6 +655,28 @@ pub struct ChannelDeletedRecord {
     pub fallback_channel_id: String,
 }
 
+/// Server's reply to a `CreateChannelRequest` (MSG_CREATE_CHANNEL, 0x40).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CreateChannelResponseRecord {
+    pub success: bool,
+    pub channel_id: String,
+    pub error_message: String,
+}
+
+/// Server's reply to `UpdateChannelRequest` (0x41) or `UpdateProfile` (0x42).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MetadataUpdateResponseRecord {
+    pub success: bool,
+    pub error_message: String,
+}
+
+/// Server's reply to `DeleteChannelRequest` (0x43) or `DeleteUserRequest` (0x44).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AdminResponseRecord {
+    pub success: bool,
+    pub error_message: String,
+}
+
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum MlsGroupType {
     Voice,
@@ -842,6 +864,44 @@ pub fn decode_channel_deleted(data: Vec<u8>) -> Result<ChannelDeletedRecord, Aud
     Ok(ChannelDeletedRecord {
         channel_id: proto.channel_id,
         fallback_channel_id: proto.fallback_channel_id,
+    })
+}
+
+#[uniffi::export]
+pub fn decode_create_channel_response(
+    data: Vec<u8>,
+) -> Result<CreateChannelResponseRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::CreateChannelResponse::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(CreateChannelResponseRecord {
+        success: proto.success,
+        channel_id: proto.channel_id,
+        error_message: proto.error_message,
+    })
+}
+
+#[uniffi::export]
+pub fn decode_metadata_update_response(
+    data: Vec<u8>,
+) -> Result<MetadataUpdateResponseRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::MetadataUpdateResponse::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(MetadataUpdateResponseRecord {
+        success: proto.success,
+        error_message: proto.error_message,
+    })
+}
+
+#[uniffi::export]
+pub fn decode_admin_response(data: Vec<u8>) -> Result<AdminResponseRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::AdminResponse::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(AdminResponseRecord {
+        success: proto.success,
+        error_message: proto.error_message,
     })
 }
 

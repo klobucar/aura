@@ -558,6 +558,15 @@ impl ServerState {
             });
         }
 
+        // DashMap iteration order is unspecified; sort so clients see a
+        // stable, position-respecting order (mirrors the DB's
+        // `ORDER BY position, channel_id` in `Database::get_all_channels`).
+        channels.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.channel_id.cmp(&b.channel_id))
+        });
+
         let profiles: Vec<UserProfile> = self.profiles.iter().map(|p| p.value().clone()).collect();
 
         info!(
@@ -1299,6 +1308,10 @@ impl ServerState {
     ) -> Result<String> {
         let (icon_type, icon_data) = self.convert_proto_icon(icon);
         let channel_type = 0; // Default to Regular for manually created channels
+                              // Append after existing channels instead of colliding at 0 — new
+                              // channels previously all landed at position 0, leaving their
+                              // relative order to DashMap iteration (see get_server_snapshot).
+        let position = self.channel_metadata.len() as i32;
 
         let channel_id = self.db.upsert_channel(
             None,
@@ -1306,7 +1319,7 @@ impl ServerState {
             &comment,
             icon_type,
             &icon_data,
-            0,
+            position,
             channel_type,
         )?;
 
@@ -1319,7 +1332,7 @@ impl ServerState {
                 comment,
                 icon_type,
                 icon_data,
-                position: 0,
+                position,
                 channel_type,
             },
         );
