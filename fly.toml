@@ -16,7 +16,8 @@ primary_region = 'ord'
   AURA_ACME_CACHE_PATH = '/data/acme'
   AURA_BIND_ADDRESS = '0.0.0.0:8443'
   AURA_DATABASE_PATH = '/data/aura.db'
-  AURA_ACME_DIRECTORY_URL = 'https://acme-staging-v02.api.letsencrypt.org/directory'
+  # Unset = Let's Encrypt production. Uncomment to test against staging:
+  # AURA_ACME_DIRECTORY_URL = 'https://acme-staging-v02.api.letsencrypt.org/directory'
 
 [[mounts]]
   source = 'aura_data'
