@@ -61,20 +61,25 @@ pub struct QuicServer {
 impl QuicServer {
     /// Create a new QUIC server based on the provided configuration.
     pub fn new(bind_addr: SocketAddr, state: Arc<ServerState>) -> Result<Self> {
-        // We're bypassing ACME for now due to JSON parsing issues with Let's Encrypt Staging ("missing field token").
-        // Falling back to self-signed or manual TLS as requested.
-
-        // Still start the health-check listener so Fly.io doesn't think we're dead
-        Self::start_health_check_listener(&state);
-
+        // TLS source priority: explicit cert/key files > ACME (Let's Encrypt) > self-signed.
         let server_config = if let (Some(cert_path), Some(key_path)) = (
             &state.config.server.cert_path,
             &state.config.server.key_path,
         ) {
             info!("Loading custom TLS certificates from {:?}...", cert_path);
+            // Nothing else binds the health-check port in this mode.
+            Self::start_health_check_listener(&state);
             Self::configure_manual_tls(cert_path, key_path)?
+        } else if let Some(domain) = state.config.server.acme_domain.clone() {
+            info!("Configuring ACME (Let's Encrypt) for domain {}...", domain);
+            // configure_acme spawns its own Axum server on acme_bind_port that
+            // serves the HTTP-01 challenge route AND a "/" health check, so we
+            // must NOT also call start_health_check_listener — both would bind
+            // acme_bind_port and the second bind would fail.
+            Self::configure_acme(&domain, &state)?
         } else {
-            info!("ACME disabled or bypassed. Generating self-signed fallback...");
+            info!("No TLS cert or ACME domain configured. Generating self-signed fallback...");
+            Self::start_health_check_listener(&state);
             Self::generate_self_signed_config()?
         };
 
@@ -101,7 +106,6 @@ impl QuicServer {
         })
     }
 
-    #[allow(dead_code)]
     /// Configure ACME (Let's Encrypt) for automated certificate management.
     fn configure_acme(domain: &str, state: &Arc<ServerState>) -> Result<ServerConfig> {
         let contact = state
@@ -132,6 +136,11 @@ impl QuicServer {
         if let Some(url) = &state.config.server.acme_directory_url {
             info!("[ACME] Using custom directory URL: {}", url);
             acme_builder = acme_builder.directory(url);
+        } else {
+            // rustls-acme's builder defaults to the Let's Encrypt STAGING
+            // directory, whose certificates clients don't trust. No configured
+            // URL means production.
+            acme_builder = acme_builder.directory_lets_encrypt(true);
         }
 
         let mut acme_state = acme_builder.state();
