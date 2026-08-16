@@ -1218,6 +1218,18 @@ public class QuicNetworkClient {
         case Self.MSG_CHANNEL_DELETED: // 0x47 - The channel we were in was deleted
             await handleChannelDeleted(stream: stream)
 
+        case Self.MSG_CREATE_CHANNEL: // 0x40 - Reply to our CreateChannelRequest
+            await handleCreateChannelResponse(stream: stream)
+
+        case Self.MSG_UPDATE_CHANNEL: // 0x41 - Reply to our UpdateChannelRequest
+            await handleUpdateChannelResponse(stream: stream)
+
+        case Self.MSG_UPDATE_PROFILE: // 0x42 - Reply to our UpdateProfile request
+            await handleUpdateProfileResponse(stream: stream)
+
+        case Self.MSG_DELETE_CHANNEL: // 0x43 - Reply to our DeleteChannelRequest
+            await handleDeleteChannelResponse(stream: stream)
+
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
             break
@@ -1433,6 +1445,96 @@ public class QuicNetworkClient {
             }
         } catch {
             print("[QuicClient] Failed to parse ChannelDeleted: \(error)")
+        }
+    }
+
+    /// Handle the server's reply to our CreateChannelRequest. On success the
+    /// new channel arrives via the ServerState broadcast that follows, so we
+    /// only need to surface failures here.
+    private func handleCreateChannelResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeCreateChannelResponse(data: payload)
+            if !response.success {
+                print("[QuicClient] Create channel failed: \(response.errorMessage)")
+                await MainActor.run {
+                    self.demoteIfAdminRequired(response.errorMessage)
+                    self.systemEvents.append(
+                        SystemEvent(content: "Failed to create channel: \(response.errorMessage)"))
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse CreateChannelResponse: \(error)")
+        }
+    }
+
+    /// Handle the server's reply to our UpdateChannelRequest.
+    private func handleUpdateChannelResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeMetadataUpdateResponse(data: payload)
+            if !response.success {
+                print("[QuicClient] Update channel failed: \(response.errorMessage)")
+                await MainActor.run {
+                    self.demoteIfAdminRequired(response.errorMessage)
+                    self.systemEvents.append(
+                        SystemEvent(content: "Failed to update channel: \(response.errorMessage)"))
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse UpdateChannel MetadataUpdateResponse: \(error)")
+        }
+    }
+
+    /// Handle the server's reply to our UpdateProfile request. Not
+    /// admin-gated, so no `isAdmin` bookkeeping here.
+    private func handleUpdateProfileResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeMetadataUpdateResponse(data: payload)
+            if !response.success {
+                print("[QuicClient] Update profile failed: \(response.errorMessage)")
+                await MainActor.run {
+                    self.systemEvents.append(
+                        SystemEvent(content: "Failed to update profile: \(response.errorMessage)"))
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse UpdateProfile MetadataUpdateResponse: \(error)")
+        }
+    }
+
+    /// Handle the server's reply to our DeleteChannelRequest.
+    private func handleDeleteChannelResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeAdminResponse(data: payload)
+            if !response.success {
+                print("[QuicClient] Delete channel failed: \(response.errorMessage)")
+                await MainActor.run {
+                    self.demoteIfAdminRequired(response.errorMessage)
+                    self.systemEvents.append(
+                        SystemEvent(content: "Failed to delete channel: \(response.errorMessage)"))
+                }
+            }
+        } catch {
+            print("[QuicClient] Failed to parse DeleteChannel AdminResponse: \(error)")
+        }
+    }
+
+    /// The server re-checks admin status on every request rather than
+    /// trusting a cached flag, but our own `isAdmin` is only set once at
+    /// login (see AuthResponse handling above) and never refreshed. If a
+    /// request comes back rejected specifically because admin rights are
+    /// gone, drop the local flag immediately instead of waiting for a
+    /// reconnect to notice the mismatch — this hides the create/edit/delete
+    /// UI right away rather than letting the user hit the same rejection
+    /// repeatedly.
+    @MainActor
+    private func demoteIfAdminRequired(_ errorMessage: String) {
+        if isAdmin && errorMessage == "Admin required" {
+            print("[QuicClient] Server rejected admin action; clearing stale isAdmin flag")
+            isAdmin = false
         }
     }
 
