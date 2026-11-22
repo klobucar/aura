@@ -33,8 +33,9 @@
 pub mod credential;
 
 use ed25519_dalek::Signer as _;
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Keypair as _, MlDsa65};
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, Keypair as _, MlDsa44, MlDsa65};
 use rand::RngExt as _;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub use credential::MemberCredential;
@@ -56,6 +57,21 @@ pub const SECRET_LEN: usize = 64;
 
 /// Starts every signed message, and is the ML-DSA context string.
 const PREFIX: &[u8] = b"aura-identity-v1 MLDSA65+Ed25519";
+
+/// IANA MLS SignatureScheme code point for ML-DSA-44, the signature scheme
+/// of Aura's MLS ciphersuite.
+pub const MLS_SIGNATURE_SCHEME_MLDSA44: u16 = 0x0904;
+
+/// Labels the derivation of MLS signing seeds from an identity secret.
+const MLS_SEED_LABEL: &[u8] = b"aura-identity-v1 mls-signing-seed MLDSA44";
+
+/// An ML-DSA-44 MLS signing key derived from an identity.
+pub struct MlsSigningKey {
+    /// FIPS 204 seed; what OpenMLS's basic credential signs with.
+    pub seed: Zeroizing<[u8; 32]>,
+    /// Encoded ML-DSA-44 public key (1,312 bytes).
+    pub public_key: Vec<u8>,
+}
 
 /// What a signature is for. Each purpose gets its own label inside the
 /// signed message, so signatures don't transfer between purposes.
@@ -170,6 +186,29 @@ impl IdentitySecret {
         IdentityPublicKey::from_bytes(&bytes).expect("own public key is well-formed")
     }
 
+    /// The MLS signing key for `generation` (start at 0; bump to rotate).
+    ///
+    /// Derived rather than stored, so a client keeps one 64-byte secret. The
+    /// derivation is one-way: an exposed MLS key reveals nothing about the
+    /// identity secret. It is a one-step hash KDF:
+    /// `SHA-256(u32 counter = 1 || secret || label || u32 generation)`.
+    pub fn mls_signing_key(&self, generation: u32) -> MlsSigningKey {
+        let secret = self.to_bytes();
+        let mut h = Sha256::new();
+        h.update(1u32.to_be_bytes());
+        h.update(secret.as_slice());
+        h.update(MLS_SEED_LABEL);
+        h.update(generation.to_be_bytes());
+        let mut seed = Zeroizing::new([0u8; 32]);
+        seed.copy_from_slice(&h.finalize());
+
+        let key = ml_dsa::SigningKey::<MlDsa44>::from_seed(&ml_dsa::Seed::from(*seed));
+        MlsSigningKey {
+            seed,
+            public_key: key.verifying_key().encode().to_vec(),
+        }
+    }
+
     /// Sign `message` for `purpose`. Both halves are deterministic.
     pub fn sign(&self, purpose: Purpose, message: &[u8]) -> IdentitySignature {
         let m = signed_message(purpose, message);
@@ -184,6 +223,30 @@ impl IdentitySecret {
         bytes.extend_from_slice(&ed.to_bytes());
         IdentitySignature { bytes }
     }
+}
+
+/// Length of the server's login challenge.
+pub const AUTH_CHALLENGE_LEN: usize = 32;
+
+/// What a client signs, for [`Purpose::Auth`], to log in:
+/// `challenge (32) || len(display_name) (u16 BE) || display_name || identity public key`.
+///
+/// Binding the display name stops a relay from replaying the response under
+/// another name. Binding the whole identity key matters when an account that
+/// predates ML-DSA logs in: the server pins the ML-DSA key on the strength of
+/// the account's existing Ed25519 key having signed this transcript.
+pub fn auth_transcript(
+    challenge: &[u8; AUTH_CHALLENGE_LEN],
+    display_name: &str,
+    identity: &IdentityPublicKey,
+) -> Vec<u8> {
+    let name = display_name.as_bytes();
+    let mut t = Vec::with_capacity(AUTH_CHALLENGE_LEN + 2 + name.len() + PUBLIC_KEY_LEN);
+    t.extend_from_slice(challenge);
+    t.extend_from_slice(&(name.len().min(u16::MAX as usize) as u16).to_be_bytes());
+    t.extend_from_slice(&name[..name.len().min(u16::MAX as usize)]);
+    t.extend_from_slice(identity.as_bytes());
+    t
 }
 
 /// A user's public identity: ML-DSA-65 key followed by Ed25519 key.
@@ -416,6 +479,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auth_transcript_binds_challenge_name_and_key() {
+        let id = fixed();
+        let pk = id.public_key();
+        let challenge = [0x11u8; AUTH_CHALLENGE_LEN];
+        let t = auth_transcript(&challenge, "alice", &pk);
+        assert_eq!(t.len(), 32 + 2 + 5 + PUBLIC_KEY_LEN);
+        let sig = id.sign(Purpose::Auth, &t);
+        assert_eq!(pk.verify(Purpose::Auth, &t, &sig), Ok(()));
+
+        // Any change to the challenge, the name or the key breaks it.
+        let other_challenge = auth_transcript(&[0x12; AUTH_CHALLENGE_LEN], "alice", &pk);
+        let other_name = auth_transcript(&challenge, "mallory", &pk);
+        let other_key = auth_transcript(
+            &challenge,
+            "alice",
+            &IdentitySecret::from_parts(&[0x01; 32], &[0x09; 32]).public_key(),
+        );
+        for t2 in [other_challenge, other_name, other_key] {
+            assert_eq!(
+                pk.verify(Purpose::Auth, &t2, &sig),
+                Err(IdentityError::BadSignature)
+            );
+        }
+    }
+
+    #[test]
+    fn mls_signing_keys_are_derived_per_identity_and_generation() {
+        let id = fixed();
+        let k0 = id.mls_signing_key(0);
+        assert_eq!(k0.public_key.len(), 1312);
+        assert_eq!(*k0.seed, *id.mls_signing_key(0).seed, "deterministic");
+        assert_eq!(k0.public_key, id.mls_signing_key(0).public_key);
+        assert_ne!(
+            *k0.seed,
+            *id.mls_signing_key(1).seed,
+            "generation rotates it"
+        );
+        let other = IdentitySecret::from_parts(&[0x03; 32], &[0x04; 32]);
+        assert_ne!(*k0.seed, *other.mls_signing_key(0).seed, "per identity");
+
+        // The derived key works as a certified MLS key.
+        let cred = MemberCredential::issue(&id, "u", MLS_SIGNATURE_SCHEME_MLDSA44, &k0.public_key)
+            .unwrap();
+        assert_eq!(
+            cred.verify(MLS_SIGNATURE_SCHEME_MLDSA44, &k0.public_key),
+            Ok(())
+        );
+    }
+
     /// Pins the key derivation and signature format. If this changes, every
     /// stored identity and every signature already issued stops matching.
     #[test]
@@ -436,5 +549,9 @@ mod tests {
             "2aa2bfb7795e92404c0bb6b04edb2dc6d1f36d87800d949cc7af7f3abe2958a0"
         );
         assert_eq!(pk.verify(Purpose::Auth, b"aura known-answer", &sig), Ok(()));
+        assert_eq!(
+            hex::encode(Sha256::digest(&id.mls_signing_key(0).public_key)),
+            "5eb68568ac95a5bbc7ca443e78073c68316b4fe79edb1c11ab71494ed453b642"
+        );
     }
 }

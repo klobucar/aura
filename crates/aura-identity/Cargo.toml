@@ -11,9 +11,9 @@ ed25519-dalek = "3.0.0"
 # provider; `zeroize` wipes the signing seed on drop.
 ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "zeroize"] }
 rand = "0.10.1"
+sha2 = "0.11.1"
 thiserror = "2.0.18"
 zeroize = "1.8.2"
 
 [dev-dependencies]
 hex = "0.4.3"
-sha2 = "0.11.1"
