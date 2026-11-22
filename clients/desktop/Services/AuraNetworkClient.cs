@@ -984,9 +984,9 @@ public class AuraNetworkClient : IAsyncDisposable
                 ChannelId = channelId,
                 Epoch = epoch,
                 MessageId = messageId,
-                Ciphertext = ByteString.CopyFrom(nativePacket.ciphertext),
-                Nonce = ByteString.CopyFrom(nativePacket.nonce),
-                Tag = ByteString.CopyFrom(nativePacket.tag),
+                Ciphertext = ByteString.CopyFrom(nativePacket.Ciphertext),
+                Nonce = ByteString.CopyFrom(nativePacket.Nonce),
+                Tag = ByteString.CopyFrom(nativePacket.Tag),
                 ReplyToId = replyToId ?? ""
             };
             
@@ -1045,8 +1045,8 @@ public class AuraNetworkClient : IAsyncDisposable
                 using var transientCrypto = new uniffi.aura_core.TextCryptoWrapper(senderKey);
                 var decryptedMessage = transientCrypto.Decrypt(nativePacket);
                 
-                Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.content} from {packet.SenderSessionId}");
-                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.content, packet.ReplyToId);
+                Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.Content} from {packet.SenderSessionId}");
+                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content, packet.ReplyToId);
             }
         }
         catch (Exception ex)
@@ -1179,8 +1179,8 @@ public class AuraNetworkClient : IAsyncDisposable
                 ChannelId = channelId,
                 GroupType = isVoice ? Aura.V1Alpha1.MlsGroupType.Voice : Aura.V1Alpha1.MlsGroupType.Text,
                 CommitWelcome = new Aura.V1Alpha1.MlsCommitWelcome {
-                    Commit = ByteString.CopyFrom(result.commit),
-                    Welcome = ByteString.CopyFrom(result.welcome),
+                    Commit = ByteString.CopyFrom(result.Commit),
+                    Welcome = ByteString.CopyFrom(result.Welcome),
                     NewMemberSessionId = joinerSessionId
                 }
             };

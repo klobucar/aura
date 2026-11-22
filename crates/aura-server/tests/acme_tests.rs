@@ -15,7 +15,7 @@ async fn test_acme_certificate_acquisition_with_pebble() {
     }
 
     // Initialize rustls crypto provider (required for rustls 0.23+)
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    aura_server::tls::install_default_provider();
 
     // 1. Create a temporary database and config
     let db = Arc::new(Database::open_in_memory().unwrap());

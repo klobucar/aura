@@ -34,13 +34,14 @@ Standard DAVE is constrained by **WebRTC**. WebRTC-based SFUs (Relays) often ins
 
 ## 3. Cryptographic Primitives
 
-### Deviation: Ed25519/X25519 vs. P-256
-*   **Aura**: `DHKEMX25519` + `Ed25519`.
+### Deviation: Hybrid X25519 + ML-KEM-768 / Ed25519 vs. P-256
+*   **Aura**: `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519`: X-Wing hybrid KEM (X25519 + ML-KEM-768) and `Ed25519` signatures.
 *   **Standard DAVE**: `DHKEMP256` + `P-256`.
 
 **Rationale:**
 - **P-256** (NIST) contains unexplained "seed" values that have long been a source of skepticism in the security community (potential "backdoors").
 - **Ed25519/X25519** (Bernstein) is easier to implement safely without side-channels (like branch-on-secret) and has much higher performance. Since we are not bound by legacy browser compatibility, we chose the superior modern standard.
+- **ML-KEM-768** is combined with X25519 so that recorded MLS handshakes stay confidential against a future quantum computer ("harvest now, decrypt later"), while the classical half preserves today's security if ML-KEM is ever broken. See [PQ Migration](PQ_MIGRATION.md).
 
 ---
 

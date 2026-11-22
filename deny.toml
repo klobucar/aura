@@ -12,43 +12,19 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-# Both entries are blocked on the upstream OpenMLS/libcrux dependency chain —
-# we are already on the latest openmls 0.8.1 / openmls_rust_crypto 0.5.1, and
-# the fixes are not reachable from our manifests. Re-check on every openmls bump.
+# Blocked on the upstream OpenMLS dependency chain: openmls 0.9.2 /
+# openmls_rust_crypto 0.6.0 / openmls_basic_credential 0.6.0 are the latest
+# releases and the fix is not reachable from our manifests. Re-check on every
+# openmls bump, and whenever `mls::CIPHERSUITE` changes — the justification
+# below depends on which primitives the suite uses.
 ignore = [
-    # libcrux-chacha20poly1305 < 0.0.8 panics if handed an oversized ciphertext
-    # buffer. Unreachable here: libcrux-aead 0.0.7 pins it at "=0.0.7" (so 0.0.8
-    # cannot be selected), and our MLS ciphersuite uses AES-128-GCM for HPKE —
-    # the ChaCha backend is not in the compiled graph (`cargo tree -i` finds
-    # nothing). The panic also needs an attacker-controlled buffer length, which
-    # hpke-rs sizes internally, not from the wire.
-    { id = "RUSTSEC-2026-0124", reason = "fix pinned out by libcrux-aead 0.0.7; vulnerable AEAD not in our compiled graph" },
-    # proc-macro-error2 is unmaintained. Build-time only — it is used by
-    # hax-lib-macros (libcrux's formal-verification tooling) and is not linked
-    # into the shipped binary. No runtime exposure.
-    { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via hax-lib; not in shipped binary" },
-    # libcrux-secrets' aarch64 cswap/select bug lives in libcrux-traits'
-    # aead/kem/ecdh trait modules. libcrux-sha3 (our only path to
-    # libcrux-traits) uses just its unrelated `digest` module. The other path
-    # to libcrux-secrets is via libcrux-aead 0.0.7 (same pin as -0124) through
-    # the optional hpke-rs-libcrux PQ backend, which openmls_rust_crypto does
-    # not select (it uses hpke-rs-rust-crypto). `cargo update -p
-    # libcrux-secrets --precise 0.0.6` confirms the pin can't move without an
-    # hpke-rs/openmls_rust_crypto release.
-    { id = "RUSTSEC-2026-0212", reason = "vulnerable cswap/select path not reachable; fix pinned out by libcrux-aead 0.0.7 / hpke-rs" },
-    # libcrux-sha3's incremental-squeeze bug needs multiple squeeze() calls
-    # with a non-RATE-aligned length; our only call site (hpke-rs's
-    # derive_key_pair, for XWingDraft06/MlKem768/MlKem1024) uses the one-shot
-    # shake256::<N>() function instead. That call site is itself dead code —
-    # aura's ciphersuite is MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519
-    # (crates/aura-core/src/mls.rs), a classical X25519 DH-KEM, so the
-    # PQ/hybrid KEM branch that reaches libcrux-sha3 never executes.
-    { id = "RUSTSEC-2026-0207", reason = "hpke-rs uses one-shot shake256(), not incremental squeeze; call site is dead code for our X25519 ciphersuite" },
-    # Same call site as -0207. The AVX2 SHAKE-256 panic needs an output
-    # length > 32 and not divisible by 8; hpke-rs only ever requests 32 or 64
-    # bytes there (both divisible by 8), and the call site is unreachable for
-    # the same reason (classical X25519 ciphersuite, not PQ/hybrid KEM).
-    { id = "RUSTSEC-2026-0208", reason = "call site always requests 8-divisible lengths (32/64B) and is dead code for our X25519 ciphersuite" },
+    # crypto-bigint 0.5 has secret-dependent branches in arithmetic meant to be
+    # constant-time. Only NIST-curve code reaches it (p256/p384/k256 via
+    # elliptic-curve 0.13, from openmls_basic_credential and the RustCrypto
+    # HPKE backend). Aura's suite, MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519,
+    # uses X25519 + ML-KEM-768 (X-Wing) and Ed25519, so no secret ever passes
+    # through those curves. The fix only exists on the crypto-bigint 0.7 line.
+    { id = "RUSTSEC-2026-0387", reason = "only NIST-curve code uses it; our MLS suite is X-Wing + Ed25519, no P-256/P-384/k256 secrets" },
 ]
 
 [bans]

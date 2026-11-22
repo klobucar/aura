@@ -163,14 +163,14 @@ public class AudioManager : IDisposable
         if (result == null) return null;
         
         // Check if speakers changed
-        var newSpeakers = new HashSet<uint>(result.activeSpeakers);
+        var newSpeakers = new HashSet<uint>(result.ActiveSpeakers);
         if (!newSpeakers.SetEquals(_lastActiveSpeakers))
         {
             _lastActiveSpeakers = newSpeakers;
             OnActiveSpeakersChanged?.Invoke(newSpeakers);
         }
         
-        return result.pcm;
+        return result.Pcm;
     }
     
     // Settings API

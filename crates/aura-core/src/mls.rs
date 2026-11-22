@@ -1,7 +1,8 @@
 //! MLS Encryption Client for DAVE Protocol
 //!
 //! Provides MLS group management for E2EE voice and text channels.
-//! Uses OpenMLS with Ed25519 signatures and Curve25519 key exchange.
+//! Uses OpenMLS with Ed25519 signatures and hybrid post-quantum key exchange
+//! (X-Wing: X25519 + ML-KEM-768); see [`CIPHERSUITE`].
 
 use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
@@ -23,13 +24,45 @@ pub const DAVE_KEY_LEN: usize = 32;
 /// in `AudioReceiver::update_sender_key`.
 pub const EPOCH_KEY_RETENTION: usize = 4;
 
-/// Ciphersuite for all MLS operations
-pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+/// Ciphersuite for all MLS operations.
+///
+/// `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` (draft-ietf-mls-pq-ciphersuites):
+/// - **KEM:** MLKEM768-X25519, i.e. X-Wing (draft-connolly-cfrg-xwing-kem-06),
+///   a hybrid of X25519 and ML-KEM-768. Group secrets stay confidential unless
+///   *both* are broken, so recorded handshakes resist "harvest now, decrypt
+///   later".
+/// - **AEAD:** AES-256-GCM (256-bit key).
+/// - **Hash/KDF:** SHA-384 / HKDF-SHA384.
+/// - **Signatures:** Ed25519 — still classical; see `docs/PQ_MIGRATION.md`.
+///
+/// The "128" is the draft's security-category label for ML-KEM-768, not the
+/// AEAD key size. The code point (0x004E) is provisional until IANA assigns
+/// one; adopting the final value will be the same all-clients-at-once upgrade
+/// as this one.
+///
+/// Every peer must use the same suite: a group only admits KeyPackages of its
+/// own suite, and [`MlsClient`] refuses anything else rather than downgrade.
+pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519;
+
+/// Leaf capabilities advertised in our KeyPackages and leaves: exactly
+/// [`CIPHERSUITE`], since that is the only suite we will join or admit.
+/// (OpenMLS's default list advertises classical suites we refuse.)
+fn leaf_capabilities() -> Capabilities {
+    Capabilities::new(None, Some(&[CIPHERSUITE]), None, None, None)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
     #[error("OpenMLS error: {0}")]
     OpenMls(String),
+    /// A peer offered MLS material for a different ciphersuite — typically a
+    /// client that predates the post-quantum suite. Never silently accepted,
+    /// since that would downgrade the group's key exchange.
+    #[error("Ciphersuite mismatch: expected {expected:?}, peer used {actual:?} (peer client may need updating)")]
+    CiphersuiteMismatch {
+        expected: Ciphersuite,
+        actual: Ciphersuite,
+    },
     #[error("Group not found: {0}")]
     GroupNotFound(String),
     #[error("No credential available")]
@@ -116,6 +149,7 @@ impl MlsClient {
         let identity = self.identity.as_ref().ok_or(MlsError::NoCredential)?;
 
         let key_package_bundle = KeyPackage::builder()
+            .leaf_node_capabilities(leaf_capabilities())
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -134,6 +168,7 @@ impl MlsClient {
         let group_config = MlsGroupCreateConfig::builder()
             .use_ratchet_tree_extension(true)
             .ciphersuite(CIPHERSUITE)
+            .capabilities(leaf_capabilities())
             .build();
 
         let group = MlsGroup::new_with_group_id(
@@ -381,16 +416,31 @@ impl MlsClient {
             .use_ratchet_tree_extension(true)
             .build();
 
-        // Process the Welcome and create the group
-        let group = StagedWelcome::new_from_welcome(
+        // Process the Welcome
+        let staged = StagedWelcome::new_from_welcome(
             &self.provider,
             &group_config,
             welcome,
             None, // No ratchet tree provided separately
         )
-        .map_err(|e| MlsError::OpenMls(format!("Welcome processing error: {:?}", e)))?
-        .into_group(&self.provider)
-        .map_err(|e| MlsError::OpenMls(format!("Group creation from welcome error: {:?}", e)))?;
+        .map_err(|e| MlsError::OpenMls(format!("Welcome processing error: {:?}", e)))?;
+
+        // Whoever built this Welcome chose the group's ciphersuite, and
+        // OpenMLS will join any suite the provider supports. Refuse anything
+        // but ours so a stale or hostile peer cannot move us onto
+        // classical-only key exchange. Checked before `into_group` so a
+        // rejected group never reaches the provider's storage.
+        let suite = staged.group_context().ciphersuite();
+        if suite != CIPHERSUITE {
+            return Err(MlsError::CiphersuiteMismatch {
+                expected: CIPHERSUITE,
+                actual: suite,
+            });
+        }
+
+        let group = staged.into_group(&self.provider).map_err(|e| {
+            MlsError::OpenMls(format!("Group creation from welcome error: {:?}", e))
+        })?;
 
         let group_id = group.group_id().as_slice().to_vec();
         // Same reasoning as `create_group`: keys retained from a prior
@@ -427,6 +477,16 @@ impl MlsClient {
         let key_package = key_package_in
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| MlsError::OpenMls(format!("KeyPackage validation error: {:?}", e)))?;
+
+        // OpenMLS would also refuse this (as an opaque proposal-validation
+        // error); checking here names the cause, which is almost always a
+        // joiner running a client from before the post-quantum suite.
+        if key_package.ciphersuite() != CIPHERSUITE {
+            return Err(MlsError::CiphersuiteMismatch {
+                expected: CIPHERSUITE,
+                actual: key_package.ciphersuite(),
+            });
+        }
 
         // Add the member and get (commit, welcome, group_info)
         let (commit_out, welcome, _group_info) = group
@@ -994,5 +1054,233 @@ mod tests {
         assert_eq!(epoch_b, epoch_c);
         assert_eq!(alice_key, bob_key);
         assert_eq!(bob_key, charlie_key);
+    }
+
+    // ------------------------------------------------------------------
+    // Hybrid post-quantum ciphersuite
+    // ------------------------------------------------------------------
+
+    /// The suite pre-X-Wing clients shipped with.
+    const LEGACY_CIPHERSUITE: Ciphersuite =
+        Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+
+    /// X-Wing public key: ML-KEM-768 encapsulation key (1184) + X25519 (32).
+    const XWING_PUBLIC_KEY_LEN: usize = 1216;
+
+    /// The KEM must be the X25519+ML-KEM-768 hybrid, and the AEAD must be
+    /// 256-bit so the MLS layer matches the data plane's PQ margin.
+    #[test]
+    fn test_ciphersuite_is_hybrid_post_quantum() {
+        assert_eq!(
+            CIPHERSUITE.hpke_kem_algorithm(),
+            HpkeKemType::XWingKemDraft6
+        );
+        assert_eq!(CIPHERSUITE.aead_algorithm(), AeadType::Aes256Gcm);
+        assert_eq!(CIPHERSUITE.hpke_aead_algorithm(), HpkeAeadType::AesGcm256);
+        assert_eq!(CIPHERSUITE.hash_algorithm(), HashType::Sha2_384);
+
+        let provider = OpenMlsRustCrypto::default();
+        assert!(provider.crypto().supports(CIPHERSUITE).is_ok());
+        assert!(provider
+            .crypto()
+            .supported_ciphersuites()
+            .contains(&CIPHERSUITE));
+    }
+
+    /// KeyPackages must actually carry X-Wing keys, not merely be labelled
+    /// with the X-Wing suite. An X25519 key is 32 bytes; X-Wing is 1216.
+    #[test]
+    fn test_key_package_carries_xwing_keys() {
+        let client = MlsClient::new("alice").expect("client");
+        let bundle = client.generate_key_package().expect("KP");
+        let kp = bundle.key_package();
+
+        assert_eq!(kp.ciphersuite(), CIPHERSUITE);
+        assert_eq!(kp.hpke_init_key().as_slice().len(), XWING_PUBLIC_KEY_LEN);
+        // The leaf key's bytes are crate-private; its TLS encoding is a
+        // 2-byte MLS varint length prefix followed by the key.
+        use openmls::prelude::tls_codec::Size;
+        assert_eq!(
+            kp.leaf_node().encryption_key().tls_serialized_len(),
+            2 + XWING_PUBLIC_KEY_LEN
+        );
+
+        // We advertise only the suite we accept — no classical fallback.
+        let advertised: Vec<Ciphersuite> = kp
+            .leaf_node()
+            .capabilities()
+            .ciphersuites()
+            .iter()
+            .map(|cs| Ciphersuite::try_from(*cs).expect("known suite"))
+            .collect();
+        assert_eq!(advertised, vec![CIPHERSUITE]);
+    }
+
+    /// Full lifecycle under X-Wing: create, join via Welcome, add a third
+    /// member via Commit, then ratchet from a *non-founder* so every member
+    /// has to decapsulate an X-Wing path secret from someone else. Keys must
+    /// agree at every epoch and the old epoch must stay decryptable.
+    #[test]
+    fn test_pq_join_commit_and_ratchet() {
+        let group_id = b"test-pq-lifecycle";
+        let sender = 21u32;
+
+        let mut alice = MlsClient::new("alice").expect("alice");
+        alice.create_group(group_id).expect("create");
+
+        let mut bob = MlsClient::new("bob").expect("bob");
+        let (_c, welcome) = alice
+            .add_member(group_id, &bob.get_key_package_bytes().unwrap())
+            .expect("add bob");
+        bob.process_welcome(&welcome).expect("bob joins");
+
+        let mut charlie = MlsClient::new("charlie").expect("charlie");
+        let (commit, welcome) = alice
+            .add_member(group_id, &charlie.get_key_package_bytes().unwrap())
+            .expect("add charlie");
+        charlie.process_welcome(&welcome).expect("charlie joins");
+        bob.process_commit(group_id, &commit)
+            .expect("bob applies add");
+
+        for c in [&alice, &bob, &charlie] {
+            assert_eq!(c.groups[group_id.as_slice()].ciphersuite(), CIPHERSUITE);
+            assert_eq!(c.epoch(group_id).unwrap(), 2);
+        }
+
+        let (k2_a, _) = alice.export_sender_key(group_id, sender).unwrap();
+        let (k2_b, _) = bob.export_sender_key(group_id, sender).unwrap();
+        let (k2_c, _) = charlie.export_sender_key(group_id, sender).unwrap();
+        assert_eq!(k2_a, k2_b);
+        assert_eq!(k2_b, k2_c);
+
+        // Bob (not the founder) ratchets.
+        let ratchet = bob.self_update(group_id).expect("bob ratchets");
+        alice
+            .process_commit(group_id, &ratchet)
+            .expect("alice applies");
+        charlie
+            .process_commit(group_id, &ratchet)
+            .expect("charlie applies");
+
+        let (k3_a, e_a) = alice.export_sender_key(group_id, sender).unwrap();
+        let (k3_b, e_b) = bob.export_sender_key(group_id, sender).unwrap();
+        let (k3_c, e_c) = charlie.export_sender_key(group_id, sender).unwrap();
+        assert_eq!((e_a, e_b, e_c), (3, 3, 3));
+        assert_eq!(k3_a, k3_b);
+        assert_eq!(k3_b, k3_c);
+        assert_ne!(k3_a, k2_a, "ratchet must rotate the epoch secret");
+
+        for c in [&mut alice, &mut bob, &mut charlie] {
+            assert_eq!(
+                c.export_sender_key_at_epoch(group_id, sender, 2).unwrap(),
+                k2_a
+            );
+        }
+    }
+
+    /// A client still on the classical suite must get a clear mismatch error
+    /// when it tries to join, and the founder's group must not change.
+    #[test]
+    fn test_rejects_legacy_key_package() {
+        let group_id = b"test-pq-reject-legacy-kp";
+        let mut alice = MlsClient::new("alice").expect("alice");
+        alice.create_group(group_id).expect("create");
+
+        // Built exactly as the pre-X-Wing client did.
+        let legacy = OpenMlsRustCrypto::default();
+        let signer = openmls_basic_credential::SignatureKeyPair::new(
+            LEGACY_CIPHERSUITE.signature_algorithm(),
+        )
+        .unwrap();
+        signer.store(legacy.storage()).unwrap();
+        let legacy_kp = KeyPackage::builder()
+            .build(
+                LEGACY_CIPHERSUITE,
+                &legacy,
+                &signer,
+                CredentialWithKey {
+                    credential: BasicCredential::new(b"legacy".to_vec()).into(),
+                    signature_key: signer.public().into(),
+                },
+            )
+            .unwrap()
+            .key_package()
+            .tls_serialize_detached()
+            .unwrap();
+
+        match alice.add_member(group_id, &legacy_kp) {
+            Err(MlsError::CiphersuiteMismatch { expected, actual }) => {
+                assert_eq!(expected, CIPHERSUITE);
+                assert_eq!(actual, LEGACY_CIPHERSUITE);
+            }
+            other => panic!("expected CiphersuiteMismatch, got {:?}", other.map(|_| ())),
+        }
+        assert_eq!(alice.epoch(group_id).unwrap(), 0, "group must be untouched");
+        assert_eq!(alice.group_members(group_id).unwrap().len(), 1);
+    }
+
+    /// Downgrade guard: a Welcome into a classical-suite group is refused even
+    /// when it is validly addressed to one of our own KeyPackages.
+    #[test]
+    fn test_rejects_classical_welcome() {
+        // Our provider can still operate the legacy suite, so the Welcome
+        // decrypts and our own ciphersuite check is what refuses it.
+        const CLASSICAL: Ciphersuite = LEGACY_CIPHERSUITE;
+        let group_id = b"test-pq-reject-classical-welcome";
+
+        let mut bob = MlsClient::new("bob").expect("bob");
+        let bob_identity = bob.identity.as_ref().unwrap();
+        // Stores the private keys in Bob's provider, as a real KP would.
+        let bob_classical_kp = KeyPackage::builder()
+            .build(
+                CLASSICAL,
+                &bob.provider,
+                &bob_identity.signer,
+                bob_identity.credential_with_key.clone(),
+            )
+            .unwrap()
+            .key_package()
+            .clone();
+
+        // A peer that builds a classical group and invites Bob into it.
+        let peer = OpenMlsRustCrypto::default();
+        let peer_signer =
+            openmls_basic_credential::SignatureKeyPair::new(CLASSICAL.signature_algorithm())
+                .unwrap();
+        peer_signer.store(peer.storage()).unwrap();
+        let mut group = MlsGroup::new_with_group_id(
+            &peer,
+            &peer_signer,
+            &MlsGroupCreateConfig::builder()
+                .use_ratchet_tree_extension(true)
+                .ciphersuite(CLASSICAL)
+                .build(),
+            GroupId::from_slice(group_id),
+            CredentialWithKey {
+                credential: BasicCredential::new(b"peer".to_vec()).into(),
+                signature_key: peer_signer.public().into(),
+            },
+        )
+        .unwrap();
+        let (_commit, welcome, _) = group
+            .add_members(&peer, &peer_signer, &[bob_classical_kp])
+            .unwrap();
+        group.merge_pending_commit(&peer).unwrap();
+        let welcome = welcome.tls_serialize_detached().unwrap();
+
+        match bob.process_welcome(&welcome) {
+            Err(MlsError::CiphersuiteMismatch { expected, actual }) => {
+                assert_eq!(expected, CIPHERSUITE);
+                assert_eq!(actual, CLASSICAL);
+            }
+            other => panic!("expected CiphersuiteMismatch, got {:?}", other),
+        }
+        assert!(!bob.is_member(group_id));
+        // Rejected before `into_group`, so nothing was persisted either.
+        assert!(
+            MlsGroup::load(bob.provider.storage(), &GroupId::from_slice(group_id))
+                .unwrap()
+                .is_none()
+        );
     }
 }

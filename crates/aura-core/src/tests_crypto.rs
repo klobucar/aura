@@ -144,3 +144,20 @@ fn test_constant_time_comparison() {
     // Different arrays
     assert!(!constant_time_eq(&a, &c));
 }
+
+/// Known-answer test pinning the DAVE wire format (zero-pad commitment +
+/// XChaCha20-Poly1305). Expected bytes were produced by chacha20poly1305 0.10
+/// before the 0.11 upgrade; any change here means peers on different builds
+/// can no longer decrypt each other.
+#[test]
+fn test_dave_known_answer() {
+    const EXPECTED: &str = "a55ed7656e244ca6a22f3f3a0e880dca5384fcdb5c7b15eb44418d230467b5e0\
+                            75fffbaf51e9fc63abe090056faacbed07e281fd3df4";
+    let crypto = DaveCrypto::new(&[0x42u8; KEY_SIZE]);
+    let nonce = [0x24u8; 24];
+    let plaintext = b"aura dave known-answer";
+
+    let ciphertext = crypto.encrypt(plaintext, &nonce).unwrap();
+    assert_eq!(hex::encode(&ciphertext), EXPECTED);
+    assert_eq!(crypto.decrypt(&ciphertext, &nonce).unwrap(), plaintext);
+}

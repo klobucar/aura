@@ -79,7 +79,7 @@ public partial class TrustSheetViewModel : ObservableObject
     [ObservableProperty] private bool _isOpen;
     [ObservableProperty] private string _channelName = "";
 
-    /// <summary>`MLS · X25519 · AES-128-GCM · Ed25519 · epoch 14`.</summary>
+    /// <summary>`MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch 14`.</summary>
     [ObservableProperty] private string _securityLine = "";
 
     public ObservableCollection<TrustMemberViewModel> Members { get; } = new();
@@ -145,27 +145,27 @@ public partial class TrustSheetViewModel : ObservableObject
             return;
         }
 
-        SecurityLine = $"MLS · X25519 · AES-128-GCM · Ed25519 · epoch {epoch}";
+        SecurityLine = $"MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch {epoch}";
 
-        var self = members.FirstOrDefault(m => m.isSelf);
-        _localKey = self?.signatureKey ?? Array.Empty<byte>();
-        _localUuid = self?.identity ?? "";
+        var self = members.FirstOrDefault(m => m.IsSelf);
+        _localKey = self?.SignatureKey ?? Array.Empty<byte>();
+        _localUuid = self?.Identity ?? "";
 
         Members.Clear();
-        foreach (var m in members.OrderBy(m => m.isSelf).ThenBy(m => DisplayName(m.identity)))
+        foreach (var m in members.OrderBy(m => m.IsSelf).ThenBy(m => DisplayName(m.Identity)))
         {
             // Record every key we see before judging it — that is what makes a
             // later disagreement detectable at all.
-            _trust.Observe(m.identity, m.signatureKey);
+            _trust.Observe(m.Identity, m.SignatureKey);
 
             Members.Add(new TrustMemberViewModel
             {
-                Uuid = m.identity,
-                PublicKey = m.signatureKey,
-                IsSelf = m.isSelf,
-                Name = DisplayName(m.identity),
-                Trust = _trust.Evaluate(m.identity, m.signatureKey),
-                ShortFingerprint = ShortFingerprintOf(m.signatureKey),
+                Uuid = m.Identity,
+                PublicKey = m.SignatureKey,
+                IsSelf = m.IsSelf,
+                Name = DisplayName(m.Identity),
+                Trust = _trust.Evaluate(m.Identity, m.SignatureKey),
+                ShortFingerprint = ShortFingerprintOf(m.SignatureKey),
             });
         }
 
@@ -208,10 +208,10 @@ public partial class TrustSheetViewModel : ObservableObject
             if (!ReferenceEquals(Selected, member)) return;
 
             SafetyWords.Clear();
-            foreach (var w in derived.safetyWords) SafetyWords.Add(w);
+            foreach (var w in derived.SafetyWords) SafetyWords.Add(w);
 
-            LocalFingerprint = derived.localFingerprint;
-            RemoteFingerprint = derived.remoteFingerprint;
+            LocalFingerprint = derived.LocalFingerprint;
+            RemoteFingerprint = derived.RemoteFingerprint;
             PairLabel = $"SAFETY WORDS — {member.Name} ↔ you";
         }
         catch (Exception ex)

@@ -120,7 +120,7 @@ final class TrustSheetModel: ObservableObject {
             return
         }
 
-        securityLine = "MLS · X25519 · AES-128-GCM · Ed25519 · epoch \(epoch)"
+        securityLine = "MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch \(epoch)"
 
         if let me = records.first(where: { $0.isSelf }) {
             localKey = me.signatureKey

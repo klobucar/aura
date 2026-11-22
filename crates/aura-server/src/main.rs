@@ -70,10 +70,10 @@ fn initialize_bootstrap_admin(db: &Database) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize rustls crypto provider (required for rustls 0.23+)
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    // Process-wide rustls provider (aws-lc-rs, hybrid PQ key exchange first).
+    // The QUIC listener pins it explicitly; this covers implicit users such as
+    // the ACME client.
+    aura_server::tls::install_default_provider();
 
     // Initialize logging
     tracing_subscriber::fmt::init();

@@ -349,4 +349,34 @@ mod tests {
             Err(ProfileError::InvalidSignatureLength(10))
         );
     }
+
+    /// Known answers produced by ed25519-dalek 2.2 / sha2 0.10, before the
+    /// upgrade to 3.0 / 0.11. Profiles signed by older clients must keep
+    /// verifying, and content hashes are cache keys shared with the server.
+    #[test]
+    fn signature_and_hash_match_known_answers() {
+        const SIG: &str = "d60cbc0f456aebc714017731f310d54e2d40b06efb5956c4039a48c0435b74bd\
+                           4d35ef5cbb987143e0b555ac74eb9833623e6fb44adfaf6c6987592cc2618b05";
+        const HASH: &str = "0f75b3e995c7492301ac077edfe0be87fbcfc8a2c8b321c1a613f2be1b225354";
+        let fields = ProfileFields {
+            user_id: "00000000-0000-4000-8000-000000000001".into(),
+            display_name: "Alice".into(),
+            bio: "kat".into(),
+            avatar_data: vec![1, 2, 3],
+            banner_data: vec![],
+            version: 7,
+        };
+        let (seed, public) = keypair(0x09);
+
+        let sig = sign_profile(&fields, &seed).unwrap();
+        assert_eq!(hex::encode(sig), SIG);
+        assert_eq!(hex::encode(fields.content_hash()), HASH);
+        verify_profile(
+            &fields,
+            &hex::decode(SIG).unwrap(),
+            &public,
+            &fields.user_id,
+        )
+        .unwrap();
+    }
 }
