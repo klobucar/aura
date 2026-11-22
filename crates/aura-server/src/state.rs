@@ -13,10 +13,11 @@ use aura_protocol::{
 };
 use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -196,18 +197,17 @@ const TEXT_RATCHET_TIME_THRESHOLD_SECS: u64 = 300; // 5 minutes
 /// TTL for seen message IDs (replay protection)
 const SEEN_MESSAGE_TTL_SECS: u64 = 300; // 5 minutes
 
-/// Seen message entry with expiration timestamp
-#[derive(Debug, Clone)]
-pub struct SeenMessageEntry {
-    pub message_id: String,
-    pub expires_at: Instant,
-}
+/// How often the server sweeps expired replay-protection entries.
+pub const SEEN_MESSAGE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Replay protection: track seen message IDs per channel
 #[derive(Debug)]
 pub struct SeenMessages {
-    /// Map of channel_id -> list of (message_id, expires_at)
-    messages: DashMap<String, Vec<SeenMessageEntry>>,
+    /// How long a message ID stays blocked after it was first seen.
+    ttl: Duration,
+    /// channel_id -> (message_id -> expires_at). A hash map keeps the check
+    /// O(1) however many messages a channel has seen within the TTL.
+    messages: DashMap<String, HashMap<String, Instant>>,
 }
 
 impl Default for SeenMessages {
@@ -218,45 +218,58 @@ impl Default for SeenMessages {
 
 impl SeenMessages {
     pub fn new() -> Self {
+        Self::with_ttl(Duration::from_secs(SEEN_MESSAGE_TTL_SECS))
+    }
+
+    fn with_ttl(ttl: Duration) -> Self {
         Self {
+            ttl,
             messages: DashMap::new(),
         }
     }
 
     /// Check if a message ID has been seen. If not, mark it as seen.
     /// Returns true if the message is NEW (not a replay).
-    /// Returns false if the message is a REPLAY (already seen).
+    /// Returns false if the message is a REPLAY (seen within the TTL).
     pub fn check_and_mark(&self, channel_id: String, message_id: &str) -> bool {
-        let expires_at = Instant::now() + std::time::Duration::from_secs(SEEN_MESSAGE_TTL_SECS);
-
+        let now = Instant::now();
         let mut entries = self.messages.entry(channel_id).or_default();
 
-        // Check if already seen
-        for entry in entries.iter() {
-            if entry.message_id == message_id {
-                return false; // Replay detected!
+        match entries.get_mut(message_id) {
+            // Seen within the TTL: replay.
+            Some(expires_at) if *expires_at > now => false,
+            // Expired but not swept yet: same as never seen.
+            Some(expires_at) => {
+                *expires_at = now + self.ttl;
+                true
+            }
+            None => {
+                entries.insert(message_id.to_owned(), now + self.ttl);
+                true
             }
         }
-
-        // Not seen - add to list
-        entries.push(SeenMessageEntry {
-            message_id: message_id.to_string(),
-            expires_at,
-        });
-
-        true // New message
     }
 
-    /// Cleanup expired entries. Call periodically to prevent memory bloat.
+    /// Drop expired entries and channels left empty.
     pub fn cleanup_expired(&self) {
         let now = Instant::now();
+        self.messages.retain(|_, entries| {
+            entries.retain(|_, expires_at| *expires_at > now);
+            !entries.is_empty()
+        });
+    }
 
-        for mut entries in self.messages.iter_mut() {
-            entries.value_mut().retain(|e| e.expires_at > now);
-        }
-
-        // Remove empty channels
-        self.messages.retain(|_, v| !v.is_empty());
+    /// Run [`Self::cleanup_expired`] every `every` until the task is aborted,
+    /// so the set holds at most one TTL's worth of message IDs.
+    pub fn spawn_cleanup(self: Arc<Self>, every: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(every);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                self.cleanup_expired();
+            }
+        })
     }
 
     /// Get count of tracked messages (for metrics)
@@ -2011,6 +2024,42 @@ mod tests {
 
         // Replays should still be detected
         assert!(!seen.check_and_mark("C_1".to_string(), "msg-001"));
+    }
+
+    #[test]
+    fn test_seen_messages_expire_after_ttl() {
+        let seen = SeenMessages::with_ttl(Duration::from_millis(20));
+        assert!(seen.check_and_mark("C_1".to_string(), "msg-001"));
+        assert!(!seen.check_and_mark("C_1".to_string(), "msg-001"));
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // Past the TTL the ID is accepted again, even before a sweep...
+        assert!(seen.check_and_mark("C_1".to_string(), "msg-001"));
+        // ...and is blocked for a fresh TTL from that point.
+        assert!(!seen.check_and_mark("C_1".to_string(), "msg-001"));
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        // A sweep drops expired entries and the channels they leave empty.
+        seen.cleanup_expired();
+        assert_eq!(seen.message_count(), 0);
+        assert!(seen.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_seen_messages_spawned_cleanup_sweeps() {
+        let seen = Arc::new(SeenMessages::with_ttl(Duration::from_millis(10)));
+        for i in 0..100 {
+            seen.check_and_mark("C_1".to_string(), &format!("msg-{i}"));
+        }
+        assert_eq!(seen.message_count(), 100);
+
+        let sweeper = Arc::clone(&seen).spawn_cleanup(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        sweeper.abort();
+
+        assert_eq!(seen.message_count(), 0);
     }
 
     #[tokio::test]
