@@ -55,6 +55,10 @@ const MAX_CONTROL_PACKET_SIZE: usize = 256 * 1024; // 256KB for signaling/metada
 /// ~280 KB at 100 members and ~690 KB at 256. 1 MiB holds groups of roughly
 /// 390. Only these message types get the larger cap.
 const MAX_MLS_PACKET_SIZE: usize = 1024 * 1024;
+
+/// Upper bound on a login request. A real one is about 5.5 KB: a 1,984-byte
+/// identity key, a 3,373-byte signature, the challenge, name and password.
+const MAX_AUTH_REQUEST_SIZE: usize = 16 * 1024;
 // Hard ceiling on how long a single control frame body may take to arrive.
 // Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -536,130 +540,88 @@ async fn authenticate_client(
     send.flush().await?;
     info!("[Auth] Sent ServerHello ({} bytes)", hello.len());
 
-    // Step 2: Wait for AuthRequest from client
+    // Step 2: Wait for AuthRequest from client: [0x03][u32 LE length][AuthRequest]
     info!("[Auth] Waiting for AuthRequest...");
     let msg_type = recv.read_u8().await?;
-    info!("[Auth] Received message type: 0x{:02x}", msg_type);
-
     if msg_type != MSG_AUTH_REQUEST {
         return Err(anyhow!(
             "Expected AuthRequest (0x03), got 0x{:02x}",
             msg_type
         ));
     }
+    let len = recv.read_u32_le().await? as usize;
+    if len > MAX_AUTH_REQUEST_SIZE {
+        return Err(anyhow!("AuthRequest too large ({} bytes)", len));
+    }
+    let mut payload = vec![0u8; len];
+    recv.read_exact(&mut payload).await?;
+    let request = aura_protocol::AuthRequest::decode(payload.as_slice())
+        .map_err(|e| anyhow!("Malformed AuthRequest: {}", e))?;
+    info!("[Auth] Display name: {}", request.display_name);
 
-    // Parse auth request
-    let key_len = recv.read_u8().await? as usize;
-    info!("[Auth] Key length: {}", key_len);
-    let mut auth_public_key = vec![0u8; key_len];
-    recv.read_exact(&mut auth_public_key).await?;
-
-    let name_len = recv.read_u8().await? as usize;
-    info!("[Auth] Name length: {}", name_len);
-    let mut name_buf = vec![0u8; name_len];
-    recv.read_exact(&mut name_buf).await?;
-    let display_name = String::from_utf8(name_buf)?;
-    info!("[Auth] Display name: {}", display_name);
-
-    let sig_len = recv.read_u8().await? as usize;
-    info!("[Auth] Signature length: {}", sig_len);
-    let mut signature = vec![0u8; sig_len];
-    recv.read_exact(&mut signature).await?;
-
-    let challenge_len = recv.read_u8().await? as usize;
-    info!("[Auth] Challenge length: {}", challenge_len);
-    let mut client_challenge = vec![0u8; challenge_len];
-    recv.read_exact(&mut client_challenge).await?;
-
-    let password_len = recv.read_u8().await? as usize;
-    info!("[Auth] Password length: {}", password_len);
-    let server_password = if password_len > 0 {
-        let mut pw_buf = vec![0u8; password_len];
-        recv.read_exact(&mut pw_buf).await?;
-        Some(String::from_utf8(pw_buf)?)
+    // The signature covers this challenge; a mismatch means a stale or
+    // replayed request.
+    let auth_result = if request.challenge != challenge {
+        Err(anyhow!("Challenge mismatch"))
     } else {
-        None
+        state
+            .auth
+            .authenticate(
+                &request.identity_public_key,
+                &request.display_name,
+                &request.signature,
+                &challenge,
+                request.server_password.as_deref(),
+            )
+            .map_err(|e| anyhow!(e))
     };
 
-    // Verify challenge matches
-    if client_challenge != challenge {
-        return Err(anyhow!("Challenge mismatch"));
-    }
-    info!("[Auth] Challenge verified OK");
-
-    // Convert public key
-    let pk_array: [u8; 32] = auth_public_key
-        .try_into()
-        .map_err(|_| anyhow!("Invalid public key length"))?;
-
-    // Authenticate via auth service
-    let auth_result = state.auth.authenticate(
-        &pk_array,
-        &display_name,
-        &signature,
-        &challenge,
-        server_password.as_deref(),
-    );
-
-    // Send auth response
-    let mut response = BytesMut::new();
-    response.put_u8(MSG_AUTH_RESPONSE);
-
-    match auth_result {
+    // Step 3: AuthResponse: [0x04][u32 LE length][AuthResponse]
+    let (response, outcome) = match auth_result {
         Ok(result) => {
-            let user_uuid = result.user_uuid.clone();
-            let session_token = result.session_token.clone();
-            let verified = result.verified;
-            let is_admin = result.is_admin;
-
             // Register session BEFORE sending auth response so we have a real session_id
             // IMPORTANT: Do NOT prefix rx with '_' — that would cause Rust to drop the
             // receiver immediately, silently discarding all service messages to this session.
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let session_id = state.register_session(user_uuid.to_string(), remote, tx);
-
+            let session_id = state.register_session(result.user_uuid.to_string(), remote, tx);
             info!(
                 "[Auth] Registered session {} for user {}",
-                session_id, user_uuid
+                session_id, result.user_uuid
             );
-
-            let success = true;
-
-            response.put_u8(if success { 1 } else { 0 }); // success
-            response.put_u32_le(session_id); // REAL session ID
-
             debug!(
-                "[Auth] Sending AuthResponse: session_id={}, success={}, verified={}, is_admin={}",
-                session_id, success, verified, is_admin
+                "[Auth] Sending AuthResponse: session_id={}, verified={}, is_admin={}",
+                session_id, result.verified, result.is_admin
             );
-
-            let token_bytes = session_token.as_bytes();
-            response.put_u8(token_bytes.len() as u8);
-            response.put_slice(token_bytes);
-
-            response.put_u8(if verified { 1 } else { 0 });
-            response.put_u8(if is_admin { 1 } else { 0 }); // New field: is_admin
-            response.put_u8(0); // no error message
-
-            send.write_all(&response).await?;
-
-            Ok((session_id, user_uuid.to_string(), send, recv, rx))
+            let response = aura_protocol::AuthResponse {
+                success: true,
+                session_id,
+                session_token: result.session_token.clone(),
+                verified: result.verified,
+                error_message: String::new(),
+                user_uuid: result.user_uuid.clone(),
+                is_admin: result.is_admin,
+            };
+            (response, Ok((session_id, result.user_uuid, rx)))
         }
         Err(e) => {
-            response.put_u8(0); // failure
-            response.put_u32_le(0);
-            response.put_u8(0); // no token
-            response.put_u8(0); // not verified
-
-            let error_msg = format!("{:?}", e);
-            response.put_u8(error_msg.len() as u8);
-            response.put_slice(error_msg.as_bytes());
-
-            send.write_all(&response).await?;
-
-            Err(anyhow!("Authentication failed: {:?}", e))
+            let response = aura_protocol::AuthResponse {
+                success: false,
+                error_message: e.to_string(),
+                ..Default::default()
+            };
+            (response, Err(anyhow!("Authentication failed: {}", e)))
         }
-    }
+    };
+
+    let payload = response.encode_to_vec();
+    let mut frame = BytesMut::with_capacity(5 + payload.len());
+    frame.put_u8(MSG_AUTH_RESPONSE);
+    frame.put_u32_le(payload.len() as u32);
+    frame.put_slice(&payload);
+    send.write_all(&frame).await?;
+
+    let (session_id, user_uuid, rx) = outcome?;
+    Ok((session_id, user_uuid, send, recv, rx))
 }
 
 /// Context for an active client connection
@@ -1398,5 +1360,111 @@ mod tests {
             .await
             .expect("classical client must still connect");
         assert_eq!(alpn, tls::ALPN);
+    }
+
+    /// Log in over a real QUIC connection against `authenticate_client`, the
+    /// way a client does: read the hello, send a signed AuthRequest, read the
+    /// framed AuthResponse.
+    async fn login_over_quic(
+        state: Arc<ServerState>,
+        id: &aura_identity::IdentitySecret,
+        name: &str,
+        password: Option<&str>,
+    ) -> Result<aura_protocol::AuthResponse> {
+        use aura_identity::{auth_transcript, Purpose};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            cert.signing_key.serialize_der(),
+        ));
+        let server_config = QuicServer::quic_server_config_from_cert(vec![cert_der.clone()], key)?;
+        let server = Endpoint::server(server_config, "127.0.0.1:0".parse()?)?;
+        let server_addr = server.local_addr()?;
+        let accept = tokio::spawn(async move {
+            let conn = server.accept().await.expect("incoming").await?;
+            let (send, recv) = conn.open_bi().await?;
+            let _ = authenticate_client(send, recv, &state, conn.remote_address()).await;
+            conn.closed().await;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der)?;
+        let mut client_crypto =
+            rustls::ClientConfig::builder_with_provider(Arc::new(tls::crypto_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13])?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![tls::ALPN.to_vec()];
+        let mut client = Endpoint::client("127.0.0.1:0".parse()?)?;
+        client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
+        )));
+        let conn = client.connect(server_addr, "localhost")?.await?;
+        let (mut send, mut recv) = conn.accept_bi().await?;
+
+        let mut hello = [0u8; 33];
+        recv.read_exact(&mut hello).await?;
+        assert_eq!(hello[0], MSG_CHALLENGE_RESPONSE);
+        let challenge: [u8; 32] = hello[1..].try_into()?;
+
+        let pk = id.public_key();
+        let sig = id.sign(Purpose::Auth, &auth_transcript(&challenge, name, &pk));
+        let payload = aura_protocol::AuthRequest {
+            identity_public_key: pk.as_bytes().to_vec(),
+            display_name: name.into(),
+            signature: sig.as_bytes().to_vec(),
+            server_password: password.map(str::to_owned),
+            challenge: challenge.to_vec(),
+        }
+        .encode_to_vec();
+        send.write_all(&[MSG_AUTH_REQUEST]).await?;
+        send.write_all(&(payload.len() as u32).to_le_bytes())
+            .await?;
+        send.write_all(&payload).await?;
+
+        assert_eq!(recv.read_u8().await?, MSG_AUTH_RESPONSE);
+        let len = recv.read_u32_le().await? as usize;
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf).await?;
+        let response = aura_protocol::AuthResponse::decode(buf.as_slice())?;
+
+        conn.close(0u32.into(), b"done");
+        client.wait_idle().await;
+        let _ = accept.await;
+        Ok(response)
+    }
+
+    fn test_state(password: Option<&str>) -> Arc<ServerState> {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let mut config = crate::config::Config::default();
+        config.server.password = password.map(str::to_owned);
+        Arc::new(ServerState::new(db, config))
+    }
+
+    #[tokio::test]
+    async fn login_v2_succeeds_and_returns_the_user_id() {
+        crate::tls::install_default_provider();
+        let id = aura_identity::IdentitySecret::generate();
+        let r = login_over_quic(test_state(None), &id, "Alice", None)
+            .await
+            .unwrap();
+        assert!(r.success, "{}", r.error_message);
+        assert!(r.user_uuid.starts_with("U_"), "{}", r.user_uuid);
+        assert!(!r.session_token.is_empty());
+        assert!(r.error_message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn login_v2_failure_is_a_well_formed_response() {
+        crate::tls::install_default_provider();
+        let id = aura_identity::IdentitySecret::generate();
+        let r = login_over_quic(test_state(Some("secret")), &id, "Alice", Some("wrong"))
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.user_uuid.is_empty() && r.session_token.is_empty());
+        assert!(r.error_message.contains("password"), "{}", r.error_message);
     }
 }

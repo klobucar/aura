@@ -1,11 +1,14 @@
 //! Authentication module for TOFU (Trust On First Use) identity verification.
 //!
-//! Handles Ed25519 signature verification, username claiming, and session management.
+//! Handles hybrid identity (Ed25519 + ML-DSA-65) signature verification,
+//! username claiming, and session management.
 
 use crate::config::{Config, VerificationMode};
 use crate::db::{AdminPermissions, Database, User};
+use aura_identity::{
+    auth_transcript, IdentityPublicKey, IdentitySignature, Purpose, AUTH_CHALLENGE_LEN,
+};
 use dashmap::DashMap;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::RngExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,8 +23,11 @@ pub enum AuthError {
     #[error("Username '{0}' is already taken")]
     UsernameTaken(String),
 
-    #[error("Invalid Ed25519 public key")]
+    #[error("Invalid identity public key")]
     InvalidPublicKey,
+    /// The account's Ed25519 key matches but its pinned ML-DSA key does not.
+    #[error("Identity key does not match the one pinned for this account")]
+    IdentityKeyMismatch,
 
     #[error("Invalid signature")]
     InvalidSignature,
@@ -98,23 +104,20 @@ impl AuthService {
         bytes.to_vec()
     }
 
-    /// Verify an Ed25519 signature.
+    /// Verify a hybrid signature over the login transcript (the challenge,
+    /// the claimed display name and the full identity key; see
+    /// [`auth_transcript`]). Both halves must verify.
     fn verify_signature(
-        public_key: &[u8; 32],
-        message: &[u8],
+        identity: &IdentityPublicKey,
+        display_name: &str,
+        challenge: &[u8; AUTH_CHALLENGE_LEN],
         signature: &[u8],
     ) -> Result<(), AuthError> {
-        let verifying_key =
-            VerifyingKey::from_bytes(public_key).map_err(|_| AuthError::InvalidPublicKey)?;
-
-        let sig_bytes: [u8; 64] = signature
-            .try_into()
-            .map_err(|_| AuthError::InvalidSignature)?;
-
-        let signature = Signature::from_bytes(&sig_bytes);
-
-        verifying_key
-            .verify(message, &signature)
+        let signature =
+            IdentitySignature::from_bytes(signature).map_err(|_| AuthError::InvalidSignature)?;
+        let transcript = auth_transcript(challenge, display_name, identity);
+        identity
+            .verify(Purpose::Auth, &transcript, &signature)
             .map_err(|_| AuthError::InvalidSignature)
     }
 
@@ -122,13 +125,14 @@ impl AuthService {
     ///
     /// Flow:
     /// 1. Validate server password (if required)
-    /// 2. Verify Ed25519 signature over challenge
-    /// 3. Check if public key exists (returning user) or create new user (TOFU)
+    /// 2. Verify the hybrid signature over the login transcript
+    /// 3. Look the account up by the identity's Ed25519 key (returning user),
+    ///    pinning its ML-DSA key if it has none yet, or create one (TOFU)
     /// 4. Enforce verification policy
     /// 5. Create and return session
     pub fn authenticate(
         &self,
-        public_key: &[u8; 32],
+        identity_public_key: &[u8],
         display_name: &str,
         signature: &[u8],
         challenge: &[u8],
@@ -140,11 +144,27 @@ impl AuthService {
         }
 
         // 2. Verify signature
-        Self::verify_signature(public_key, challenge, signature)?;
+        let identity = IdentityPublicKey::from_bytes(identity_public_key)
+            .map_err(|_| AuthError::InvalidPublicKey)?;
+        let challenge: &[u8; AUTH_CHALLENGE_LEN] = challenge
+            .try_into()
+            .map_err(|_| AuthError::InvalidSignature)?;
+        Self::verify_signature(&identity, display_name, challenge, signature)?;
 
         // 3. Check existing user or create new
-        let user = match self.db.find_user_by_key(public_key)? {
+        let ed25519 = identity.ed25519_bytes();
+        let user = match self.db.find_user_by_key(&ed25519)? {
             Some(existing_user) => {
+                match existing_user.identity_public_key.as_deref() {
+                    // An account from before hybrid identities, or a bootstrap
+                    // admin. Its pinned Ed25519 key just signed a transcript
+                    // that includes the whole identity key, so pin it now.
+                    None => self
+                        .db
+                        .set_identity_public_key(&existing_user.user_uuid, identity.as_bytes())?,
+                    Some(pinned) if pinned == identity.as_bytes() => {}
+                    Some(_) => return Err(AuthError::IdentityKeyMismatch),
+                }
                 // Returning user - update last seen
                 self.db.update_last_seen(&existing_user.user_uuid)?;
                 existing_user
@@ -163,7 +183,9 @@ impl AuthService {
                 }
 
                 // Create new user with TOFU identity
-                let user_uuid = self.db.create_user(public_key, display_name)?;
+                let user_uuid =
+                    self.db
+                        .create_user(&ed25519, Some(identity.as_bytes()), display_name)?;
                 self.db.find_user_by_uuid(&user_uuid)?.unwrap()
             }
         };
@@ -390,104 +412,131 @@ impl AuthService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use aura_identity::IdentitySecret;
 
-    fn create_test_auth_service() -> (AuthService, SigningKey) {
+    fn create_test_auth_service() -> (AuthService, IdentitySecret) {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let config = Config::default();
-        let auth = AuthService::new(db, config);
-
-        let mut rng = rand::rng();
-        let bytes: [u8; 32] = rng.random();
-        let signing_key = SigningKey::from_bytes(&bytes);
-
-        (auth, signing_key)
+        (AuthService::new(db, config), IdentitySecret::generate())
     }
 
-    fn sign_challenge(signing_key: &SigningKey, challenge: &[u8]) -> [u8; 64] {
-        use ed25519_dalek::Signer;
-        signing_key.sign(challenge).to_bytes()
+    /// What a client sends to log in as `name`: its identity public key and
+    /// its hybrid signature over the login transcript.
+    fn login(id: &IdentitySecret, name: &str, challenge: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let pk = id.public_key();
+        let challenge: &[u8; AUTH_CHALLENGE_LEN] = challenge.try_into().unwrap();
+        let sig = id.sign(Purpose::Auth, &auth_transcript(challenge, name, &pk));
+        (pk.as_bytes().to_vec(), sig.as_bytes().to_vec())
     }
 
     #[test]
     fn test_new_user_authentication() {
-        let (auth, signing_key) = create_test_auth_service();
-        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let (auth, id) = create_test_auth_service();
         let challenge = AuthService::generate_challenge();
-        let signature = sign_challenge(&signing_key, &challenge);
+        let (pk, sig) = login(&id, "Alice", &challenge);
 
         let result = auth
-            .authenticate(&public_key, "Alice", &signature, &challenge, None)
+            .authenticate(&pk, "Alice", &sig, &challenge, None)
             .unwrap();
 
         assert!(!result.user_uuid.is_empty());
         assert_eq!(result.display_name, "Alice");
         assert!(!result.verified);
+        let user = auth
+            .db
+            .find_user_by_uuid(&result.user_uuid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.identity_public_key.as_deref(), Some(pk.as_slice()));
     }
 
     #[test]
     fn test_returning_user_authentication() {
-        let (auth, signing_key) = create_test_auth_service();
-        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let (auth, id) = create_test_auth_service();
 
-        // First auth
         let challenge1 = AuthService::generate_challenge();
-        let sig1 = sign_challenge(&signing_key, &challenge1);
+        let (pk, sig1) = login(&id, "Alice", &challenge1);
         let result1 = auth
-            .authenticate(&public_key, "Alice", &sig1, &challenge1, None)
+            .authenticate(&pk, "Alice", &sig1, &challenge1, None)
             .unwrap();
 
-        // Second auth (returning)
         let challenge2 = AuthService::generate_challenge();
-        let sig2 = sign_challenge(&signing_key, &challenge2);
+        let (_, sig2) = login(&id, "Alice", &challenge2);
         let result2 = auth
-            .authenticate(&public_key, "Alice", &sig2, &challenge2, None)
+            .authenticate(&pk, "Alice", &sig2, &challenge2, None)
             .unwrap();
 
-        // Same user_uuid
         assert_eq!(result1.user_uuid, result2.user_uuid);
+    }
+
+    /// An account from before hybrid identities (Ed25519 key only) keeps its
+    /// id: its first hybrid login pins the ML-DSA key.
+    #[test]
+    fn test_legacy_account_pins_its_identity_key_on_login() {
+        let (auth, _) = create_test_auth_service();
+        let ed_secret = [0x31u8; 32];
+        let legacy_pk = ed25519_dalek::SigningKey::from_bytes(&ed_secret)
+            .verifying_key()
+            .to_bytes();
+        let uuid = auth.db.create_user(&legacy_pk, None, "Alice").unwrap();
+
+        let upgraded = IdentitySecret::from_parts(&ed_secret, &[0x32; 32]);
+        let challenge = AuthService::generate_challenge();
+        let (pk, sig) = login(&upgraded, "Alice", &challenge);
+        let result = auth
+            .authenticate(&pk, "Alice", &sig, &challenge, None)
+            .unwrap();
+        assert_eq!(result.user_uuid, uuid);
+        let user = auth.db.find_user_by_uuid(&uuid).unwrap().unwrap();
+        assert_eq!(user.identity_public_key.as_deref(), Some(pk.as_slice()));
+    }
+
+    /// Once pinned, a different ML-DSA key under the same Ed25519 key is refused.
+    #[test]
+    fn test_pinned_identity_key_cannot_be_swapped() {
+        let (auth, _) = create_test_auth_service();
+        let ed_secret = [0x41u8; 32];
+        let first = IdentitySecret::from_parts(&ed_secret, &[0x01; 32]);
+        let challenge = AuthService::generate_challenge();
+        let (pk, sig) = login(&first, "Alice", &challenge);
+        auth.authenticate(&pk, "Alice", &sig, &challenge, None)
+            .unwrap();
+
+        let swapped = IdentitySecret::from_parts(&ed_secret, &[0x02; 32]);
+        let challenge2 = AuthService::generate_challenge();
+        let (pk2, sig2) = login(&swapped, "Alice", &challenge2);
+        let result = auth.authenticate(&pk2, "Alice", &sig2, &challenge2, None);
+        assert!(matches!(result, Err(AuthError::IdentityKeyMismatch)));
     }
 
     #[test]
     fn test_username_claiming() {
-        let (auth, signing_key1) = create_test_auth_service();
-        let mut rng = rand::rng();
-        let bytes2: [u8; 32] = rng.random();
-        let signing_key2 = SigningKey::from_bytes(&bytes2);
+        let (auth, id1) = create_test_auth_service();
+        let id2 = IdentitySecret::generate();
 
-        let pk1: [u8; 32] = signing_key1.verifying_key().to_bytes();
-        let pk2: [u8; 32] = signing_key2.verifying_key().to_bytes();
-
-        // User 1 claims "Alice"
         let challenge = AuthService::generate_challenge();
-        let sig = sign_challenge(&signing_key1, &challenge);
+        let (pk1, sig) = login(&id1, "Alice", &challenge);
         auth.authenticate(&pk1, "Alice", &sig, &challenge, None)
             .unwrap();
 
-        // User 2 tries to claim "Alice"
         let challenge2 = AuthService::generate_challenge();
-        let sig2 = sign_challenge(&signing_key2, &challenge2);
+        let (pk2, sig2) = login(&id2, "Alice", &challenge2);
         let result = auth.authenticate(&pk2, "Alice", &sig2, &challenge2, None);
-
         assert!(matches!(result, Err(AuthError::UsernameTaken(_))));
 
-        // User 2 can claim different name
         let challenge3 = AuthService::generate_challenge();
-        let sig3 = sign_challenge(&signing_key2, &challenge3);
+        let (_, sig3) = login(&id2, "Bob", &challenge3);
         auth.authenticate(&pk2, "Bob", &sig3, &challenge3, None)
             .unwrap();
     }
 
     #[test]
     fn test_reserved_usernames() {
-        let (auth, signing_key) = create_test_auth_service();
-        let pk: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let (auth, id) = create_test_auth_service();
 
-        let reserved_names = ["admin", "System", "SERVER", "aura"];
-
-        for name in reserved_names {
+        for name in ["admin", "System", "SERVER", "aura"] {
             let challenge = AuthService::generate_challenge();
-            let sig = sign_challenge(&signing_key, &challenge);
+            let (pk, sig) = login(&id, name, &challenge);
             let result = auth.authenticate(&pk, name, &sig, &challenge, None);
 
             assert!(
@@ -504,62 +553,66 @@ mod tests {
         let mut config = Config::default();
         config.server.password = Some("secret123".to_string());
         let auth = AuthService::new(db, config);
+        let id = IdentitySecret::generate();
 
-        let mut rng = rand::rng();
-        let bytes: [u8; 32] = rng.random();
-        let signing_key = SigningKey::from_bytes(&bytes);
-        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
         let challenge = AuthService::generate_challenge();
-        let sig = sign_challenge(&signing_key, &challenge);
-
-        // Wrong password
-        let result = auth.authenticate(&public_key, "Alice", &sig, &challenge, Some("wrong"));
+        let (pk, sig) = login(&id, "Alice", &challenge);
+        let result = auth.authenticate(&pk, "Alice", &sig, &challenge, Some("wrong"));
         assert!(matches!(result, Err(AuthError::InvalidPassword)));
 
-        // No password
         let challenge2 = AuthService::generate_challenge();
-        let sig2 = sign_challenge(&signing_key, &challenge2);
-        let result = auth.authenticate(&public_key, "Alice", &sig2, &challenge2, None);
+        let (_, sig2) = login(&id, "Alice", &challenge2);
+        let result = auth.authenticate(&pk, "Alice", &sig2, &challenge2, None);
         assert!(matches!(result, Err(AuthError::InvalidPassword)));
 
-        // Correct password
         let challenge3 = AuthService::generate_challenge();
-        let sig3 = sign_challenge(&signing_key, &challenge3);
-        auth.authenticate(&public_key, "Alice", &sig3, &challenge3, Some("secret123"))
+        let (_, sig3) = login(&id, "Alice", &challenge3);
+        auth.authenticate(&pk, "Alice", &sig3, &challenge3, Some("secret123"))
             .unwrap();
     }
 
     #[test]
     fn test_session_validation() {
-        let (auth, signing_key) = create_test_auth_service();
-        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let (auth, id) = create_test_auth_service();
         let challenge = AuthService::generate_challenge();
-        let sig = sign_challenge(&signing_key, &challenge);
+        let (pk, sig) = login(&id, "Alice", &challenge);
 
         let result = auth
-            .authenticate(&public_key, "Alice", &sig, &challenge, None)
+            .authenticate(&pk, "Alice", &sig, &challenge, None)
             .unwrap();
 
-        // Valid session
         let session = auth.validate_session(&result.session_token).unwrap();
         assert_eq!(session.user_uuid, result.user_uuid);
 
-        // Invalid session
         assert!(auth.validate_session("invalid-token").is_err());
 
-        // Invalidated session
         auth.invalidate_session(&result.session_token);
         assert!(auth.validate_session(&result.session_token).is_err());
     }
 
     #[test]
     fn test_invalid_signature() {
-        let (auth, signing_key) = create_test_auth_service();
-        let public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+        let (auth, id) = create_test_auth_service();
         let challenge = AuthService::generate_challenge();
-        let wrong_sig = [0u8; 64]; // Invalid signature
+        let (pk, _) = login(&id, "Alice", &challenge);
 
-        let result = auth.authenticate(&public_key, "Alice", &wrong_sig, &challenge, None);
+        let wrong_sig = [0u8; aura_identity::SIGNATURE_LEN];
+        let result = auth.authenticate(&pk, "Alice", &wrong_sig, &challenge, None);
         assert!(matches!(result, Err(AuthError::InvalidSignature)));
+
+        // A signature for another display name doesn't transfer.
+        let (_, sig_for_bob) = login(&id, "Bob", &challenge);
+        let result = auth.authenticate(&pk, "Alice", &sig_for_bob, &challenge, None);
+        assert!(matches!(result, Err(AuthError::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_rejects_bare_ed25519_key() {
+        let (auth, id) = create_test_auth_service();
+        let challenge = AuthService::generate_challenge();
+        let (_, sig) = login(&id, "Alice", &challenge);
+        let ed_only = id.public_key().ed25519_bytes();
+        let result = auth.authenticate(&ed_only, "Alice", &sig, &challenge, None);
+        assert!(matches!(result, Err(AuthError::InvalidPublicKey)));
     }
 }

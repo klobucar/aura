@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Current database schema version.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Tuple shape returned by `get_all_channels`:
 /// `(channel_id, name, comment, icon_type, icon_data, position, channel_type)`.
@@ -29,6 +29,10 @@ pub type DbHandle = Arc<Mutex<Connection>>;
 pub struct User {
     pub user_uuid: String,
     pub ed25519_public_key: [u8; 32],
+    /// The account's hybrid identity public key (ML-DSA-65 key, then the
+    /// Ed25519 key above; 1,984 bytes). `None` for an account created before
+    /// hybrid identities, or a bootstrap admin, until its first login pins it.
+    pub identity_public_key: Option<Vec<u8>>,
     pub display_name: String,
     pub created_at: i64,
     pub verified: bool,
@@ -129,7 +133,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY
             );
-            INSERT OR REPLACE INTO schema_version (version) VALUES (1);
+            INSERT OR REPLACE INTO schema_version (version) VALUES (2);
 
             -- Channels table
             CREATE TABLE IF NOT EXISTS channels (
@@ -156,6 +160,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS users (
                 user_uuid TEXT PRIMARY KEY,
                 ed25519_public_key BLOB NOT NULL UNIQUE,
+                identity_public_key BLOB, -- hybrid key; NULL until first login pins it
                 display_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 created_at INTEGER NOT NULL,
                 verified BOOLEAN NOT NULL DEFAULT 0,
@@ -228,8 +233,20 @@ impl Database {
     }
 
     /// Run database migrations from old version to current.
-    fn migrate(&self, _conn: &Connection, _from_version: i64) -> Result<()> {
-        // No migrations yet for version 1
+    fn migrate(&self, conn: &Connection, from_version: i64) -> Result<()> {
+        if from_version < 2 {
+            // Hybrid identities: existing accounts keep their Ed25519 key and
+            // get their ML-DSA key pinned at their next login.
+            conn.execute_batch(
+                "ALTER TABLE users ADD COLUMN identity_public_key BLOB;
+                 DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES (2);",
+            )?;
+            tracing::info!(
+                "Database migrated from schema version {} to 2",
+                from_version
+            );
+        }
         Ok(())
     }
 
@@ -249,7 +266,7 @@ impl Database {
     pub fn find_user_by_key(&self, public_key: &[u8; 32]) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned, identity_public_key
              FROM users WHERE ed25519_public_key = ?",
             params![public_key.as_slice()],
             |row| {
@@ -263,6 +280,7 @@ impl Database {
                     created_at: row.get(3)?,
                     verified: row.get(4)?,
                     banned: row.get(5)?,
+                    identity_public_key: row.get(6)?,
                 })
             },
         )
@@ -274,7 +292,7 @@ impl Database {
     pub fn find_user_by_name(&self, display_name: &str) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned, identity_public_key
              FROM users WHERE display_name = ? COLLATE NOCASE",
             params![display_name],
             |row| {
@@ -288,6 +306,7 @@ impl Database {
                     created_at: row.get(3)?,
                     verified: row.get(4)?,
                     banned: row.get(5)?,
+                    identity_public_key: row.get(6)?,
                 })
             },
         )
@@ -299,7 +318,7 @@ impl Database {
     pub fn find_user_by_uuid(&self, user_uuid: &str) -> Result<Option<User>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned, identity_public_key
              FROM users WHERE user_uuid = ?",
             params![user_uuid],
             |row| {
@@ -313,6 +332,7 @@ impl Database {
                     created_at: row.get(3)?,
                     verified: row.get(4)?,
                     banned: row.get(5)?,
+                    identity_public_key: row.get(6)?,
                 })
             },
         )
@@ -322,16 +342,21 @@ impl Database {
 
     /// Create a new user with TOFU identity.
     /// Returns the new user_uuid on success.
-    pub fn create_user(&self, public_key: &[u8; 32], display_name: &str) -> Result<String> {
+    pub fn create_user(
+        &self,
+        public_key: &[u8; 32],
+        identity_public_key: Option<&[u8]>,
+        display_name: &str,
+    ) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let now = Self::now();
         let user_uuid = format!("U_{}", Uuid::new_v4());
 
         // Insert user
         conn.execute(
-            "INSERT INTO users (user_uuid, ed25519_public_key, display_name, created_at, verified, banned)
-             VALUES (?, ?, ?, ?, 0, 0)",
-            params![&user_uuid, public_key.as_slice(), display_name, now],
+            "INSERT INTO users (user_uuid, ed25519_public_key, identity_public_key, display_name, created_at, verified, banned)
+             VALUES (?, ?, ?, ?, ?, 0, 0)",
+            params![&user_uuid, public_key.as_slice(), identity_public_key, display_name, now],
         )?;
 
         // Record TOFU identity
@@ -385,7 +410,7 @@ impl Database {
     pub fn list_users(&self, offset: u32, limit: u32) -> Result<Vec<User>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned
+            "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned, identity_public_key
              FROM users ORDER BY created_at LIMIT ? OFFSET ?",
         )?;
 
@@ -401,6 +426,7 @@ impl Database {
                     created_at: row.get(3)?,
                     verified: row.get(4)?,
                     banned: row.get(5)?,
+                    identity_public_key: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -478,6 +504,24 @@ impl Database {
         Ok(self.user_count()? == 0)
     }
 
+    /// Pin an account's hybrid identity public key. Only valid while it has
+    /// none: an existing pin is never replaced.
+    pub fn set_identity_public_key(
+        &self,
+        user_uuid: &str,
+        identity_public_key: &[u8],
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE users SET identity_public_key = ? WHERE user_uuid = ? AND identity_public_key IS NULL",
+            params![identity_public_key, user_uuid],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("user {user_uuid} not found or already has an identity key");
+        }
+        Ok(())
+    }
+
     /// Create bootstrap admin from public key.
     /// This is used for first-time server setup via environment variable.
     pub fn create_bootstrap_admin(
@@ -485,7 +529,8 @@ impl Database {
         public_key: &[u8; 32],
         display_name: &str,
     ) -> Result<String> {
-        let user_uuid = self.create_user(public_key, display_name)?;
+        // The admin's hybrid key is pinned at their first login.
+        let user_uuid = self.create_user(public_key, None, display_name)?;
         self.grant_admin(&user_uuid, &AdminPermissions::full(), None)?;
         self.set_user_verified(&user_uuid, true)?;
         tracing::info!(
@@ -615,7 +660,7 @@ mod tests {
         let key = [0x42u8; 32];
 
         // Create user
-        let user_uuid = db.create_user(&key, "Alice").unwrap();
+        let user_uuid = db.create_user(&key, None, "Alice").unwrap();
         assert!(!user_uuid.is_empty());
 
         // Find by key
@@ -641,21 +686,21 @@ mod tests {
         let key2 = [0x02u8; 32];
 
         // First user claims "Alice"
-        db.create_user(&key1, "Alice").unwrap();
+        db.create_user(&key1, None, "Alice").unwrap();
 
         // Second user tries to claim same name
-        let result = db.create_user(&key2, "Alice");
+        let result = db.create_user(&key2, None, "Alice");
         assert!(result.is_err());
 
         // Second user can use different name
-        db.create_user(&key2, "Bob").unwrap();
+        db.create_user(&key2, None, "Bob").unwrap();
     }
 
     #[test]
     fn test_admin_operations() {
         let db = Database::open_in_memory().unwrap();
         let key = [0x42u8; 32];
-        let user_uuid = db.create_user(&key, "Admin").unwrap();
+        let user_uuid = db.create_user(&key, None, "Admin").unwrap();
 
         // Not admin initially
         assert!(!db.is_admin(&user_uuid).unwrap());
@@ -687,7 +732,7 @@ mod tests {
     fn test_user_verification_and_ban() {
         let db = Database::open_in_memory().unwrap();
         let key = [0x42u8; 32];
-        let user_uuid = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, None, "TestUser").unwrap();
 
         // Not verified initially
         let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
@@ -722,5 +767,57 @@ mod tests {
         assert!(perms.verify_users);
         assert!(perms.ban_users);
         assert!(perms.grant_admin);
+    }
+
+    /// A schema-v1 database (Ed25519 keys only) gains the identity key column,
+    /// keeps its users, and reads them back with no identity key pinned.
+    #[test]
+    fn test_migrates_schema_v1_to_v2() {
+        let dir = std::env::temp_dir().join(format!("aura-migrate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                 INSERT INTO schema_version (version) VALUES (1);
+                 CREATE TABLE users (
+                     user_uuid TEXT PRIMARY KEY,
+                     ed25519_public_key BLOB NOT NULL UNIQUE,
+                     display_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                     created_at INTEGER NOT NULL,
+                     verified BOOLEAN NOT NULL DEFAULT 0,
+                     banned BOOLEAN NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users VALUES ('U_old', ?, 'Alice', 0, 1, 0)",
+                params![[0x42u8; 32].as_slice()],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let user = db.find_user_by_key(&[0x42u8; 32]).unwrap().unwrap();
+        assert_eq!(user.user_uuid, "U_old");
+        assert!(user.verified);
+        assert_eq!(user.identity_public_key, None);
+
+        db.set_identity_public_key("U_old", &[7u8; 1984]).unwrap();
+        let user = db.find_user_by_uuid("U_old").unwrap().unwrap();
+        assert_eq!(user.identity_public_key, Some(vec![7u8; 1984]));
+        // A pin is never replaced.
+        assert!(db.set_identity_public_key("U_old", &[8u8; 1984]).is_err());
+
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

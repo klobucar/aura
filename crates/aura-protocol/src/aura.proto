@@ -165,26 +165,33 @@ message GetProfile {
 }
 
 // ============================================================================
-// Authentication - TOFU (Trust On First Use) with Ed25519
+// Authentication - TOFU (Trust On First Use) with a hybrid identity
 // ============================================================================
+//
+// The server opens with [0x02][32-byte challenge]. The client answers with
+// [0x03][u32 LE length][AuthRequest]; the server replies with
+// [0x04][u32 LE length][AuthResponse].
 
 // Authentication request from client
 message AuthRequest {
-    bytes ed25519_public_key = 1;   // 32 bytes - user's public key
+    bytes identity_public_key = 1;  // 1,984 bytes: ML-DSA-65 key || Ed25519 key
     string display_name = 2;        // Desired username (TOFU - first come first served)
-    bytes signature = 3;            // Ed25519 signature over the challenge
+    bytes signature = 3;            // 3,373-byte hybrid signature over the auth transcript
+                                    // (aura_identity::auth_transcript, Purpose::Auth)
     optional string server_password = 4;  // If server requires password
-    bytes challenge = 5;            // The challenge bytes that were signed
+    bytes challenge = 5;            // The 32-byte challenge that was signed
 }
 
 // Authentication response from server
 message AuthResponse {
     bool success = 1;
-    string user_id = 2;
+    uint32 session_id = 2;          // Session ID for datagrams and presence
     string session_token = 3;
     bool verified = 4;              // Whether user is admin-verified
     string error_message = 5;       // Error reason: "username_taken", "invalid_password", etc.
-    string user_uuid = 6;
+    string user_uuid = 6;           // The account's server-assigned id (U_...); the user id
+                                    // clients put in their MLS credential
+    bool is_admin = 7;
 }
 
 // Challenge request - client asks server for a random challenge to sign

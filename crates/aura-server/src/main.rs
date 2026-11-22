@@ -226,7 +226,7 @@ mod tests {
 
         // Create a user
         let key = [0x42u8; 32];
-        let user_uuid = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, None, "TestUser").unwrap();
 
         // User should exist
         let user = db.find_user_by_uuid(&user_uuid).unwrap().unwrap();
@@ -245,18 +245,18 @@ mod tests {
 
         // First user claims "Alice"
         let key1 = [0x01u8; 32];
-        db.create_user(&key1, "Alice").unwrap();
+        db.create_user(&key1, None, "Alice").unwrap();
 
         // Second user tries to claim "Alice" - should fail
         let key2 = [0x02u8; 32];
-        let result = db.create_user(&key2, "Alice");
+        let result = db.create_user(&key2, None, "Alice");
         assert!(result.is_err());
 
         // Case-insensitive check
-        let result = db.create_user(&key2, "alice");
+        let result = db.create_user(&key2, None, "alice");
         assert!(result.is_err());
 
         // Different name works
-        db.create_user(&key2, "Bob").unwrap();
+        db.create_user(&key2, None, "Bob").unwrap();
     }
 }
