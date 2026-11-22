@@ -76,7 +76,7 @@ The name and email must match your git identity. PRs without DCO sign-off will b
 
 ## Building and testing locally
 
-The full quickstart is in the [README](README.md#quickstart-run-a-server-and-connect-two-clients-locally). The short version:
+The [quickstart](docs/QUICKSTART.md) covers building and connecting the clients. Run these commands from the repository root.
 
 ```bash
 # Workspace tests
@@ -89,8 +89,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Run a local server
 cargo run -p aura-server
 ```
-
-The macOS client builds via Xcode (`open clients/macos/Aura.xcodeproj`); the desktop client builds via `dotnet run` from `clients/desktop/` after `aura-core` has been built for the host triple. See the README for details.
 
 ## Code style
 
