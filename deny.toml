@@ -12,11 +12,13 @@ all-features = true
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "warn"
-# Blocked on the upstream OpenMLS dependency chain: openmls 0.9.2 /
-# openmls_rust_crypto 0.6.0 / openmls_basic_credential 0.6.0 are the latest
-# releases and the fix is not reachable from our manifests. Re-check on every
-# openmls bump, and whenever `mls::CIPHERSUITE` changes — the justification
-# below depends on which primitives the suite uses.
+# Report unmaintained crates anywhere in the graph, not just direct
+# dependencies. cargo-deny 0.22 changed the default to "workspace"; setting it
+# here keeps local runs in line with CI's cargo-deny-action.
+unmaintained = "all"
+# Every entry is blocked upstream: no release we can move to fixes it. Each
+# says why it doesn't affect Aura and when to re-check. Keep this list in sync
+# with the cargo audit `ignore:` in .github/workflows/security.yml.
 ignore = [
     # crypto-bigint 0.5 has secret-dependent branches in arithmetic meant to be
     # constant-time. Only NIST-curve code reaches it (p256/p384/k256 via
@@ -24,7 +26,21 @@ ignore = [
     # HPKE backend). Aura's suite, MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519,
     # uses X25519 + ML-KEM-768 (X-Wing) and Ed25519, so no secret ever passes
     # through those curves. The fix only exists on the crypto-bigint 0.7 line.
+    # Re-check on every openmls bump and whenever `mls::CIPHERSUITE` changes.
     { id = "RUSTSEC-2026-0387", reason = "only NIST-curve code uses it; our MLS suite is X-Wing + Ed25519, no P-256/P-384/k256 secrets" },
+    # proc-macro-error2 is unmaintained. Only the hax-lib-macros proc macro
+    # uses it, reached via libcrux-sha3 <- hpke-rs 0.7 <- openmls_rust_crypto
+    # 0.6.0 (the latest release), so it runs at build time only.
+    # Re-check on every openmls bump.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained, build-time only (proc macro) via openmls_rust_crypto 0.6.0, the latest release" },
+    # basic-toml is unmaintained. Only the askama_derive proc macro uses it,
+    # via uniffi_bindgen 0.31, so it runs at build time only.
+    # Re-check on the next uniffi bump.
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time only (proc macro) via uniffi_bindgen 0.31" },
+    # chrono is unmaintained, with no known vulnerability. rustls-acme 0.15.4
+    # (the latest release) uses it for certificate renewal timing in
+    # aura-server. Re-check on every rustls-acme bump.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no known vulnerability; required by rustls-acme 0.15.4, the latest release" },
 ]
 
 [bans]

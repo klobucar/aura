@@ -20,9 +20,11 @@ jobs:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     permissions:
-      # rustsec/audit-check opens / updates an issue per advisory found.
+      # rustsec/audit-check opens / updates an issue per advisory found on
+      # scheduled runs, and reports a check run on other events.
       contents: read
       issues: write
+      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,11 +33,21 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # Both are blocked on the upstream OpenMLS/libcrux chain (latest
-          # openmls 0.8.1 / openmls_rust_crypto 0.5.1 already in use); rationale
-          # and re-check trigger documented in deny.toml. Keep this list in sync.
-          #   RUSTSEC-2026-0124 — libcrux-chacha20poly1305 panic (not in our compiled graph)
+          # The first four mirror deny.toml's `[advisories] ignore`, which has
+          # the rationale and re-check triggers. Keep them in sync.
+          #   RUSTSEC-2026-0387 — crypto-bigint timing (NIST curves only; unused by our MLS suite)
           #   RUSTSEC-2026-0173 — proc-macro-error2 unmaintained (build-time only)
-          ignore: RUSTSEC-2026-0124,RUSTSEC-2026-0173
+          #   RUSTSEC-2026-0374 — basic-toml unmaintained (build-time only)
+          #   RUSTSEC-2026-0543 — chrono unmaintained (via rustls-acme)
+          # cargo audit also scans Cargo.lock entries that are never compiled;
+          # cargo deny checks only the build graph, so these two are here only:
+          #   RUSTSEC-2026-0330, RUSTSEC-2026-0331 — libcrux-kem 0.0.9 panics.
+          #     In the lockfile as hpke-rs 0.7's optional libcrux backend, which
+          #     nothing enables (`cargo tree -i libcrux-kem --all-features
+          #     --target all` is empty); aura-core uses the RustCrypto backend.
+          #     hpke-rs-libcrux 0.7 pins libcrux-kem =0.0.9. Re-check on every
+          #     openmls bump.
+          ignore: RUSTSEC-2026-0387,RUSTSEC-2026-0173,RUSTSEC-2026-0374,RUSTSEC-2026-0543,RUSTSEC-2026-0330,RUSTSEC-2026-0331
 
   deny:
     name: cargo deny (advisories, bans, sources)
