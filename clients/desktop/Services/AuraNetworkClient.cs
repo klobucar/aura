@@ -68,7 +68,6 @@ public class AuraNetworkClient : IAsyncDisposable
     private string? _userUuid;          // Stable user UUID derived from Ed25519 public key hex
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _textGroupReady = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _voiceGroupReady = new();
-    private ushort _sequenceNumber;
     private RustAudioEngine? _audioEngine;
     private AudioManager? _audioManager;
     private MlsWrapper? _mlsWrapper;
@@ -930,8 +929,8 @@ public class AuraNetworkClient : IAsyncDisposable
             // 3. Parse Protobuf UserStatusUpdate
             var update = Aura.V1Alpha1.UserStatusUpdate.Parser.ParseFrom(packet);
             Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}");
-            
-            OnStatusChanged?.Invoke($"User {update.SessionId} status updated");
+
+            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened);
         }
         catch (Exception ex)
         {
