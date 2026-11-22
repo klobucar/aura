@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using Aura.Desktop.Services;
 using Xunit;
 
@@ -26,8 +27,11 @@ public class TrustStoreTests
     private const string Alice = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
     private const string Bob = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
+    /// <summary>Identity keys are 1,984 bytes (Ed25519 + ML-DSA-65).</summary>
+    private const int IdentityKeyLength = 1984;
+
     private static byte[] Key(byte fill) => System.Linq.Enumerable.ToArray(
-        System.Linq.Enumerable.Repeat(fill, 32));
+        System.Linq.Enumerable.Repeat(fill, IdentityKeyLength));
 
     private static (TrustStore store, AppSettings settings, FakeClock clock, Func<int> saves) New()
     {
@@ -225,10 +229,18 @@ public class TrustStoreTests
     }
 
     [Fact]
-    public void KeyIdIsLowercaseHex()
+    public void KeyIdIsLowercaseHexSha256()
     {
-        Assert.Equal(new string('1', 64), TrustStore.KeyId(Key(0x11)));
-        Assert.Equal(new string('a', 64), TrustStore.KeyId(Key(0xAA)));
+        // FIPS 180-2 test vector: SHA-256("abc").
+        Assert.Equal(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            TrustStore.KeyId(Encoding.ASCII.GetBytes("abc")));
+
+        var id = TrustStore.KeyId(Key(0x11));
+        Assert.Equal(64, id.Length);
+        Assert.Matches("^[0-9a-f]{64}$", id);
+        Assert.Equal(id, TrustStore.KeyId(Key(0x11)));
+        Assert.NotEqual(id, TrustStore.KeyId(Key(0xAA)));
     }
 
     [Fact]
