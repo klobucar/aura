@@ -30,7 +30,12 @@ struct LoginView: View {
     @StateObject private var profileManager = ProfileManager()
     
     var onConnected: ((QuicNetworkClient, UserIdentity) -> Void)?
-    
+
+    /// True when XCTest launched the app as the host of a unit test bundle.
+    private static var isHostingUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     var body: some View {
         VStack(spacing: 32) {
             // Logo / Header
@@ -222,6 +227,11 @@ struct LoginView: View {
             }
         })
         .onAppear {
+            // Hosting unit tests, the app never logs in. Leaving the keychain
+            // alone there keeps an unattended test run from stopping at a
+            // keychain prompt (macOS asks before an app reads an item that a
+            // different build of it saved).
+            guard !Self.isHostingUnitTests else { return }
             identity.loadOrGenerate()
         }
     }

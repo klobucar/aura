@@ -40,7 +40,7 @@ struct UserProfileEditView: View {
                 // Public Key (read-only)
                 if let identity = identity {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Public Key")
+                        Text("Public Key (Ed25519)")
                             .font(.caption.bold())
                             .foregroundStyle(.secondary)
                         Text(identity.publicKeyHex)
@@ -52,7 +52,7 @@ struct UserProfileEditView: View {
                             .clipShape(.rect(cornerRadius: 6))
                     }
                 } else {
-                    Text("A new keypair will be generated")
+                    Text(profile == nil ? "A new identity will be generated" : "This profile's key could not be loaded")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding()
@@ -98,7 +98,9 @@ struct UserProfileEditView: View {
         .padding(30)
         .frame(width: 400)
         .onAppear {
-            if identity == nil {
+            // Only a new profile gets a new identity. An existing profile whose
+            // key did not load (biometric prompt cancelled) must keep its key.
+            if identity == nil && profile == nil {
                 // Generate new identity for new profile
                 let newIdentity = UserIdentity()
                 newIdentity.id = UUID()
@@ -110,20 +112,24 @@ struct UserProfileEditView: View {
     }
     
     private func saveProfile() {
-        guard let identity = identity else { return }
-        
-        identity.displayName = displayName
-        
         if let existing = profile {
             // Update existing
             var updated = existing
             updated.displayName = displayName
-            updated.requiresBiometric = requiresBiometric
-            profileManager.updateProfile(updated)
             
-            // Update keychain
-            identity.saveToKeychain(requiresBiometric: requiresBiometric)
+            // Re-store the key under the chosen protection. Without a loaded
+            // key only the name can change.
+            if let identity = identity {
+                identity.displayName = displayName
+                if identity.saveToKeychain(requiresBiometric: requiresBiometric) {
+                    updated.requiresBiometric = requiresBiometric
+                }
+            }
+            profileManager.updateProfile(updated)
         } else {
+            guard let identity = identity else { return }
+            identity.displayName = displayName
+            
             // Create new
             identity.saveToKeychain(requiresBiometric: requiresBiometric)
             

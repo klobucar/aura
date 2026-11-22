@@ -136,6 +136,7 @@ final class IntegrationTests: XCTestCase {
         // Verify imported profile
         XCTAssertEqual(importedIdentity.displayName, "Export User")
         XCTAssertEqual(importedIdentity.publicKeyHex, identity.publicKeyHex)
+        XCTAssertEqual(importedIdentity.identityKey, identity.identityKey)
         
         // Note: Server links are stored in UserProfileModel, not in the exported identity
         // So we need to recreate the profile in ProfileManager
@@ -181,6 +182,7 @@ final class IntegrationTests: XCTestCase {
         }
         
         XCTAssertEqual(loadedIdentity.publicKeyHex, originalPublicKey)
+        XCTAssertEqual(loadedIdentity.identityKey, identity.identityKey)
     }
     
     // MARK: - Connection Flow Integration Tests

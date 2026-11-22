@@ -20,6 +20,9 @@ public class QuicNetworkClient {
     public var connectionStatus = "Disconnected"
     public var userId: UInt32 = 0
     public var sessionToken: String?
+    /// Our account's server-assigned id (`U_…`), from the login response.
+    /// It is also our identity in MLS group credentials.
+    public var userUuid: String?
     public var currentChannelId: String?
     public var sessionId: UInt32?  // Our own session ID
     
@@ -182,6 +185,7 @@ public class QuicNetworkClient {
     // Security limits
     private static let MAX_AUDIO_PACKET_SIZE = 65536
     private static let MAX_CONTROL_PACKET_SIZE = 2 * 1024 * 1024 // 2MB
+    private static let MAX_AUTH_RESPONSE_SIZE = 64 * 1024
     
     // ALPN protocol identifier
     private static let ALPN = "aura-dave"
@@ -539,10 +543,14 @@ public class QuicNetworkClient {
     
     // MARK: - Authentication
     
-    /// Authenticate using TOFU with Ed25519 signature.
-    /// Server-first protocol: wait for ServerHello with challenge, then send AuthRequest.
+    /// Log in with the hybrid identity (login v2). The server opens the
+    /// control stream and speaks first:
+    ///
+    ///     server → [0x02][32-byte challenge]
+    ///     client → [0x03][u32 LE length][AuthRequest]   (built and signed by aura-core)
+    ///     server → [0x04][u32 LE length][AuthResponse]  (success and failure alike)
     public func authenticate(identity: UserIdentity, serverPassword: String? = nil) async throws {
-        guard let publicKey = identity.publicKey else {
+        guard identity.hasIdentity else {
             throw QuicClientError.noIdentity
         }
         
@@ -571,89 +579,62 @@ public class QuicNetworkClient {
         let challenge = serverHello.subdata(in: 1..<33)
         print("[QuicClient] Received challenge: \(challenge.prefix(8).hexString)...")
         
-        // Step 2: Sign challenge
-        guard let signature = identity.sign(challenge) else {
+        // Step 2: Build the signed AuthRequest frame and send it
+        let authRequest: Data
+        do {
+            authRequest = try identity.authRequestFrame(challenge: challenge, serverPassword: serverPassword)
+        } catch {
+            print("[QuicClient] Failed to build auth request: \(error)")
             throw QuicClientError.signingFailed
         }
         
-        // Step 3: Build and send AuthRequest
-        var authReq = Data()
-        authReq.append(Self.MSG_AUTH_REQUEST)
-        authReq.append(UInt8(publicKey.count))
-        authReq.append(publicKey)
+        print("[QuicClient] Sending auth request (\(authRequest.count) bytes)...")
+        try await send(data: authRequest, on: stream)
         
-        let displayNameData = identity.displayName.data(using: .utf8) ?? Data()
-        authReq.append(UInt8(displayNameData.count))
-        authReq.append(displayNameData)
+        // Step 3: Receive the framed AuthResponse
+        print("[QuicClient] Waiting for auth response...")
+        let responseType = try await receive(on: stream, minimumLength: 1, maximumLength: 1)
         
-        authReq.append(UInt8(signature.count))
-        authReq.append(signature)
-        
-        authReq.append(UInt8(challenge.count))
-        authReq.append(challenge)
-        
-        let passwordData = serverPassword?.data(using: .utf8) ?? Data()
-        authReq.append(UInt8(passwordData.count))
-        if !passwordData.isEmpty {
-            authReq.append(passwordData)
+        guard let type = responseType.first, type == Self.MSG_AUTH_RESPONSE else {
+            let got = responseType.first.map { String(format: "0x%02X", $0) } ?? "nothing"
+            throw QuicClientError.protocolError("Invalid auth response: expected 0x04, got \(got)")
         }
         
-        print("[QuicClient] Sending auth request (\(authReq.count) bytes)...")
-        try await send(data: authReq, on: stream)
-        
-        // Step 4: Receive auth response header (7 bytes)
-        print("[QuicClient] Waiting for auth response header...")
-        let header = try await receive(on: stream, minimumLength: 7, maximumLength: 7)
-        
-        guard header[0] == Self.MSG_AUTH_RESPONSE else {
-            throw QuicClientError.protocolError("Invalid auth response header: expected 0x04, got 0x\(String(format: "%02X", header[0]))")
+        let payload = try await receiveHardenedPayload(maxLen: Self.MAX_AUTH_RESPONSE_SIZE, on: stream)
+        let response: AuthResponseRecord
+        do {
+            response = try decodeAuthResponse(payload: payload)
+        } catch {
+            throw QuicClientError.protocolError("Malformed auth response: \(error)")
         }
         
-        let success = header[1] != 0
-        let responseUserId = header.subdata(in: 2..<6).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-        let tokenLen = Int(header[6])
+        let responseUserId = response.sessionId
+        let finalToken = response.sessionToken
         
-        // Read token
-        var finalToken = ""
-        if tokenLen > 0 {
-            let tokenData = try await receive(on: stream, minimumLength: tokenLen, maximumLength: tokenLen)
-            finalToken = String(data: tokenData, encoding: .utf8) ?? ""
-        }
+        print("[QuicClient] Auth response: success=\(response.success), sessionId=\(responseUserId), user=\(response.userUuid), token=\(finalToken.prefix(8))..., verified=\(response.verified), isAdmin=\(response.isAdmin)")
         
-        // Read the rest of fixed fields: verified (1) + isAdmin (1) + errorLen (1)
-        let restFixed = try await receive(on: stream, minimumLength: 3, maximumLength: 3)
-        let verified = restFixed[0] != 0
-        let isAdmin = restFixed[1] != 0
-        let errorLen = Int(restFixed[2])
-        
-        // Read error message
-        var errorMsg: String? = nil
-        if errorLen > 0 {
-            let errorData = try await receive(on: stream, minimumLength: errorLen, maximumLength: errorLen)
-            errorMsg = String(data: errorData, encoding: .utf8)
-        }
-        
-        print("[QuicClient] Auth response: success=\(success), userId=\(responseUserId), token=\(finalToken.prefix(8))..., verified=\(verified), isAdmin=\(isAdmin)")
-        
-        guard success else {
-            throw QuicClientError.authenticationFailed(errorMsg ?? "Unknown error")
+        guard response.success else {
+            throw QuicClientError.authenticationFailed(response.errorMessage.isEmpty ? "Unknown error" : response.errorMessage)
         }
         
         self.userId = responseUserId
         self.sessionToken = finalToken
+        self.userUuid = response.userUuid
         self.isAuthenticated = true
-        self.isAdmin = isAdmin
+        self.isAdmin = response.isAdmin
         
         // Use userId as sessionId immediately (server sends the real session ID now)
         self.sessionId = responseUserId
         print("[QuicClient] Session ID set to: \(responseUserId) from auth response")
-        self.connectionStatus = "Authenticated as user \(userId)" + (verified ? " (verified)" : "")
+        self.connectionStatus = "Authenticated as user \(userId)" + (response.verified ? " (verified)" : "")
         
         print("[QuicClient] ✓ Authentication SUCCESS!")
         
-        // Initialize MLS wrapper with user identity
+        // MLS client for this account: its credential names the server's user
+        // id, and its signing key is derived from the identity secret, so it is
+        // the same on every connection.
         do {
-            mlsWrapper = try MlsWrapper(identityName: finalToken)
+            mlsWrapper = try identity.makeMlsWrapper(userId: response.userUuid)
             print("[QuicClient] MLS wrapper initialized for E2EE")
         } catch {
             print("[QuicClient] Failed to initialize MLS: \(error) - E2EE will not be available")
@@ -2609,6 +2590,9 @@ public class QuicNetworkClient {
             print("[QuicClient] Incoming frame too large: \(length) bytes (max \(maxLen))")
             throw QuicClientError.protocolError("Incoming frame exceeds size limit")
         }
+        
+        // An all-default protobuf message encodes to zero bytes.
+        guard length > 0 else { return Data() }
         
         return try await receive(on: stream, minimumLength: Int(length), maximumLength: Int(length))
     }

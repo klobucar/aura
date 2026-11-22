@@ -83,7 +83,7 @@ final class TrustSheetModel: ObservableObject {
         "\(selected?.name ?? "This user")'s identity key changed"
     }
 
-    let keyChangedBody = "Same display name, new Ed25519 key. Could be a reinstall — "
+    let keyChangedBody = "Same display name, new identity key. Could be a reinstall — "
         + "or a name takeover. Compare the words below out of band before you speak."
 
     var canAct: Bool {
@@ -120,10 +120,10 @@ final class TrustSheetModel: ObservableObject {
             return
         }
 
-        securityLine = "MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch \(epoch)"
+        securityLine = "MLS · X25519+ML-KEM-768 · ChaCha20-Poly1305 · ML-DSA-44 · epoch \(epoch)"
 
         if let me = records.first(where: { $0.isSelf }) {
-            localKey = me.signatureKey
+            localKey = me.identityKey
             localUuid = me.identity
         }
 
@@ -131,15 +131,15 @@ final class TrustSheetModel: ObservableObject {
             .map { record in
                 // Record every key we see before judging it — that is what makes
                 // a later disagreement detectable at all.
-                trust.observe(userUuid: record.identity, publicKey: record.signatureKey)
+                trust.observe(userUuid: record.identity, publicKey: record.identityKey)
 
                 return TrustMember(
                     id: record.identity,
-                    publicKey: record.signatureKey,
+                    publicKey: record.identityKey,
                     isSelf: record.isSelf,
                     name: displayName(for: record.identity),
-                    trust: trust.evaluate(userUuid: record.identity, publicKey: record.signatureKey),
-                    shortFingerprint: (try? identityFingerprintShort(publicKey: record.signatureKey)) ?? ""
+                    trust: trust.evaluate(userUuid: record.identity, publicKey: record.identityKey),
+                    shortFingerprint: (try? identityFingerprintShort(publicKey: record.identityKey)) ?? ""
                 )
             }
             .sorted { lhs, rhs in

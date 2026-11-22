@@ -100,15 +100,12 @@ jobs:
         #   - IntegrationTests/* (every test calls createProfile → saveToKeychain)
         #   - ProfileManagerTests/* (same)
         #   - UserIdentityTests/{testKeychainDelete,testKeychainSaveAndLoad,testImportProfile}
-        #   - EdgeCaseTests/* keychain/sign tests (8)
-        #   - FuzzTests/{testKeychainWithRandomIdentities,testSigningWithRandomData}
+        #   - EdgeCaseTests/* keychain tests (5)
+        #   - FuzzTests/testKeychainWithRandomIdentities
         #   - ServerManagerTests/testPersistence (collaterally killed by a
         #     parallel-process keychain crash, not a real keychain test)
         #
         # SKIP CATEGORY 2 — pre-existing real bugs to fix and re-enable:
-        #   - MlsProtocolTests (Swift Testing whole-class skip until
-        #     testThreePartyMlsGroup is fixed; costs us the 6 healthy tests
-        #     in the class)
         #   - UserIdentityTests/testImportExportRoundTrip: imported identity
         #     doesn't reproduce the original signature
         #   - FuzzTests/testServerProfileWithRandomData: fuzz edge case
@@ -132,13 +129,8 @@ jobs:
             -skip-testing:AuraTests/EdgeCaseTests/testImportWithWrongKeyLength \
             -skip-testing:AuraTests/EdgeCaseTests/testProfileWithVeryLongDisplayName \
             -skip-testing:AuraTests/EdgeCaseTests/testRecentProfilesWithNoLastUsed \
-            -skip-testing:AuraTests/EdgeCaseTests/testSignEmptyData \
-            -skip-testing:AuraTests/EdgeCaseTests/testSignLargeData \
-            -skip-testing:AuraTests/EdgeCaseTests/testSignWithoutKey \
             -skip-testing:AuraTests/FuzzTests/testKeychainWithRandomIdentities \
-            -skip-testing:AuraTests/FuzzTests/testSigningWithRandomData \
             -skip-testing:AuraTests/ServerManagerTests/testPersistence \
-            -skip-testing:AuraTests/MlsProtocolTests \
             -skip-testing:AuraTests/UserIdentityTests/testImportExportRoundTrip \
             -skip-testing:AuraTests/FuzzTests/testServerProfileWithRandomData \
             -skip-testing:AuraTests/ConnectionRetryTests/testSavedConnectionParameters \

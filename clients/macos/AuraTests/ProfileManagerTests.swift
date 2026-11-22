@@ -210,17 +210,13 @@ final class ProfileManagerTests: XCTestCase {
         identity.displayName = "Biometric User"
         identity.generateKeypair()
         
-        var profile = UserProfileModel(
-            id: identity.id!,
-            displayName: "Biometric User",
-            publicKeyHex: identity.publicKeyHex,
-            requiresBiometric: true
-        )
+        profileManager.createProfile(displayName: "Biometric User", identity: identity)
+        var profile = profileManager.profiles.first!
+        profile.requiresBiometric = true
+        profileManager.updateProfile(profile)
         
-        profileManager.profiles.append(profile)
-        
-        // Create new manager instance
-        let newManager = ProfileManager()
+        // Create new manager instance on the same storage
+        let newManager = ProfileManager(storageKey: testStorageKey)
         
         XCTAssertTrue(newManager.profiles.first?.requiresBiometric ?? false)
     }

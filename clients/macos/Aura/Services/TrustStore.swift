@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - State
 
@@ -42,10 +43,11 @@ extension UserDefaults: TrustStoreDefaults {}
 /// Remembers which identity keys the user has verified, blocked, or seen
 /// before, and turns that history into a `TrustState` for any member.
 ///
-/// Everything is keyed by the Ed25519 public key, not by user id or display
-/// name. A user who rotates keys — or an impostor who takes over a name —
-/// starts from `TrustState.tofu` rather than inheriting trust, and a block
-/// cannot be shaken off by reconnecting under a new session.
+/// Everything is keyed by the member's identity public key (the 1,984-byte
+/// hybrid Ed25519 + ML-DSA-65 key), not by user id or display name. A user
+/// who rotates keys — or an impostor who takes over a name — starts from
+/// `TrustState.tofu` rather than inheriting trust, and a block cannot be
+/// shaken off by reconnecting under a new session.
 ///
 /// The keys themselves come from the authenticated MLS ratchet tree. They are
 /// never taken from the server's user list, which carries no key material
@@ -66,14 +68,14 @@ final class TrustStore {
     // MARK: State
 
     /// Identity keys the user compared out of band and accepted, keyed by
-    /// lowercase hex of the public key and valued with when it happened.
+    /// `keyId` of the key and valued with when it happened.
     ///
     /// Keyed by *key*, never by user: that is what makes a key rotation drop
     /// back to unverified instead of silently inheriting the old key's trust.
     private(set) var verifiedKeys: [String: Date] = [:]
 
-    /// Identity keys the user rejected from the trust sheet. Also keyed by key
-    /// hex, so an impostor cannot clear a block by reconnecting.
+    /// Identity keys the user rejected from the trust sheet. Also keyed by
+    /// `keyId`, so an impostor cannot clear a block by reconnecting.
     private(set) var blockedKeys: [String: Date] = [:]
 
     /// First key seen for each user UUID — the TOFU baseline. A later key that
@@ -141,9 +143,11 @@ final class TrustStore {
 
     // MARK: Identity
 
-    /// Lowercase hex, the form every dictionary here is keyed by.
+    /// Lowercase hex of the SHA-256 of the identity key: the form every
+    /// dictionary here is keyed by. Hashing keeps stored ids at 64 characters
+    /// rather than the ~4,000 that hex of a 1,984-byte key would take.
     static func keyId(_ publicKey: Data) -> String {
-        publicKey.hexString
+        SHA256.hash(data: publicKey).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: Mutation
