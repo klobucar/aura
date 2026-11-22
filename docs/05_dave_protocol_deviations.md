@@ -34,14 +34,15 @@ Standard DAVE is constrained by **WebRTC**. WebRTC-based SFUs (Relays) often ins
 
 ## 3. Cryptographic Primitives
 
-### Deviation: Hybrid X25519 + ML-KEM-768 / Ed25519 vs. P-256
-*   **Aura**: `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519`: X-Wing hybrid KEM (X25519 + ML-KEM-768) and `Ed25519` signatures.
+### Deviation: Hybrid X25519 + ML-KEM-768 / ML-DSA-44 vs. P-256
+*   **Aura**: `MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44`: X-Wing hybrid KEM (X25519 + ML-KEM-768) and ML-DSA-44 signatures, with each member's MLS key certified by their hybrid Ed25519 + ML-DSA-65 identity.
 *   **Standard DAVE**: `DHKEMP256` + `P-256`.
 
 **Rationale:**
 - **P-256** (NIST) contains unexplained "seed" values that have long been a source of skepticism in the security community (potential "backdoors").
 - **Ed25519/X25519** (Bernstein) is easier to implement safely without side-channels (like branch-on-secret) and has much higher performance. Since we are not bound by legacy browser compatibility, we chose the superior modern standard.
-- **ML-KEM-768** is combined with X25519 so that recorded MLS handshakes stay confidential against a future quantum computer ("harvest now, decrypt later"), while the classical half preserves today's security if ML-KEM is ever broken. See [PQ Migration](PQ_MIGRATION.md).
+- **ML-KEM-768** is combined with X25519 so that recorded MLS handshakes stay confidential against a future quantum computer ("harvest now, decrypt later"), while the classical half preserves today's security if ML-KEM is ever broken.
+- **ML-DSA** signatures resist forgery by a quantum computer. MLS has no hybrid signature scheme, so MLS messages use ML-DSA-44 alone, and the long-term identity that vouches for each member's MLS key is hybrid Ed25519 + ML-DSA-65 (both must verify). See [PQ Migration](PQ_MIGRATION.md).
 
 ---
 
@@ -68,15 +69,16 @@ sort is what makes the result symmetric, so both devices derive identical
 output without negotiating who is "first". Three inputs and the presentation
 differ. Implementation: `crates/aura-core/src/verification.rs`.
 
-### Deviation: Ed25519 public keys vs. P-256
-*   **Aura**: 32-byte Ed25519 signature keys as the `Pub` input.
-*   **Standard DAVE**: P-256 keys.
+### Deviation: Hybrid identity keys vs. P-256, version 1
+*   **Aura**: the member's 1,984-byte hybrid identity public key (ML-DSA-65 key, then Ed25519 key) as the `Pub` input, taken from their verified MLS credential, with fingerprint version `00 01`.
+*   **Standard DAVE**: P-256 keys, version `00 00`.
 
 **Rationale:**
-Forced by §3 above — the MLS ciphersuite's signature algorithm *is* the
-identity key, so choosing Ed25519 for MLS chooses it here too. No security
-argument beyond §3's; the fingerprint construction treats the key as opaque
-bytes and is indifferent to the curve.
+Follows from §3: the identity key is what each member's MLS credential
+certifies, and it is the same on every connection, so verification and trust
+survive reconnects. The construction treats the key as opaque bytes. The
+version change keeps these values from ever matching ones computed over the
+older 32-byte Ed25519 keys, so every user's safety words changed once.
 
 ### Deviation: UUID identifiers vs. u64 snowflakes
 *   **Aura**: The user's UUID, as UTF-8 bytes.
