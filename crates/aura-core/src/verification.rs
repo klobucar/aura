@@ -28,6 +28,7 @@
 //! attacker grinding keys for a colliding word set. Call it when a user opens
 //! the trust sheet, never per frame, per member, or on a render path.
 
+use crate::mls::traced;
 use scrypt::{scrypt, Params};
 use sha2::{Digest, Sha256};
 
@@ -128,6 +129,18 @@ pub fn key_fingerprint(public_key: &[u8]) -> Result<[u8; KEY_FINGERPRINT_LEN], V
 ///
 /// Expensive by design — see the module docs before calling.
 pub fn pairwise_fingerprint(
+    local_public_key: &[u8],
+    local_id: &str,
+    remote_public_key: &[u8],
+    remote_id: &str,
+) -> Result<[u8; PAIRWISE_FINGERPRINT_LEN], VerificationError> {
+    traced(
+        tracing::info_span!(target: "aura::core", "verification.pairwise_fingerprint", outcome = tracing::field::Empty),
+        || pairwise_fingerprint_inner(local_public_key, local_id, remote_public_key, remote_id),
+    )
+}
+
+fn pairwise_fingerprint_inner(
     local_public_key: &[u8],
     local_id: &str,
     remote_public_key: &[u8],

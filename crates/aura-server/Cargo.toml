@@ -16,6 +16,7 @@ anyhow = "1.0.102"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 aura-identity = { path = "../aura-identity" }
+aura-telemetry = { path = "../aura-telemetry" }
 futures = "0.3.31"
 tokio-stream = { version = "0.1.18", features = ["net"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std"] }
@@ -44,3 +45,6 @@ uuid = { version = "1.23.0", features = ["v4"] }
 # Rate limiting (per-IP handshake throttle)
 governor = "0.10.4"
 nonzero_ext = "0.3.0"
+
+[dev-dependencies]
+aura-telemetry = { path = "../aura-telemetry", features = ["testing"] }

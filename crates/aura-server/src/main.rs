@@ -75,9 +75,29 @@ async fn main() -> Result<()> {
     // the ACME client.
     aura_server::tls::install_default_provider();
 
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    // Logging, plus OpenTelemetry tracing when an OTLP endpoint is configured
+    // (OTEL_EXPORTER_OTLP_ENDPOINT). Only Aura's own spans are exported, never
+    // log lines; see docs/OBSERVABILITY.md. Kept alive until main returns so
+    // buffered spans are flushed.
+    let telemetry = aura_telemetry::Config::from_env("aura-server", env!("CARGO_PKG_VERSION"))
+        .map(aura_telemetry::Telemetry::start)
+        .transpose()?;
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        use tracing_subscriber::Layer as _;
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::filter::LevelFilter::INFO),
+            )
+            .with(telemetry.as_ref().map(|t| t.layer()))
+            .init();
+    }
     info!("Starting Aura Zero-Trust Relay...");
+    if telemetry.is_some() {
+        info!("OpenTelemetry tracing enabled (OTLP/HTTP)");
+    }
 
     // Load configuration
     let config = Config::load()?;

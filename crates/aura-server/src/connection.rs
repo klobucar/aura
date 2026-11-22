@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tracing::field::Empty;
+use tracing::{debug, error, info, warn, Instrument as _};
 
 // Protocol message types
 // const MSG_CHALLENGE_REQUEST: u8 = 0x01;
@@ -346,6 +347,34 @@ impl QuicServer {
     }
 }
 
+/// Telemetry name for a control-stream message type. Names only: the
+/// payload, channel and sender never go into a span.
+fn message_type_name(msg_type: u8) -> &'static str {
+    match msg_type {
+        MSG_JOIN_CHANNEL => "join_channel",
+        MSG_TEXT_PACKET => "text_packet",
+        MSG_CREATE_CHANNEL => "create_channel",
+        MSG_UPDATE_CHANNEL => "update_channel",
+        MSG_UPDATE_PROFILE => "update_profile",
+        MSG_DELETE_CHANNEL => "delete_channel",
+        MSG_DELETE_USER => "delete_user",
+        MSG_UPDATE_STATUS => "update_status",
+        MSG_MLS_JOIN => "mls_join",
+        MSG_MLS_COMMIT_WELCOME => "mls_commit_welcome",
+        MSG_MLS_RATCHET_COMMIT => "mls_ratchet_commit",
+        _ => "other",
+    }
+}
+
+/// A login the server refused, as opposed to a broken or malformed
+/// connection. Carries a reason code for telemetry.
+#[derive(Debug, thiserror::Error)]
+#[error("Authentication failed: {message}")]
+struct LoginRefused {
+    code: &'static str,
+    message: String,
+}
+
 /// Handle a single QUIC connection.
 async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<()> {
     let remote = conn.remote_address();
@@ -441,7 +470,21 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             continue;
                         }
 
-                        match ctx.handle_client_message(type_byte).await {
+                        // Root span per message; its type is the only detail.
+                        let span = tracing::info_span!(
+                            target: "aura::server",
+                            parent: None,
+                            "control_message",
+                            msg_type = message_type_name(type_byte),
+                            outcome = Empty,
+                        );
+                        let handled = ctx
+                            .handle_client_message(type_byte)
+                            .instrument(span.clone())
+                            .await;
+                        span.record("outcome", if handled.is_ok() { "ok" } else { "error" });
+                        drop(span);
+                        match handled {
                             Ok(continue_conn) => {
                                 if !continue_conn { break; }
                             }
@@ -512,9 +555,39 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 /// Authenticate a client using TOFU protocol.
 /// Server-first protocol for Apple Network.framework compatibility:
 /// 1. Server sends ServerHello with challenge
-/// 2. Client sends AuthRequest with public key, name, signature of challenge
+/// 2. Client sends AuthRequest: identity key, name, hybrid signature over the transcript
 /// 3. Server validates and sends AuthResponse
 async fn authenticate_client(
+    send: SendStream,
+    recv: RecvStream,
+    state: &Arc<ServerState>,
+    remote: SocketAddr,
+) -> Result<(
+    u32,
+    String,
+    SendStream,
+    RecvStream,
+    tokio::sync::mpsc::UnboundedReceiver<ServiceMessage>,
+)> {
+    // Root span (not a child of the connection): one per login attempt, with
+    // only an outcome code.
+    let span = tracing::info_span!(target: "aura::server", parent: None, "auth", outcome = Empty);
+    let result = authenticate_client_inner(send, recv, state, remote)
+        .instrument(span.clone())
+        .await;
+    span.record(
+        "outcome",
+        match &result {
+            Ok(_) => "ok",
+            Err(e) => e
+                .downcast_ref::<LoginRefused>()
+                .map_or("protocol_error", |r| r.code),
+        },
+    );
+    result
+}
+
+async fn authenticate_client_inner(
     mut send: SendStream,
     mut recv: RecvStream,
     state: &Arc<ServerState>,
@@ -561,8 +634,11 @@ async fn authenticate_client(
 
     // The signature covers this challenge; a mismatch means a stale or
     // replayed request.
-    let auth_result = if request.challenge != challenge {
-        Err(anyhow!("Challenge mismatch"))
+    let auth_result: Result<_, LoginRefused> = if request.challenge != challenge {
+        Err(LoginRefused {
+            code: "challenge_mismatch",
+            message: "Challenge mismatch".into(),
+        })
     } else {
         state
             .auth
@@ -573,7 +649,10 @@ async fn authenticate_client(
                 &challenge,
                 request.server_password.as_deref(),
             )
-            .map_err(|e| anyhow!(e))
+            .map_err(|e| LoginRefused {
+                code: e.code(),
+                message: e.to_string(),
+            })
     };
 
     // Step 3: AuthResponse: [0x04][u32 LE length][AuthResponse]
@@ -603,13 +682,13 @@ async fn authenticate_client(
             };
             (response, Ok((session_id, result.user_uuid, rx)))
         }
-        Err(e) => {
+        Err(refused) => {
             let response = aura_protocol::AuthResponse {
                 success: false,
-                error_message: e.to_string(),
+                error_message: refused.message.clone(),
                 ..Default::default()
             };
-            (response, Err(anyhow!("Authentication failed: {}", e)))
+            (response, Err(anyhow::Error::new(refused)))
         }
     };
 
@@ -1362,6 +1441,12 @@ mod tests {
         assert_eq!(alpn, tls::ALPN);
     }
 
+    /// Serializes the tests that log in. They share the `auth` span site, and
+    /// `tracing` caches whether a site is enabled process-wide: one test
+    /// logging in with no subscriber while another records spans makes the
+    /// recording test miss its spans.
+    static LOGIN_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Log in over a real QUIC connection against `authenticate_client`, the
     /// way a client does: read the hello, send a signed AuthRequest, read the
     /// framed AuthResponse.
@@ -1445,6 +1530,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_v2_succeeds_and_returns_the_user_id() {
+        let _serial = LOGIN_TESTS.lock().await;
         crate::tls::install_default_provider();
         let id = aura_identity::IdentitySecret::generate();
         let r = login_over_quic(test_state(None), &id, "Alice", None)
@@ -1458,6 +1544,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_v2_failure_is_a_well_formed_response() {
+        let _serial = LOGIN_TESTS.lock().await;
         crate::tls::install_default_provider();
         let id = aura_identity::IdentitySecret::generate();
         let r = login_over_quic(test_state(Some("secret")), &id, "Alice", Some("wrong"))
@@ -1466,5 +1553,88 @@ mod tests {
         assert!(!r.success);
         assert!(r.user_uuid.is_empty() && r.session_token.is_empty());
         assert!(r.error_message.contains("password"), "{}", r.error_message);
+    }
+
+    /// A real login produces one `auth` span with an outcome code, and no
+    /// exported attribute carries the user's name, id, token or address.
+    #[tokio::test]
+    async fn login_spans_carry_no_identifying_details() {
+        let _serial = LOGIN_TESTS.lock().await;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        crate::tls::install_default_provider();
+        let (telemetry, exporter) = aura_telemetry::testing::in_memory();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(telemetry.layer()),
+        );
+        // Span sites are cached process-wide as enabled or not. Another test
+        // thread with no subscriber may have reached the `auth` site first;
+        // re-evaluate now that this thread has one.
+        tracing::callsite::rebuild_interest_cache();
+
+        let id = aura_identity::IdentitySecret::generate();
+        let ok = login_over_quic(test_state(None), &id, "Alice", None)
+            .await
+            .unwrap();
+        assert!(ok.success);
+        let refused = login_over_quic(test_state(Some("secret")), &id, "Alice", Some("wrong"))
+            .await
+            .unwrap();
+        assert!(!refused.success);
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let outcomes: Vec<String> = spans
+            .iter()
+            .filter(|s| s.name == "auth")
+            .map(|s| {
+                s.attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == "outcome")
+                    .map(|kv| kv.value.as_str().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(outcomes, ["ok", "invalid_password"]);
+
+        let exported: String = spans
+            .iter()
+            .flat_map(|s| {
+                s.attributes
+                    .iter()
+                    .map(|kv| format!("{}={} ", kv.key, kv.value))
+            })
+            .collect();
+        for secret in [
+            "Alice",
+            ok.user_uuid.as_str(),
+            ok.session_token.as_str(),
+            "127.0.0.1",
+        ] {
+            assert!(
+                !exported.contains(secret),
+                "{secret:?} leaked into {exported}"
+            );
+        }
+        assert!(
+            spans.iter().all(|s| s.events.is_empty()),
+            "log events exported"
+        );
+        drop(_guard);
+        drop(telemetry);
+    }
+
+    /// `main` starts and stops the real OTLP exporter inside the tokio
+    /// runtime. Its HTTP client is reqwest's blocking client, which panics if
+    /// built or dropped on a runtime thread; this catches a regression there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_exporter_starts_and_stops_inside_the_runtime() {
+        let config = aura_telemetry::Config::with_endpoint(
+            "http://127.0.0.1:9",
+            Default::default(),
+            "aura-server-test",
+            "0",
+        )
+        .unwrap();
+        let telemetry = aura_telemetry::Telemetry::start(config).unwrap();
+        drop(telemetry);
     }
 }

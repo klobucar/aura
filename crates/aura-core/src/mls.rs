@@ -86,6 +86,15 @@ fn verify_leaf_credential(
     Ok(member)
 }
 
+/// Run `f` inside `span` (an `aura::core` telemetry span) and record whether
+/// it succeeded. Spans carry an operation name and an outcome only; see
+/// `telemetry_ffi`. A no-op when telemetry is off.
+pub(crate) fn traced<T, E>(span: tracing::Span, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    let result = span.in_scope(f);
+    span.record("outcome", if result.is_ok() { "ok" } else { "error" });
+    result
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MlsError {
     #[error("OpenMLS error: {0}")]
@@ -202,6 +211,13 @@ impl MlsClient {
 
     /// Generate a KeyPackage for joining groups
     pub fn generate_key_package(&self) -> Result<KeyPackageBundle, MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.generate_key_package", outcome = tracing::field::Empty),
+            || self.generate_key_package_inner(),
+        )
+    }
+
+    fn generate_key_package_inner(&self) -> Result<KeyPackageBundle, MlsError> {
         let identity = self.identity.as_ref().ok_or(MlsError::NoCredential)?;
 
         let key_package_bundle = KeyPackage::builder()
@@ -219,6 +235,13 @@ impl MlsClient {
 
     /// Create a new MLS group (as the creator/admin)
     pub fn create_group(&mut self, group_id: &[u8]) -> Result<(), MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.create_group", outcome = tracing::field::Empty),
+            || self.create_group_inner(group_id),
+        )
+    }
+
+    fn create_group_inner(&mut self, group_id: &[u8]) -> Result<(), MlsError> {
         let identity = self.identity.as_ref().ok_or(MlsError::NoCredential)?;
 
         let group_config = MlsGroupCreateConfig::builder()
@@ -459,6 +482,13 @@ impl MlsClient {
     /// Process a Welcome message to join a group
     /// Returns the group_id of the joined group
     pub fn process_welcome(&mut self, welcome_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.process_welcome", outcome = tracing::field::Empty),
+            || self.process_welcome_inner(welcome_bytes),
+        )
+    }
+
+    fn process_welcome_inner(&mut self, welcome_bytes: &[u8]) -> Result<Vec<u8>, MlsError> {
         // Deserialize the Welcome message using tls_codec
         let mut welcome_slice = welcome_bytes;
         let mls_message_in = MlsMessageIn::tls_deserialize(&mut welcome_slice)
@@ -519,6 +549,17 @@ impl MlsClient {
 
     /// Add a member to a group (returns serialized Commit and Welcome messages)
     pub fn add_member(
+        &mut self,
+        group_id: &[u8],
+        key_package_bytes: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.add_member", outcome = tracing::field::Empty),
+            || self.add_member_inner(group_id, key_package_bytes),
+        )
+    }
+
+    fn add_member_inner(
         &mut self,
         group_id: &[u8],
         key_package_bytes: &[u8],
@@ -588,6 +629,17 @@ impl MlsClient {
         group_id: &[u8],
         commit_bytes: &[u8],
     ) -> Result<u64, MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.process_commit", outcome = tracing::field::Empty),
+            || self.process_commit_inner(group_id, commit_bytes),
+        )
+    }
+
+    fn process_commit_inner(
+        &mut self,
+        group_id: &[u8],
+        commit_bytes: &[u8],
+    ) -> Result<u64, MlsError> {
         // Retain the outgoing epoch's keys before the commit is merged.
         self.snapshot_epoch_keys(group_id);
 
@@ -647,6 +699,13 @@ impl MlsClient {
     /// membership change, so keys derived at the old epoch cannot decrypt
     /// anything sent after it. Returns the serialized Commit to broadcast.
     pub fn self_update(&mut self, group_id: &[u8]) -> Result<Vec<u8>, MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.self_update", outcome = tracing::field::Empty),
+            || self.self_update_inner(group_id),
+        )
+    }
+
+    fn self_update_inner(&mut self, group_id: &[u8]) -> Result<Vec<u8>, MlsError> {
         // Retain the outgoing epoch's keys before the commit is merged.
         self.snapshot_epoch_keys(group_id);
 

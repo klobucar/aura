@@ -1,0 +1,25 @@
+[package]
+name = "aura-telemetry"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Opt-in OpenTelemetry tracing for Aura that exports only Aura's own spans"
+
+[dependencies]
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
+# OTLP over HTTP/protobuf with reqwest's blocking client: it runs on its own
+# thread, so it works in aura-core (no async runtime) as well as the server.
+# reqwest's rustls uses aws-lc-rs and the OS trust store.
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
+thiserror = "2.0.18"
+tracing = "0.1.41"
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
+
+[features]
+# In-memory span capture for tests in other crates.
+testing = ["opentelemetry_sdk/testing"]

@@ -51,6 +51,26 @@ pub enum AuthError {
     DatabaseError(#[from] anyhow::Error),
 }
 
+impl AuthError {
+    /// A short, stable reason code for telemetry: never carries the user,
+    /// name or key involved.
+    pub fn code(&self) -> &'static str {
+        match self {
+            AuthError::InvalidPassword => "invalid_password",
+            AuthError::UsernameTaken(_) => "username_taken",
+            AuthError::InvalidPublicKey => "invalid_public_key",
+            AuthError::IdentityKeyMismatch => "identity_key_mismatch",
+            AuthError::InvalidSignature => "invalid_signature",
+            AuthError::UserBanned => "banned",
+            AuthError::VerificationRequired => "verification_required",
+            AuthError::InvalidSession => "invalid_session",
+            AuthError::PermissionDenied => "permission_denied",
+            AuthError::UserNotFound => "user_not_found",
+            AuthError::DatabaseError(_) => "internal_error",
+        }
+    }
+}
+
 /// Session information stored in memory.
 #[derive(Debug, Clone)]
 pub struct Session {

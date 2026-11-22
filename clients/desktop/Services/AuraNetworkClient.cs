@@ -117,9 +117,37 @@ public class AuraNetworkClient : IAsyncDisposable
     public event Action<uint, bool, bool>? OnUserStatusUpdated; // sessionId, isMuted, isDeafened
     
     /// <summary>
+    /// Run an app-level operation inside an opt-in telemetry span (aura-core
+    /// <c>TelemetrySpan</c>). The span carries only the operation and its
+    /// outcome, and does nothing unless telemetry was started.
+    /// </summary>
+    private static async Task TracedAsync(ClientOperation operation, Func<Task> body)
+    {
+        using var span = new TelemetrySpan(operation);
+        try
+        {
+            await body();
+            span.Finish(OperationOutcome.Ok);
+        }
+        catch (OperationCanceledException)
+        {
+            span.Finish(OperationOutcome.Cancelled);
+            throw;
+        }
+        catch
+        {
+            span.Finish(OperationOutcome.Failed);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Connect to the Aura server via QUIC.
     /// </summary>
-    public async Task ConnectAsync(string host, int port = 8443, CancellationToken ct = default)
+    public Task ConnectAsync(string host, int port = 8443, CancellationToken ct = default)
+        => TracedAsync(ClientOperation.Connect, () => ConnectCoreAsync(host, port, ct));
+
+    private async Task ConnectCoreAsync(string host, int port, CancellationToken ct)
     {
         Console.WriteLine($"[AuraClient] Connecting to {host}:{port}...");
         OnStatusChanged?.Invoke("Connecting...");
@@ -204,7 +232,10 @@ public class AuraNetworkClient : IAsyncDisposable
     /// and read back <c>[0x04][u32 LE length][AuthResponse]</c>, which has the
     /// same shape on success and failure.
     /// </summary>
-    public async Task AuthenticateAsync(UserIdentity identity, string? serverPassword = null, CancellationToken ct = default)
+    public Task AuthenticateAsync(UserIdentity identity, string? serverPassword = null, CancellationToken ct = default)
+        => TracedAsync(ClientOperation.Login, () => AuthenticateCoreAsync(identity, serverPassword, ct));
+
+    private async Task AuthenticateCoreAsync(UserIdentity identity, string? serverPassword, CancellationToken ct)
     {
         if (_controlStream == null)
             throw new InvalidOperationException("Not connected");
@@ -314,7 +345,10 @@ public class AuraNetworkClient : IAsyncDisposable
     /// <summary>
     /// Join a voice channel.
     /// </summary>
-    public async Task JoinChannelAsync(string channelId, CancellationToken ct = default)
+    public Task JoinChannelAsync(string channelId, CancellationToken ct = default)
+        => TracedAsync(ClientOperation.JoinChannel, () => JoinChannelCoreAsync(channelId, ct));
+
+    private async Task JoinChannelCoreAsync(string channelId, CancellationToken ct)
     {
         if (_controlStream == null)
             throw new InvalidOperationException("Not authenticated");
