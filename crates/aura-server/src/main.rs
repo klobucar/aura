@@ -130,6 +130,17 @@ async fn main() -> Result<()> {
     // Sweep expired replay-protection entries so the set stays bounded.
     Arc::clone(&state.seen_messages).spawn_cleanup(state::SEEN_MESSAGE_SWEEP_INTERVAL);
 
+    // Prometheus metrics (aggregate counts only), when AURA_METRICS_ADDR is set.
+    if let Some(addr) = config.server.metrics_address {
+        let metrics_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(e) = aura_server::metrics::serve(addr, metrics_state).await {
+                error!("Metrics endpoint on {} failed: {}", addr, e);
+            }
+        });
+        info!("Serving Prometheus metrics on http://{}/metrics", addr);
+    }
+
     // Create initial channel for testing if none exist in DB
     if db.get_all_channels()?.is_empty() {
         let channel_id = format!("C_{}", uuid::Uuid::new_v4());

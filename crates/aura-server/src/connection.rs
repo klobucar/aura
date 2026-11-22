@@ -318,6 +318,7 @@ impl QuicServer {
             // Per-IP handshake rate limit — reject before paying TLS or
             // Ed25519 CPU cost. Loopback is always allowed.
             if let Err(e) = self.rate_limiter.check(remote.ip()) {
+                crate::metrics::METRICS.connection_rejected("rate_limited");
                 warn!("[QUIC] Rejecting connection from {}: {}", remote, e);
                 drop(connecting);
                 continue;
@@ -332,11 +333,13 @@ impl QuicServer {
                         let remote = connection.remote_address();
                         info!("[QUIC] TLS handshake complete from {}", remote);
 
+                        let _open = crate::metrics::METRICS.connection_opened();
                         if let Err(e) = handle_connection(connection, state).await {
                             warn!("[QUIC] Connection error from {}: {}", remote, e);
                         }
                     }
                     Err(e) => {
+                        crate::metrics::METRICS.connection_rejected("handshake_failed");
                         warn!("[QUIC] TLS handshake failed from {}: {}", remote, e);
                     }
                 }
@@ -441,6 +444,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             match data[0] {
                                 // Audio. Skip empty audio frames (header only).
                                 0x01 if data.len() > 1 => {
+                                    crate::metrics::METRICS.audio_datagram(data.len() - 1);
                                     ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                 }
                                 0x00 => {
@@ -483,6 +487,8 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             .instrument(span.clone())
                             .await;
                         span.record("outcome", if handled.is_ok() { "ok" } else { "error" });
+                        crate::metrics::METRICS
+                            .control_message(message_type_name(type_byte), handled.is_ok());
                         drop(span);
                         match handled {
                             Ok(continue_conn) => {
@@ -575,15 +581,14 @@ async fn authenticate_client(
     let result = authenticate_client_inner(send, recv, state, remote)
         .instrument(span.clone())
         .await;
-    span.record(
-        "outcome",
-        match &result {
-            Ok(_) => "ok",
-            Err(e) => e
-                .downcast_ref::<LoginRefused>()
-                .map_or("protocol_error", |r| r.code),
-        },
-    );
+    let outcome = match &result {
+        Ok(_) => "ok",
+        Err(e) => e
+            .downcast_ref::<LoginRefused>()
+            .map_or("protocol_error", |r| r.code),
+    };
+    span.record("outcome", outcome);
+    crate::metrics::METRICS.login(outcome);
     result
 }
 
@@ -1637,5 +1642,26 @@ mod tests {
         .unwrap();
         let telemetry = aura_telemetry::Telemetry::start(config).unwrap();
         drop(telemetry);
+    }
+
+    /// Logins feed `aura_logins_total` by outcome. Under the login lock, so
+    /// no other test's logins land in between.
+    #[tokio::test]
+    async fn logins_are_counted_by_outcome() {
+        let _serial = LOGIN_TESTS.lock().await;
+        crate::tls::install_default_provider();
+        let m = &crate::metrics::METRICS;
+        let (ok0, pw0) = (m.logins_with("ok"), m.logins_with("invalid_password"));
+
+        let id = aura_identity::IdentitySecret::generate();
+        login_over_quic(test_state(None), &id, "Alice", None)
+            .await
+            .unwrap();
+        login_over_quic(test_state(Some("secret")), &id, "Alice", Some("wrong"))
+            .await
+            .unwrap();
+
+        assert_eq!(m.logins_with("ok"), ok0 + 1);
+        assert_eq!(m.logins_with("invalid_password"), pw0 + 1);
     }
 }

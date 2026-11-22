@@ -68,6 +68,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub http_bind_ip: Option<IpAddr>,
 
+    /// Where to serve Prometheus metrics (`GET /metrics`), e.g. "[::]:9091".
+    /// Off when unset. Aggregate counts only; see `metrics.rs`.
+    #[serde(default)]
+    pub metrics_address: Option<SocketAddr>,
+
     /// Maximum new handshake attempts permitted per source IP per minute.
     #[serde(default = "default_handshake_per_minute")]
     pub handshake_per_minute: u32,
@@ -127,6 +132,7 @@ impl Default for Config {
                 acme_directory_url: None,
                 acme_bind_port: Some(443),
                 http_bind_ip: None,
+                metrics_address: None,
                 handshake_per_minute: default_handshake_per_minute(),
                 handshake_burst: default_handshake_burst(),
             },
@@ -189,6 +195,11 @@ impl Config {
                 ip.parse()
                     .with_context(|| format!("AURA_HTTP_BIND_IP is not an IP address: {ip:?}"))?,
             );
+        }
+        if let Ok(addr) = std::env::var("AURA_METRICS_ADDR") {
+            config.server.metrics_address = Some(addr.parse().with_context(|| {
+                format!("AURA_METRICS_ADDR is not an address like [::]:9091: {addr:?}")
+            })?);
         }
         if let Ok(v) = std::env::var("AURA_HANDSHAKE_PER_MINUTE") {
             if let Ok(n) = v.parse() {
