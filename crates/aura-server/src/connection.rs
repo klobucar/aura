@@ -12,7 +12,7 @@ use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_acme::{caches::DirCache, AcmeConfig, UseChallenge};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +61,11 @@ pub struct QuicServer {
 impl QuicServer {
     /// Create a new QUIC server based on the provided configuration.
     pub fn new(bind_addr: SocketAddr, state: Arc<ServerState>) -> Result<Self> {
+        // The TCP listener (ACME HTTP-01 + health check) shares the QUIC IP
+        // unless configured otherwise; Fly.io binds QUIC to
+        // fly-global-services, which TCP must not use.
+        let tcp_ip = state.config.server.http_bind_ip.unwrap_or(bind_addr.ip());
+
         // TLS source priority: explicit cert/key files > ACME (Let's Encrypt) > self-signed.
         let server_config = if let (Some(cert_path), Some(key_path)) = (
             &state.config.server.cert_path,
@@ -68,7 +73,7 @@ impl QuicServer {
         ) {
             info!("Loading custom TLS certificates from {:?}...", cert_path);
             // Nothing else binds the health-check port in this mode.
-            Self::start_health_check_listener(&state);
+            Self::start_health_check_listener(&state, tcp_ip);
             Self::configure_manual_tls(cert_path, key_path)?
         } else if let Some(domain) = state.config.server.acme_domain.clone() {
             info!("Configuring ACME (Let's Encrypt) for domain {}...", domain);
@@ -76,10 +81,10 @@ impl QuicServer {
             // serves the HTTP-01 challenge route AND a "/" health check, so we
             // must NOT also call start_health_check_listener — both would bind
             // acme_bind_port and the second bind would fail.
-            Self::configure_acme(&domain, &state)?
+            Self::configure_acme(&domain, tcp_ip, &state)?
         } else {
             info!("No TLS cert or ACME domain configured. Generating self-signed fallback...");
-            Self::start_health_check_listener(&state);
+            Self::start_health_check_listener(&state, tcp_ip);
             Self::generate_self_signed_config()?
         };
 
@@ -107,7 +112,11 @@ impl QuicServer {
     }
 
     /// Configure ACME (Let's Encrypt) for automated certificate management.
-    fn configure_acme(domain: &str, state: &Arc<ServerState>) -> Result<ServerConfig> {
+    fn configure_acme(
+        domain: &str,
+        tcp_ip: IpAddr,
+        state: &Arc<ServerState>,
+    ) -> Result<ServerConfig> {
         let contact = state
             .config
             .server
@@ -150,12 +159,8 @@ impl QuicServer {
         // This handles token lookup and key authorization computation internally.
         let challenge_service = acme_state.http01_challenge_tower_service();
 
-        let bind_addr_str = &state.config.server.bind_address;
-        let bind_addr: SocketAddr = bind_addr_str
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
         let acme_port = state.config.server.acme_bind_port.unwrap_or(8080);
-        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), acme_port);
+        let tcp_bind_addr = SocketAddr::new(tcp_ip, acme_port);
 
         // Drive the ACME event loop in a background task
         tokio::spawn(async move {
@@ -213,13 +218,9 @@ impl QuicServer {
     }
 
     /// Minimal TCP listener for Fly.io health checks when ACME is disabled.
-    fn start_health_check_listener(state: &Arc<ServerState>) {
-        let bind_addr_str = &state.config.server.bind_address;
-        let bind_addr: SocketAddr = bind_addr_str
-            .parse()
-            .unwrap_or_else(|_| "0.0.0.0:8443".parse().unwrap());
+    fn start_health_check_listener(state: &Arc<ServerState>, tcp_ip: IpAddr) {
         let acme_port = state.config.server.acme_bind_port.unwrap_or(443);
-        let tcp_bind_addr = SocketAddr::new(bind_addr.ip(), acme_port);
+        let tcp_bind_addr = SocketAddr::new(tcp_ip, acme_port);
 
         tokio::spawn(async move {
             info!(

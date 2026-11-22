@@ -148,8 +148,8 @@ async fn main() -> Result<()> {
     let user_count = db.user_count()?;
     info!("Database contains {} registered users", user_count);
 
-    // Parse bind address
-    let bind_addr: std::net::SocketAddr = config.server.bind_address.parse()?;
+    // Resolve bind address (may be a hostname, e.g. fly-global-services:8443)
+    let bind_addr = config.resolve_bind_address().await?;
 
     // Create and run QUIC server
     let quic_server = QuicServer::new(bind_addr, Arc::clone(&state))?;
