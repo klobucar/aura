@@ -1451,7 +1451,7 @@ mod tests {
             .await
             .unwrap();
         assert!(r.success, "{}", r.error_message);
-        assert!(r.user_uuid.starts_with("U_"), "{}", r.user_uuid);
+        assert!(r.user_uuid.starts_with("U_"));
         assert!(!r.session_token.is_empty());
         assert!(r.error_message.is_empty());
     }
