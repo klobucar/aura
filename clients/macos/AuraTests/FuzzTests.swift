@@ -89,6 +89,7 @@ final class FuzzTests: XCTestCase {
             let loaded = UserIdentity.loadFromKeychain(id: identity.id!, requiresBiometric: false)
             XCTAssertNotNil(loaded)
             XCTAssertEqual(loaded?.publicKeyHex, identity.publicKeyHex)
+            XCTAssertEqual(loaded?.identityKey, identity.identityKey)
         }
         
         // Cleanup
@@ -97,20 +98,35 @@ final class FuzzTests: XCTestCase {
         }
     }
     
-    // MARK: - Signature Fuzzing
+    // MARK: - Login Request Fuzzing
     
-    func testSigningWithRandomData() {
+    func testAuthRequestWithRandomInputs() throws {
         let identity = UserIdentity()
         identity.generateKeypair()
         
-        for _ in 0..<100 {
-            let randomDataLength = Int.random(in: 0...10000)
-            let testData = randomData(length: randomDataLength)
+        for _ in 0..<20 {
+            identity.displayName = randomString(length: Int.random(in: 0...300))
+            let password = Bool.random() ? randomString(length: Int.random(in: 1...300)) : nil
+            let challenge = randomData(length: 32)
             
-            // Should handle any data size
-            let signature = identity.sign(testData)
-            XCTAssertNotNil(signature)
-            XCTAssertEqual(signature?.count, 64)
+            // Any name, password and challenge yields a well-formed frame
+            let frame = try identity.authRequestFrame(challenge: challenge, serverPassword: password)
+            let fields = authRequestFields(frame)
+            XCTAssertEqual(fields?[1], identity.identityKey)
+            XCTAssertEqual(fields?[3]?.count, IdentitySizes.signature)
+            XCTAssertEqual(fields?[5], challenge)
+        }
+    }
+    
+    func testAuthRequestRejectsRandomChallengeLengths() {
+        let identity = UserIdentity()
+        identity.generateKeypair()
+        
+        for length in [0, 1, 16, 31, 33, 64, 1000] {
+            XCTAssertThrowsError(
+                try identity.authRequestFrame(challenge: randomData(length: length), serverPassword: nil),
+                "challenge of \(length) bytes"
+            )
         }
     }
     
@@ -214,6 +230,7 @@ final class FuzzTests: XCTestCase {
             "{\"displayName\":\"\(randomString(length: 50))\"}",
             "{\"publicKey\":\"\(randomString(length: 64))\"}",
             "{\"privateKey\":\"\(randomString(length: 64))\"}",
+            "{\"version\":2,\"id\":\"\(UUID().uuidString)\",\"displayName\":\"x\",\"identitySecret\":\"\(randomString(length: 88))\"}",
             "[\(Int.random(in: 0...1000))]",
             "\"\(randomString(length: 100))\"",
             "null",

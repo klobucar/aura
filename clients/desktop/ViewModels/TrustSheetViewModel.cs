@@ -14,7 +14,9 @@ namespace Aura.Desktop.ViewModels;
 public partial class TrustMemberViewModel : ObservableObject
 {
     public string Uuid { get; init; } = "";
-    public byte[] PublicKey { get; init; } = Array.Empty<byte>();
+
+    /// <summary>The member's 1,984-byte hybrid identity key, from the MLS group.</summary>
+    public byte[] IdentityKey { get; init; } = Array.Empty<byte>();
     public bool IsSelf { get; init; }
 
     [ObservableProperty] private string _name = "";
@@ -79,7 +81,7 @@ public partial class TrustSheetViewModel : ObservableObject
     [ObservableProperty] private bool _isOpen;
     [ObservableProperty] private string _channelName = "";
 
-    /// <summary>`MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch 14`.</summary>
+    /// <summary>`MLS · X25519+ML-KEM-768 · ChaCha20-Poly1305 · ML-DSA-44 · epoch 14`.</summary>
     [ObservableProperty] private string _securityLine = "";
 
     public ObservableCollection<TrustMemberViewModel> Members { get; } = new();
@@ -112,7 +114,7 @@ public partial class TrustSheetViewModel : ObservableObject
     public string KeyChangedTitle => $"{Selected?.Name ?? "This user"}'s identity key changed";
 
     public string KeyChangedBody =>
-        "Same display name, new Ed25519 key. Could be a reinstall — or a name "
+        "Same display name, new identity key. Could be a reinstall — or a name "
         + "takeover. Compare the words below out of band before you speak.";
 
     public bool CanAct => Selected is { IsSelf: false } && !IsDeriving && SafetyWords.Count > 0;
@@ -145,10 +147,10 @@ public partial class TrustSheetViewModel : ObservableObject
             return;
         }
 
-        SecurityLine = $"MLS · X25519+ML-KEM-768 · AES-256-GCM · Ed25519 · epoch {epoch}";
+        SecurityLine = $"MLS · X25519+ML-KEM-768 · ChaCha20-Poly1305 · ML-DSA-44 · epoch {epoch}";
 
         var self = members.FirstOrDefault(m => m.IsSelf);
-        _localKey = self?.SignatureKey ?? Array.Empty<byte>();
+        _localKey = self?.IdentityKey ?? Array.Empty<byte>();
         _localUuid = self?.Identity ?? "";
 
         Members.Clear();
@@ -156,16 +158,16 @@ public partial class TrustSheetViewModel : ObservableObject
         {
             // Record every key we see before judging it — that is what makes a
             // later disagreement detectable at all.
-            _trust.Observe(m.Identity, m.SignatureKey);
+            _trust.Observe(m.Identity, m.IdentityKey);
 
             Members.Add(new TrustMemberViewModel
             {
                 Uuid = m.Identity,
-                PublicKey = m.SignatureKey,
+                IdentityKey = m.IdentityKey,
                 IsSelf = m.IsSelf,
                 Name = DisplayName(m.Identity),
-                Trust = _trust.Evaluate(m.Identity, m.SignatureKey),
-                ShortFingerprint = ShortFingerprintOf(m.SignatureKey),
+                Trust = _trust.Evaluate(m.Identity, m.IdentityKey),
+                ShortFingerprint = ShortFingerprintOf(m.IdentityKey),
             });
         }
 
@@ -192,7 +194,7 @@ public partial class TrustSheetViewModel : ObservableObject
         IsDeriving = true;
         OnPropertyChanged(nameof(CanAct));
 
-        var remoteKey = member.PublicKey;
+        var remoteKey = member.IdentityKey;
         var remoteUuid = member.Uuid;
         var localKey = _localKey;
         var localUuid = _localUuid;
@@ -234,8 +236,8 @@ public partial class TrustSheetViewModel : ObservableObject
     {
         if (Selected is not { IsSelf: false } m) return;
 
-        _trust.MarkVerified(m.Uuid, m.PublicKey);
-        m.Trust = _trust.Evaluate(m.Uuid, m.PublicKey);
+        _trust.MarkVerified(m.Uuid, m.IdentityKey);
+        m.Trust = _trust.Evaluate(m.Uuid, m.IdentityKey);
         OnPropertyChanged(nameof(ShowKeyChangedBanner));
     }
 
@@ -245,8 +247,8 @@ public partial class TrustSheetViewModel : ObservableObject
     {
         if (Selected is not { IsSelf: false } m) return;
 
-        _trust.Block(m.PublicKey);
-        m.Trust = _trust.Evaluate(m.Uuid, m.PublicKey);
+        _trust.Block(m.IdentityKey);
+        m.Trust = _trust.Evaluate(m.Uuid, m.IdentityKey);
         OnPropertyChanged(nameof(ShowKeyChangedBanner));
     }
 

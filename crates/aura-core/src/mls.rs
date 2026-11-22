@@ -1,9 +1,18 @@
 //! MLS Encryption Client for DAVE Protocol
 //!
-//! Provides MLS group management for E2EE voice and text channels.
-//! Uses OpenMLS with Ed25519 signatures and hybrid post-quantum key exchange
-//! (X-Wing: X25519 + ML-KEM-768); see [`CIPHERSUITE`].
+//! Provides MLS group management for E2EE voice and text channels, using
+//! OpenMLS with post-quantum signatures (ML-DSA-44) and hybrid post-quantum
+//! key exchange (X-Wing: X25519 + ML-KEM-768); see [`CIPHERSUITE`].
+//!
+//! Each member signs MLS messages with an ML-DSA-44 key derived from their
+//! long-term identity ([`aura_identity::IdentitySecret`]), so it is the same
+//! across connections. Their MLS credential is an
+//! [`aura_identity::MemberCredential`]: the identity's hybrid Ed25519 +
+//! ML-DSA-65 signature over that MLS key. Every leaf that enters a group, by
+//! Welcome, Add or Commit, has its credential checked against its own
+//! signature key before we act on it.
 
+use aura_identity::{IdentitySecret, MemberCredential, MLS_SIGNATURE_SCHEME_MLDSA44};
 use openmls::prelude::tls_codec::{Deserialize, Serialize};
 use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -26,29 +35,55 @@ pub const EPOCH_KEY_RETENTION: usize = 4;
 
 /// Ciphersuite for all MLS operations.
 ///
-/// `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` (draft-ietf-mls-pq-ciphersuites):
+/// `MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44` (draft-ietf-mls-pq-ciphersuites):
 /// - **KEM:** MLKEM768-X25519, i.e. X-Wing (draft-connolly-cfrg-xwing-kem-06),
 ///   a hybrid of X25519 and ML-KEM-768. Group secrets stay confidential unless
 ///   *both* are broken, so recorded handshakes resist "harvest now, decrypt
 ///   later".
-/// - **AEAD:** AES-256-GCM (256-bit key).
+/// - **AEAD:** ChaCha20-Poly1305 (256-bit key).
 /// - **Hash/KDF:** SHA-384 / HKDF-SHA384.
-/// - **Signatures:** Ed25519 — still classical; see `docs/PQ_MIGRATION.md`.
+/// - **Signatures:** ML-DSA-44 (FIPS 204). MLS has no hybrid signature
+///   scheme; the classical half lives in each member's credential, which their
+///   hybrid Ed25519 + ML-DSA-65 identity signs. This is the only OpenMLS suite
+///   that pairs ML-DSA with the hybrid KEM.
 ///
-/// The "128" is the draft's security-category label for ML-KEM-768, not the
-/// AEAD key size. The code point (0x004E) is provisional until IANA assigns
-/// one; adopting the final value will be the same all-clients-at-once upgrade
-/// as this one.
+/// The "128" is the draft's security-category label, not the AEAD key size.
+/// The code point (0x0052) is provisional until IANA assigns one; adopting
+/// the final value is another all-clients-at-once upgrade, as is moving to a
+/// future suite with a stronger signature (only the MLS key changes; the
+/// identity does not).
 ///
 /// Every peer must use the same suite: a group only admits KeyPackages of its
 /// own suite, and [`MlsClient`] refuses anything else rather than downgrade.
-pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519;
+pub const CIPHERSUITE: Ciphersuite =
+    Ciphersuite::MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44;
 
 /// Leaf capabilities advertised in our KeyPackages and leaves: exactly
 /// [`CIPHERSUITE`], since that is the only suite we will join or admit.
 /// (OpenMLS's default list advertises classical suites we refuse.)
 fn leaf_capabilities() -> Capabilities {
     Capabilities::new(None, Some(&[CIPHERSUITE]), None, None, None)
+}
+
+/// Check that a leaf's `credential` is an Aura [`MemberCredential`] whose
+/// identity certified `signature_key`, the key the leaf signs with.
+///
+/// OpenMLS verifies that each leaf's signatures match its signature key, but
+/// not who that key belongs to; that is the application's job. Without this
+/// check, anyone could join with a credential naming someone else.
+fn verify_leaf_credential(
+    credential: &Credential,
+    signature_key: &[u8],
+) -> Result<MemberCredential, MlsError> {
+    if credential.credential_type() != CredentialType::Basic {
+        return Err(MlsError::InvalidCredential("not a basic credential".into()));
+    }
+    let member = MemberCredential::from_bytes(credential.serialized_content())
+        .map_err(|e| MlsError::InvalidCredential(e.to_string()))?;
+    member
+        .verify(MLS_SIGNATURE_SCHEME_MLDSA44, signature_key)
+        .map_err(|e| MlsError::InvalidCredential(format!("{e} (user {})", member.user_id())))?;
+    Ok(member)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +98,10 @@ pub enum MlsError {
         expected: Ciphersuite,
         actual: Ciphersuite,
     },
+    /// A leaf's credential is not a valid Aura member credential for that
+    /// leaf's signature key: malformed, or its identity did not certify the key.
+    #[error("Invalid member credential: {0}")]
+    InvalidCredential(String),
     #[error("Group not found: {0}")]
     GroupNotFound(String),
     #[error("No credential available")]
@@ -76,10 +115,12 @@ pub enum MlsError {
 /// One member of an MLS group, as the ratchet tree sees them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupMember {
-    /// The credential identity — a user UUID in Aura.
+    /// The member's user id (a UUID), from their verified credential.
     pub identity: String,
-    /// Ed25519 signature public key, 32 bytes.
-    pub signature_key: Vec<u8>,
+    /// The member's long-term identity public key (hybrid Ed25519 +
+    /// ML-DSA-65, 1,984 bytes), verified to have certified the MLS key they
+    /// sign with. Stable across connections: trust decisions key on this.
+    pub identity_key: Vec<u8>,
     /// True for the local user's own leaf, so callers can skip verifying
     /// themselves against themselves.
     pub is_self: bool,
@@ -109,22 +150,37 @@ pub struct MlsClient {
 }
 
 impl MlsClient {
-    /// Create a new MLS client with a fresh Ed25519 identity
-    pub fn new(identity_name: &str) -> Result<Self, MlsError> {
+    /// Create an MLS client for `user_id` (the user's UUID).
+    ///
+    /// It signs with the ML-DSA-44 key derived from `identity`, the same key
+    /// on every connection, and presents a credential in which `identity`
+    /// certifies that key.
+    pub fn new(user_id: &str, identity: &IdentitySecret) -> Result<Self, MlsError> {
         let provider = OpenMlsRustCrypto::default();
 
-        // Generate signature keypair using the basic credential crate
-        let signer =
-            openmls_basic_credential::SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
-                .map_err(|e| MlsError::OpenMls(format!("KeyGen error: {:?}", e)))?;
+        let scheme = CIPHERSUITE.signature_algorithm();
+        debug_assert_eq!(scheme as u16, MLS_SIGNATURE_SCHEME_MLDSA44);
+        let mls_key = identity.mls_signing_key(0);
+        // OpenMLS's basic credential signs ML-DSA from the FIPS 204 seed.
+        let signer = openmls_basic_credential::SignatureKeyPair::from_raw(
+            scheme,
+            mls_key.seed.to_vec(),
+            mls_key.public_key.clone(),
+        );
 
         // Store the keypair in the provider's key store
         signer
             .store(provider.storage())
             .map_err(|e| MlsError::OpenMls(format!("KeyStore error: {:?}", e)))?;
 
-        // Create basic credential with identity
-        let credential = BasicCredential::new(identity_name.as_bytes().to_vec());
+        let member = MemberCredential::issue(
+            identity,
+            user_id,
+            MLS_SIGNATURE_SCHEME_MLDSA44,
+            &mls_key.public_key,
+        )
+        .map_err(|e| MlsError::InvalidCredential(e.to_string()))?;
+        let credential = BasicCredential::new(member.to_bytes());
         let credential_with_key = CredentialWithKey {
             credential: credential.into(),
             signature_key: signer.public().into(),
@@ -372,9 +428,9 @@ impl MlsClient {
     /// server-supplied user list the server could lie about. `UserInfo` on the
     /// wire deliberately carries no key material for exactly this reason.
     ///
-    /// The identity is whatever was passed to [`MlsClient::new`] — the user's
-    /// UUID — and pairs with the signature key as input to
-    /// [`crate::verification::pairwise_fingerprint`].
+    /// Each member's user id and identity key come from their credential,
+    /// re-verified here against their leaf's signature key, and pair up as
+    /// input to [`crate::verification::pairwise_fingerprint`].
     pub fn group_members(&self, group_id: &[u8]) -> Result<Vec<GroupMember>, MlsError> {
         let group = self
             .groups
@@ -383,14 +439,17 @@ impl MlsClient {
 
         let own_index = group.own_leaf_index();
 
-        Ok(group
+        group
             .members()
-            .map(|m| GroupMember {
-                identity: String::from_utf8_lossy(m.credential.serialized_content()).into_owned(),
-                signature_key: m.signature_key,
-                is_self: m.index == own_index,
+            .map(|m| {
+                let member = verify_leaf_credential(&m.credential, &m.signature_key)?;
+                Ok(GroupMember {
+                    identity: member.user_id().to_owned(),
+                    identity_key: member.identity().as_bytes().to_vec(),
+                    is_self: m.index == own_index,
+                })
             })
-            .collect())
+            .collect()
     }
 
     // ============================================================================
@@ -436,6 +495,13 @@ impl MlsClient {
                 expected: CIPHERSUITE,
                 actual: suite,
             });
+        }
+
+        // Every existing member must carry a valid credential for the key they
+        // sign with; otherwise the group could contain an impostor we'd then
+        // show as a named, verifiable member.
+        for member in staged.members() {
+            verify_leaf_credential(&member.credential, &member.signature_key)?;
         }
 
         let group = staged.into_group(&self.provider).map_err(|e| {
@@ -487,6 +553,10 @@ impl MlsClient {
                 actual: key_package.ciphersuite(),
             });
         }
+
+        // The joiner's identity must have certified the key they'll sign with.
+        let leaf = key_package.leaf_node();
+        verify_leaf_credential(leaf.credential(), leaf.signature_key().as_slice())?;
 
         // Add the member and get (commit, welcome, group_info)
         let (commit_out, welcome, _group_info) = group
@@ -543,6 +613,20 @@ impl MlsClient {
         // Handle the processed message content
         match processed.into_content() {
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+                // Check every leaf this commit introduces or replaces (the
+                // committer's update-path leaf, added members, updated leaves)
+                // before merging, so a rejected commit leaves the group as it was.
+                if let Some(leaf) = staged_commit.update_path_leaf_node() {
+                    verify_leaf_credential(leaf.credential(), leaf.signature_key().as_slice())?;
+                }
+                for queued in staged_commit.queued_proposals() {
+                    let leaf = match queued.proposal() {
+                        Proposal::Add(add) => add.key_package().leaf_node(),
+                        Proposal::Update(update) => update.leaf_node(),
+                        _ => continue,
+                    };
+                    verify_leaf_credential(leaf.credential(), leaf.signature_key().as_slice())?;
+                }
                 group
                     .merge_staged_commit(&self.provider, *staged_commit)
                     .map_err(|e| {
@@ -673,16 +757,21 @@ impl MlsClient {
 mod tests {
     use super::*;
 
+    /// A client with a fresh identity; most tests only need distinct members.
+    fn new_client(user_id: &str) -> Result<MlsClient, MlsError> {
+        MlsClient::new(user_id, &IdentitySecret::generate())
+    }
+
     #[test]
     fn test_client_creation() {
-        let client = MlsClient::new("alice").expect("Failed to create client");
+        let client = new_client("alice").expect("Failed to create client");
         assert!(client.groups.is_empty());
         assert!(client.identity.is_some());
     }
 
     #[test]
     fn test_key_package_generation() {
-        let client = MlsClient::new("alice").expect("Failed to create client");
+        let client = new_client("alice").expect("Failed to create client");
         let kp_bundle = client
             .generate_key_package()
             .expect("Failed to generate KeyPackage");
@@ -692,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_group_creation() {
-        let mut client = MlsClient::new("alice").expect("Failed to create client");
+        let mut client = new_client("alice").expect("Failed to create client");
         let group_id = b"test-voice-channel-1";
 
         client
@@ -706,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_dave_key_export() {
-        let mut client = MlsClient::new("alice").expect("Failed to create client");
+        let mut client = new_client("alice").expect("Failed to create client");
         let group_id = b"test-voice-channel-1";
 
         client
@@ -723,14 +812,14 @@ mod tests {
     #[test]
     fn test_add_member_and_welcome() {
         // Alice creates a group
-        let mut alice = MlsClient::new("alice").expect("Failed to create alice");
+        let mut alice = new_client("alice").expect("Failed to create alice");
         let group_id = b"test-voice-channel-2";
         alice
             .create_group(group_id)
             .expect("Failed to create group");
 
         // Bob generates a KeyPackage
-        let bob = MlsClient::new("bob").expect("Failed to create bob");
+        let bob = new_client("bob").expect("Failed to create bob");
         let bob_kp_bytes = bob
             .get_key_package_bytes()
             .expect("Failed to get bob's KeyPackage");
@@ -750,14 +839,14 @@ mod tests {
     #[test]
     fn test_process_welcome() {
         // Alice creates a group
-        let mut alice = MlsClient::new("alice").expect("Failed to create alice");
+        let mut alice = new_client("alice").expect("Failed to create alice");
         let group_id = b"test-voice-channel-3";
         alice
             .create_group(group_id)
             .expect("Failed to create group");
 
         // Bob generates a KeyPackage
-        let mut bob = MlsClient::new("bob").expect("Failed to create bob");
+        let mut bob = new_client("bob").expect("Failed to create bob");
         let bob_kp_bytes = bob
             .get_key_package_bytes()
             .expect("Failed to get bob's KeyPackage");
@@ -785,14 +874,14 @@ mod tests {
     #[test]
     fn test_dave_keys_match_after_join() {
         // Alice creates a group
-        let mut alice = MlsClient::new("alice").expect("Failed to create alice");
+        let mut alice = new_client("alice").expect("Failed to create alice");
         let group_id = b"test-voice-channel-4";
         alice
             .create_group(group_id)
             .expect("Failed to create group");
 
         // Bob generates a KeyPackage and joins
-        let mut bob = MlsClient::new("bob").expect("Failed to create bob");
+        let mut bob = new_client("bob").expect("Failed to create bob");
         let bob_kp_bytes = bob
             .get_key_package_bytes()
             .expect("Failed to get bob's KeyPackage");
@@ -818,7 +907,7 @@ mod tests {
     /// moves to N+1 — otherwise chat silently breaks whenever anyone joins.
     #[test]
     fn test_sender_key_survives_epoch_advance() {
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-epoch";
         alice.create_group(group_id).expect("create group");
 
@@ -831,7 +920,7 @@ mod tests {
         assert_eq!(epoch, 0);
 
         // Charlie joins, advancing the epoch.
-        let charlie = MlsClient::new("charlie").expect("charlie");
+        let charlie = new_client("charlie").expect("charlie");
         let charlie_kp = charlie.get_key_package_bytes().expect("charlie KP");
         alice
             .add_member(group_id, &charlie_kp)
@@ -856,11 +945,11 @@ mod tests {
     /// after the epoch has moved on for both of them.
     #[test]
     fn test_retained_keys_agree_across_peers() {
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-agree";
         alice.create_group(group_id).expect("create group");
 
-        let mut bob = MlsClient::new("bob").expect("bob");
+        let mut bob = new_client("bob").expect("bob");
         let bob_kp = bob.get_key_package_bytes().expect("bob KP");
         let (_commit, welcome) = alice.add_member(group_id, &bob_kp).expect("add bob");
         bob.process_welcome(&welcome).expect("bob joins");
@@ -875,7 +964,7 @@ mod tests {
         assert_eq!(alice_key, bob_key);
 
         // Charlie joins: epoch 2 for both.
-        let charlie = MlsClient::new("charlie").expect("charlie");
+        let charlie = new_client("charlie").expect("charlie");
         let charlie_kp = charlie.get_key_package_bytes().expect("charlie KP");
         let (commit, _welcome) = alice
             .add_member(group_id, &charlie_kp)
@@ -899,7 +988,7 @@ mod tests {
     /// epoch change that happens before anyone has derived their key.
     #[test]
     fn test_register_sender_warms_key_before_epoch_change() {
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-warm";
         alice.create_group(group_id).expect("create group");
 
@@ -908,7 +997,7 @@ mod tests {
             .register_sender(group_id, newcomer)
             .expect("register newcomer");
 
-        let charlie = MlsClient::new("charlie").expect("charlie");
+        let charlie = new_client("charlie").expect("charlie");
         let charlie_kp = charlie.get_key_package_bytes().expect("charlie KP");
         alice
             .add_member(group_id, &charlie_kp)
@@ -923,7 +1012,7 @@ mod tests {
     /// `EpochUnavailable` rather than handing back a wrong key.
     #[test]
     fn test_stale_epoch_is_rejected() {
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-stale";
         alice.create_group(group_id).expect("create group");
 
@@ -932,7 +1021,7 @@ mod tests {
 
         // Advance well past the retention window.
         for _ in 0..EPOCH_KEY_RETENTION + 2 {
-            let peer = MlsClient::new("peer").expect("peer");
+            let peer = new_client("peer").expect("peer");
             let kp = peer.get_key_package_bytes().expect("peer KP");
             alice.add_member(group_id, &kp).expect("add peer");
         }
@@ -947,11 +1036,11 @@ mod tests {
     /// while the pre-ratchet epoch's keys stay decryptable.
     #[test]
     fn test_self_update_ratchets_epoch() {
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-ratchet";
         alice.create_group(group_id).expect("create group");
 
-        let mut bob = MlsClient::new("bob").expect("bob");
+        let mut bob = new_client("bob").expect("bob");
         let bob_kp = bob.get_key_package_bytes().expect("bob KP");
         let (_commit, welcome) = alice.add_member(group_id, &bob_kp).expect("add bob");
         bob.process_welcome(&welcome).expect("bob joins");
@@ -997,11 +1086,11 @@ mod tests {
     #[test]
     fn test_leaving_clears_retained_keys() {
         // Alice hosts; Bob joins and derives a key, then leaves.
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         let group_id = b"test-text-channel-leave";
         alice.create_group(group_id).expect("create group");
 
-        let mut bob = MlsClient::new("bob").expect("bob");
+        let mut bob = new_client("bob").expect("bob");
         let bob_kp = bob.get_key_package_bytes().expect("bob KP");
         let (_commit, welcome) = alice.add_member(group_id, &bob_kp).expect("add bob");
         bob.process_welcome(&welcome).expect("bob joins");
@@ -1021,20 +1110,20 @@ mod tests {
     #[test]
     fn test_three_party_group() {
         // Alice creates a group
-        let mut alice = MlsClient::new("alice").expect("Failed to create alice");
+        let mut alice = new_client("alice").expect("Failed to create alice");
         let group_id = b"test-voice-channel-5";
         alice
             .create_group(group_id)
             .expect("Failed to create group");
 
         // Add Bob
-        let mut bob = MlsClient::new("bob").expect("Failed to create bob");
+        let mut bob = new_client("bob").expect("Failed to create bob");
         let bob_kp = bob.get_key_package_bytes().expect("Bob KP");
         let (_commit1, welcome1) = alice.add_member(group_id, &bob_kp).expect("Add bob");
         bob.process_welcome(&welcome1).expect("Bob joins");
 
         // Add Charlie
-        let mut charlie = MlsClient::new("charlie").expect("Failed to create charlie");
+        let mut charlie = new_client("charlie").expect("Failed to create charlie");
         let charlie_kp = charlie.get_key_package_bytes().expect("Charlie KP");
         let (commit2, welcome2) = alice
             .add_member(group_id, &charlie_kp)
@@ -1067,17 +1156,26 @@ mod tests {
     /// X-Wing public key: ML-KEM-768 encapsulation key (1184) + X25519 (32).
     const XWING_PUBLIC_KEY_LEN: usize = 1216;
 
-    /// The KEM must be the X25519+ML-KEM-768 hybrid, and the AEAD must be
-    /// 256-bit so the MLS layer matches the data plane's PQ margin.
+    /// The KEM must be the X25519+ML-KEM-768 hybrid, the AEAD 256-bit so the
+    /// MLS layer matches the data plane's PQ margin, and signatures ML-DSA-44
+    /// (the scheme member credentials certify).
     #[test]
     fn test_ciphersuite_is_hybrid_post_quantum() {
         assert_eq!(
             CIPHERSUITE.hpke_kem_algorithm(),
             HpkeKemType::XWingKemDraft6
         );
-        assert_eq!(CIPHERSUITE.aead_algorithm(), AeadType::Aes256Gcm);
-        assert_eq!(CIPHERSUITE.hpke_aead_algorithm(), HpkeAeadType::AesGcm256);
+        assert_eq!(CIPHERSUITE.aead_algorithm(), AeadType::ChaCha20Poly1305);
+        assert_eq!(
+            CIPHERSUITE.hpke_aead_algorithm(),
+            HpkeAeadType::ChaCha20Poly1305
+        );
         assert_eq!(CIPHERSUITE.hash_algorithm(), HashType::Sha2_384);
+        assert_eq!(CIPHERSUITE.signature_algorithm(), SignatureScheme::MLDSA44);
+        assert_eq!(
+            CIPHERSUITE.signature_algorithm() as u16,
+            MLS_SIGNATURE_SCHEME_MLDSA44
+        );
 
         let provider = OpenMlsRustCrypto::default();
         assert!(provider.crypto().supports(CIPHERSUITE).is_ok());
@@ -1091,7 +1189,7 @@ mod tests {
     /// with the X-Wing suite. An X25519 key is 32 bytes; X-Wing is 1216.
     #[test]
     fn test_key_package_carries_xwing_keys() {
-        let client = MlsClient::new("alice").expect("client");
+        let client = new_client("alice").expect("client");
         let bundle = client.generate_key_package().expect("KP");
         let kp = bundle.key_package();
 
@@ -1125,16 +1223,16 @@ mod tests {
         let group_id = b"test-pq-lifecycle";
         let sender = 21u32;
 
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         alice.create_group(group_id).expect("create");
 
-        let mut bob = MlsClient::new("bob").expect("bob");
+        let mut bob = new_client("bob").expect("bob");
         let (_c, welcome) = alice
             .add_member(group_id, &bob.get_key_package_bytes().unwrap())
             .expect("add bob");
         bob.process_welcome(&welcome).expect("bob joins");
 
-        let mut charlie = MlsClient::new("charlie").expect("charlie");
+        let mut charlie = new_client("charlie").expect("charlie");
         let (commit, welcome) = alice
             .add_member(group_id, &charlie.get_key_package_bytes().unwrap())
             .expect("add charlie");
@@ -1183,7 +1281,7 @@ mod tests {
     #[test]
     fn test_rejects_legacy_key_package() {
         let group_id = b"test-pq-reject-legacy-kp";
-        let mut alice = MlsClient::new("alice").expect("alice");
+        let mut alice = new_client("alice").expect("alice");
         alice.create_group(group_id).expect("create");
 
         // Built exactly as the pre-X-Wing client did.
@@ -1228,15 +1326,23 @@ mod tests {
         const CLASSICAL: Ciphersuite = LEGACY_CIPHERSUITE;
         let group_id = b"test-pq-reject-classical-welcome";
 
-        let mut bob = MlsClient::new("bob").expect("bob");
-        let bob_identity = bob.identity.as_ref().unwrap();
-        // Stores the private keys in Bob's provider, as a real KP would.
+        let mut bob = new_client("bob").expect("bob");
+        // The classical suite signs with Ed25519, so this KeyPackage needs a
+        // classical signer; built with Bob's provider so its private keys are
+        // there when the Welcome arrives, as a real KP's would be.
+        let bob_classical_signer =
+            openmls_basic_credential::SignatureKeyPair::new(CLASSICAL.signature_algorithm())
+                .unwrap();
+        bob_classical_signer.store(bob.provider.storage()).unwrap();
         let bob_classical_kp = KeyPackage::builder()
             .build(
                 CLASSICAL,
                 &bob.provider,
-                &bob_identity.signer,
-                bob_identity.credential_with_key.clone(),
+                &bob_classical_signer,
+                CredentialWithKey {
+                    credential: BasicCredential::new(b"bob".to_vec()).into(),
+                    signature_key: bob_classical_signer.public().into(),
+                },
             )
             .unwrap()
             .key_package()
@@ -1282,5 +1388,200 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Persistent, certified MLS keys
+    // ------------------------------------------------------------------
+
+    /// A signer for `identity`'s derived MLS key, stored in `provider`.
+    fn raw_signer(
+        identity: &IdentitySecret,
+        provider: &OpenMlsRustCrypto,
+    ) -> openmls_basic_credential::SignatureKeyPair {
+        let k = identity.mls_signing_key(0);
+        let signer = openmls_basic_credential::SignatureKeyPair::from_raw(
+            CIPHERSUITE.signature_algorithm(),
+            k.seed.to_vec(),
+            k.public_key.clone(),
+        );
+        signer.store(provider.storage()).unwrap();
+        signer
+    }
+
+    /// `claimed`'s genuine credential (its identity certifying its own MLS
+    /// key), attached to a leaf that `signer` signs. That is someone
+    /// presenting another user's certificate as their own.
+    fn forged_credential(
+        claimed: &IdentitySecret,
+        signer: &openmls_basic_credential::SignatureKeyPair,
+    ) -> CredentialWithKey {
+        let claimed_key = claimed.mls_signing_key(0);
+        let cred = MemberCredential::issue(
+            claimed,
+            "U_victim",
+            MLS_SIGNATURE_SCHEME_MLDSA44,
+            &claimed_key.public_key,
+        )
+        .unwrap();
+        CredentialWithKey {
+            credential: BasicCredential::new(cred.to_bytes()).into(),
+            signature_key: signer.public().into(),
+        }
+    }
+
+    fn forged_key_package(provider: &OpenMlsRustCrypto) -> KeyPackage {
+        let signer = raw_signer(&IdentitySecret::generate(), provider);
+        KeyPackage::builder()
+            .leaf_node_capabilities(leaf_capabilities())
+            .build(
+                CIPHERSUITE,
+                provider,
+                &signer,
+                forged_credential(&IdentitySecret::generate(), &signer),
+            )
+            .unwrap()
+            .key_package()
+            .clone()
+    }
+
+    fn group_config() -> MlsGroupCreateConfig {
+        MlsGroupCreateConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .ciphersuite(CIPHERSUITE)
+            .capabilities(leaf_capabilities())
+            .build()
+    }
+
+    /// The MLS key comes from the identity, so a member reconnecting with a
+    /// new client presents the same key: trust pinned on it survives.
+    #[test]
+    fn test_mls_key_is_the_same_on_every_client_for_one_identity() {
+        let id = IdentitySecret::generate();
+        let a = MlsClient::new("U_a", &id).unwrap();
+        let b = MlsClient::new("U_a", &id).unwrap();
+        let ka = a.generate_key_package().unwrap();
+        let kb = b.generate_key_package().unwrap();
+        let key_a = ka.key_package().leaf_node().signature_key();
+        assert_eq!(key_a, kb.key_package().leaf_node().signature_key());
+        assert_eq!(key_a.as_slice().len(), 1312, "ML-DSA-44 public key");
+        assert_eq!(key_a.as_slice(), id.mls_signing_key(0).public_key);
+    }
+
+    #[test]
+    fn test_group_members_report_verified_identity_keys() {
+        let alice_id = IdentitySecret::generate();
+        let bob_id = IdentitySecret::generate();
+        let mut alice = MlsClient::new("U_alice", &alice_id).unwrap();
+        let mut bob = MlsClient::new("U_bob", &bob_id).unwrap();
+        let gid = b"test-members-identity";
+        alice.create_group(gid).unwrap();
+        let kp = bob.get_key_package_bytes().unwrap();
+        let (_commit, welcome) = alice.add_member(gid, &kp).unwrap();
+        bob.process_welcome(&welcome).unwrap();
+
+        let members = bob.group_members(gid).unwrap();
+        assert_eq!(members.len(), 2);
+        let a = members.iter().find(|m| m.identity == "U_alice").unwrap();
+        let b = members.iter().find(|m| m.identity == "U_bob").unwrap();
+        assert_eq!(a.identity_key, alice_id.public_key().as_bytes());
+        assert_eq!(b.identity_key, bob_id.public_key().as_bytes());
+        assert!(b.is_self && !a.is_self);
+    }
+
+    #[test]
+    fn test_add_member_rejects_forged_credential() {
+        let mut alice = new_client("U_alice").unwrap();
+        let gid = b"test-forged-key-package";
+        alice.create_group(gid).unwrap();
+        let epoch = alice.epoch(gid).unwrap();
+
+        let kp = forged_key_package(&OpenMlsRustCrypto::default())
+            .tls_serialize_detached()
+            .unwrap();
+        assert!(matches!(
+            alice.add_member(gid, &kp),
+            Err(MlsError::InvalidCredential(_))
+        ));
+        assert_eq!(alice.epoch(gid).unwrap(), epoch);
+    }
+
+    /// A Welcome into a group whose founder signs with one key but carries
+    /// another user's credential is refused, and nothing is stored.
+    #[test]
+    fn test_welcome_rejects_group_with_forged_member() {
+        let gid = b"test-forged-welcome";
+        let mut bob = new_client("U_bob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap().key_package().clone();
+
+        let provider = OpenMlsRustCrypto::default();
+        let signer = raw_signer(&IdentitySecret::generate(), &provider);
+        let mut group = MlsGroup::new_with_group_id(
+            &provider,
+            &signer,
+            &group_config(),
+            GroupId::from_slice(gid),
+            forged_credential(&IdentitySecret::generate(), &signer),
+        )
+        .unwrap();
+        let (_commit, welcome, _) = group.add_members(&provider, &signer, &[bob_kp]).unwrap();
+        group.merge_pending_commit(&provider).unwrap();
+
+        let welcome = welcome.tls_serialize_detached().unwrap();
+        assert!(matches!(
+            bob.process_welcome(&welcome),
+            Err(MlsError::InvalidCredential(_))
+        ));
+        assert!(!bob.is_member(gid));
+        assert!(
+            MlsGroup::load(bob.provider.storage(), &GroupId::from_slice(gid))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A legitimate founder's commit that adds a forged member is refused,
+    /// and the group stays at its epoch.
+    #[test]
+    fn test_commit_adding_forged_member_is_rejected() {
+        let gid = b"test-forged-commit";
+        let founder_id = IdentitySecret::generate();
+        let provider = OpenMlsRustCrypto::default();
+        let signer = raw_signer(&founder_id, &provider);
+        let founder_cred = MemberCredential::issue(
+            &founder_id,
+            "U_founder",
+            MLS_SIGNATURE_SCHEME_MLDSA44,
+            signer.public(),
+        )
+        .unwrap();
+        let mut group = MlsGroup::new_with_group_id(
+            &provider,
+            &signer,
+            &group_config(),
+            GroupId::from_slice(gid),
+            CredentialWithKey {
+                credential: BasicCredential::new(founder_cred.to_bytes()).into(),
+                signature_key: signer.public().into(),
+            },
+        )
+        .unwrap();
+
+        let mut bob = new_client("U_bob").unwrap();
+        let bob_kp = bob.generate_key_package().unwrap().key_package().clone();
+        let (_commit, welcome, _) = group.add_members(&provider, &signer, &[bob_kp]).unwrap();
+        group.merge_pending_commit(&provider).unwrap();
+        bob.process_welcome(&welcome.tls_serialize_detached().unwrap())
+            .unwrap();
+        let epoch = bob.epoch(gid).unwrap();
+
+        let forged = forged_key_package(&OpenMlsRustCrypto::default());
+        let (commit, _welcome, _) = group.add_members(&provider, &signer, &[forged]).unwrap();
+        let commit = commit.tls_serialize_detached().unwrap();
+        assert!(matches!(
+            bob.process_commit(gid, &commit),
+            Err(MlsError::InvalidCredential(_))
+        ));
+        assert_eq!(bob.epoch(gid).unwrap(), epoch);
     }
 }

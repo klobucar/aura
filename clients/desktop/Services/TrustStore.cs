@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Security.Cryptography;
 
 namespace Aura.Desktop.Services;
 
@@ -36,10 +36,11 @@ public enum TrustState
 /// Remembers which identity keys the user has verified, blocked, or seen before,
 /// and turns that history into a <see cref="TrustState"/> for any member.
 ///
-/// Everything is keyed by the Ed25519 public key, not by user id or display
-/// name. A user who rotates keys — or an impostor who takes over a name — starts
-/// from <see cref="TrustState.Tofu"/> rather than inheriting trust, and a block
-/// cannot be shaken off by reconnecting under a new session.
+/// Everything is keyed by the member's hybrid identity key (Ed25519 + ML-DSA-65,
+/// 1,984 bytes), not by user id or display name. A user who rotates keys — or an
+/// impostor who takes over a name — starts from <see cref="TrustState.Tofu"/>
+/// rather than inheriting trust, and a block cannot be shaken off by
+/// reconnecting under a new session.
 ///
 /// The keys themselves come from <c>MlsWrapper.GroupMembers</c>, i.e. the
 /// authenticated MLS ratchet tree. They are never taken from the server's user
@@ -63,9 +64,13 @@ public class TrustStore
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Lowercase hex, the form every dictionary here is keyed by.</summary>
-    public static string KeyId(IEnumerable<byte> publicKey) => Convert.ToHexString(
-        publicKey is byte[] arr ? arr : System.Linq.Enumerable.ToArray(publicKey)).ToLowerInvariant();
+    /// <summary>
+    /// The form every dictionary here is keyed by: SHA-256 of the identity key
+    /// as 64 lowercase hex characters. Hashing keeps 1,984-byte keys out of the
+    /// settings file while staying unique per key.
+    /// </summary>
+    public static string KeyId(ReadOnlySpan<byte> identityKey) =>
+        Convert.ToHexStringLower(SHA256.HashData(identityKey));
 
     /// <summary>
     /// Record that <paramref name="userUuid"/> is presenting <paramref name="publicKey"/>.

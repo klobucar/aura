@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Aura
 
 /// Trust bookkeeping behind the trust sheet. The rules come from the design
@@ -34,7 +35,8 @@ final class TrustStoreTests: XCTestCase {
     private let alice = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
     private let bob = "6ba7b811-9dad-11d1-80b4-00c04fd430c8"
 
-    private func key(_ fill: UInt8) -> Data { Data(repeating: fill, count: 32) }
+    /// An identity-key-sized (1,984-byte) stand-in key.
+    private func key(_ fill: UInt8) -> Data { Data(repeating: fill, count: 1_984) }
 
     private func newStore() -> (store: TrustStore, defaults: InMemoryDefaults, clock: FakeClock) {
         let defaults = InMemoryDefaults()
@@ -201,9 +203,19 @@ final class TrustStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.evaluate(userUuid: alice, publicKey: key), .verified)
     }
 
-    func testKeyIdIsLowercaseHex() {
-        XCTAssertEqual(TrustStore.keyId(key(0x11)), String(repeating: "1", count: 64))
-        XCTAssertEqual(TrustStore.keyId(key(0xAA)), String(repeating: "a", count: 64))
+    func testKeyIdIsSha256AsLowercaseHex() {
+        // 64 characters however long the key: a 1,984-byte identity key in
+        // hex would be 3,968.
+        let id = TrustStore.keyId(key(0x11))
+
+        XCTAssertEqual(id.count, 64)
+        XCTAssertTrue(id.allSatisfy { "0123456789abcdef".contains($0) })
+        XCTAssertEqual(id, SHA256.hash(data: key(0x11)).map { String(format: "%02x", $0) }.joined())
+    }
+
+    func testKeyIdSeparatesKeys() {
+        XCTAssertEqual(TrustStore.keyId(key(0x11)), TrustStore.keyId(key(0x11)))
+        XCTAssertNotEqual(TrustStore.keyId(key(0x11)), TrustStore.keyId(key(0x22)))
     }
 
     func testEmptyInputsAreIgnoredRatherThanStored() {

@@ -16,7 +16,8 @@ Aura implements **MLS (Messaging Layer Security)** per RFC 9420 for end-to-end e
 
 1. **MLS Client** (`aura-core/src/mls.rs`)
    - OpenMLS 0.9 with the RustCrypto provider
-   - Ciphersuite: `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` (hybrid post-quantum; see [PQ Migration](PQ_MIGRATION.md))
+   - Ciphersuite: `MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44` (hybrid post-quantum key exchange, ML-DSA-44 signatures; see [PQ Migration](PQ_MIGRATION.md))
+   - Each member signs with a persistent ML-DSA-44 key derived from their hybrid Ed25519 + ML-DSA-65 identity, and carries a credential in which that identity certifies the key. Credentials are checked against each leaf's key on every Welcome, Add and Commit (`MlsError::InvalidCredential`)
    - Manages group state, key packages, commits, and welcomes
    - Accepts only that ciphersuite: other-suite KeyPackages and Welcomes are rejected (`MlsError::CiphersuiteMismatch`)
 
@@ -182,7 +183,7 @@ impl SeenMessages {
 ### What the Server CANNOT Do
 
 ❌ **Decrypt audio or text** - No access to MLS group secrets  
-❌ **Impersonate users** - Ed25519 signatures required  
+❌ **Impersonate users** - hybrid Ed25519 + ML-DSA-65 identity signatures required  
 ❌ **Inject messages** - AEAD tags prevent forgery  
 ❌ **Replay messages** - Message ID deduplication  
 ❌ **Downgrade encryption** - Clients enforce MLS
@@ -216,14 +217,15 @@ impl SeenMessages {
 ### MLS Configuration
 
 ```rust
-// Ciphersuite (draft-ietf-mls-pq-ciphersuites, provisional code point 0x004E)
-MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519
+// Ciphersuite (draft-ietf-mls-pq-ciphersuites, provisional code point 0x0052)
+MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44
 
 // Key schedule
 - HPKE KEM: MLKEM768-X25519 (X-Wing): hybrid X25519 + ML-KEM-768
-- AEAD: AES-256-GCM
+- AEAD: ChaCha20-Poly1305
 - Hash/KDF: SHA-384
-- Signatures: Ed25519 (classical; hybrid ML-DSA-65 planned)
+- Signatures: ML-DSA-44, with each member's key certified by their hybrid
+  Ed25519 + ML-DSA-65 identity in their credential
 
 // Extensions
 - Ratchet tree extension in Welcomes
@@ -234,10 +236,10 @@ The hybrid KEM protects every group secret MLS distributes (Welcome group
 secrets, UpdatePath secrets) against harvest-now-decrypt-later. DAVE sender
 keys remain 32-byte MLS exporter outputs, so the data plane is unchanged.
 
-**Payload sizes.** X-Wing keys make MLS handshake messages ~9× larger than
-with X25519: a KeyPackage is ~2.6 KB, and a Welcome grows by ~1.45 KB per
-group member. The server accepts MLS Commit/Welcome uploads up to 1 MiB,
-enough for channels of about 390 members. See
+**Payload sizes.** Post-quantum keys, signatures and credentials make MLS
+handshake messages large: a KeyPackage is ~13.7 KB, and a Welcome grows by
+~10.2 KB per group member. The server accepts MLS Commit/Welcome uploads up to
+1 MiB, enough for channels of 86 members. See
 [PQ Migration](PQ_MIGRATION.md#payload-sizes-and-frame-caps) for measurements.
 
 ### DAVE Encryption
@@ -257,7 +259,7 @@ enough for channels of about 390 members. See
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| MLS Core (incl. PQ suite, downgrade guards) | 19 | ✅ All pass |
+| MLS Core (incl. PQ suite, downgrade guards, credential checks) | 24 | ✅ All pass |
 | DAVE Crypto (incl. known-answer vector) | 18 | ✅ All pass |
 | Text Crypto | 4 | ✅ All pass |
 | Replay Protection | 5 | ✅ All pass |
@@ -270,12 +272,13 @@ enough for channels of about 390 members. See
 ### Key Storage
 
 **Client-side:**
-- MLS identity stored in memory (ephemeral)
-- No persistent key storage yet
-- TODO: Keychain integration (macOS/Windows)
+- One 64-byte identity secret per user: Keychain on macOS (Secure Enclave-wrapped
+  for biometric profiles), `identity.json` on desktop
+- The MLS signing key is derived from it, so it is the same on every connection
+- MLS group state stays in memory
 
 **Server-side:**
-- Only stores public keys (Ed25519)
+- Only stores public identity keys (Ed25519, plus the hybrid key once pinned)
 - No MLS group secrets
 - SQLite for user/channel metadata
 
@@ -314,7 +317,7 @@ enough for channels of about 390 members. See
 ### Under Consideration
 
 - [x] **Post-quantum MLS key exchange** - Hybrid X25519 + ML-KEM-768 (X-Wing)
-- [ ] **Post-quantum signatures** - Hybrid Ed25519 + ML-DSA-65 ([plan](PQ_MIGRATION.md#phase-3-hybrid-signatures-design))
+- [x] **Post-quantum signatures** - Hybrid Ed25519 + ML-DSA-65 identities; ML-DSA-44 in MLS ([details](PQ_MIGRATION.md#phase-3-hybrid-signatures))
 - [ ] **Deniability** - Off-the-record messaging properties
 - [ ] **Metadata protection** - Onion routing for signaling
 - [ ] **Audit logging** - Cryptographic proofs of server behavior
@@ -330,5 +333,5 @@ enough for channels of about 390 members. See
 
 ---
 
-**Last Updated:** 2026-11-21  
+**Last Updated:** 2026-11-22  
 **Implementation Status:** Phase 4 Complete (MLS + Replay Protection)

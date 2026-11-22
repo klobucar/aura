@@ -98,7 +98,7 @@ struct ProfileListView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(profile.displayName)
                     .font(.system(size: 14, weight: .semibold))
-                Text("\\(profile.publicKeyHex.prefix(16))...")
+                Text("\(profile.publicKeyHex.prefix(16))...")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -131,7 +131,7 @@ struct ProfileListView: View {
     
     private func exportProfile(_ profile: UserProfileModel) {
         // Load identity from keychain
-        guard let identity = UserIdentity.loadFromKeychain(id: profile.id),
+        guard let identity = UserIdentity.loadFromKeychain(id: profile.id, requiresBiometric: profile.requiresBiometric),
               let data = identity.exportProfile() else {
             print("[ProfileListView] Failed to export profile")
             return
@@ -139,15 +139,15 @@ struct ProfileListView: View {
         
         // Show save panel
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\\(profile.displayName).aura"
+        panel.nameFieldStringValue = "\(profile.displayName).aura"
         panel.allowedContentTypes = [.json]
         
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 try data.write(to: url)
-                print("[ProfileListView] Exported profile to \\(url.path)")
+                print("[ProfileListView] Exported profile to \(url.path)")
             } catch {
-                print("[ProfileListView] Failed to write export: \\(error)")
+                print("[ProfileListView] Failed to write export: \(error)")
             }
         }
     }
@@ -163,8 +163,12 @@ struct ProfileListView: View {
                     return
                 }
                 
-                // Save to keychain
-                identity.saveToKeychain()
+                // Save to keychain. A version 1 bundle was upgraded on import,
+                // and an upgraded identity that is not stored is lost.
+                guard identity.saveToKeychain() else {
+                    print("[ProfileListView] Failed to save imported profile to keychain")
+                    return
+                }
                 
                 // Create profile model
                 let profile = UserProfileModel(
@@ -174,12 +178,12 @@ struct ProfileListView: View {
                 )
                 
                 profileManager.profiles.append(profile)
-                print("[ProfileListView] Imported profile: \\(profile.displayName)")
+                print("[ProfileListView] Imported profile: \(profile.displayName)")
             } catch {
-                print("[ProfileListView] Failed to import: \\(error)")
+                print("[ProfileListView] Failed to import: \(error)")
             }
         case .failure(let error):
-            print("[ProfileListView] Import error: \\(error)")
+            print("[ProfileListView] Import error: \(error)")
         }
     }
 }

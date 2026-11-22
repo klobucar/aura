@@ -10,18 +10,24 @@ import Testing
 @testable import Aura
 
 struct MlsProtocolTests {
+
+    /// An MLS client for a fresh hybrid identity, as the app makes one after
+    /// login: `userId` is the account's `U_…` id.
+    private func makeWrapper(_ userId: String) throws -> MlsWrapper {
+        try MlsWrapper(userId: userId, identitySecret: generateIdentitySecret())
+    }
     
     // MARK: - MLS Wrapper Tests
     
     @Test func testMlsWrapperCreation() async throws {
         // Test that MlsWrapper can be created with an identity
-        let wrapper = try MlsWrapper(identityName: "test-user-1")
+        let wrapper = try makeWrapper("U_test-user-1")
         #expect(wrapper != nil)
     }
     
     @Test func testKeyPackageGeneration() async throws {
         // Test key package generation
-        let wrapper = try MlsWrapper(identityName: "test-user-1")
+        let wrapper = try makeWrapper("U_test-user-1")
         let keyPackage = try wrapper.createKeyPackage()
         
         // Key package should be non-empty
@@ -31,7 +37,7 @@ struct MlsProtocolTests {
     
     @Test func testGroupCreation() async throws {
         // Test MLS group creation (first-joiner scenario)
-        let wrapper = try MlsWrapper(identityName: "founder-user")
+        let wrapper = try makeWrapper("U_founder-user")
         
         // Create voice and text groups for channel 1
         try wrapper.createGroup(channelId: "1", isVoice: true)
@@ -52,8 +58,8 @@ struct MlsProtocolTests {
     
     @Test func testTwoPartyMlsGroup() async throws {
         // Test complete two-party MLS scenario
-        let founder = try MlsWrapper(identityName: "alice")
-        let joiner = try MlsWrapper(identityName: "bob")
+        let founder = try makeWrapper("U_alice")
+        let joiner = try makeWrapper("U_bob")
         
         // 1. Founder creates group
         try founder.createGroup(channelId: "1", isVoice: true)
@@ -87,9 +93,9 @@ struct MlsProtocolTests {
     
     @Test func testThreePartyMlsGroup() async throws {
         // Test three-party scenario with commit processing
-        let alice = try MlsWrapper(identityName: "alice")
-        let bob = try MlsWrapper(identityName: "bob")
-        let charlie = try MlsWrapper(identityName: "charlie")
+        let alice = try makeWrapper("U_alice")
+        let bob = try makeWrapper("U_bob")
+        let charlie = try makeWrapper("U_charlie")
         
         // 1. Alice creates group
         try alice.createGroup(channelId: "1", isVoice: true)
@@ -99,8 +105,8 @@ struct MlsProtocolTests {
         let addBob = try alice.addMember(channelId: "1", isVoice: true, keyPackageBytes: bobKp)
         try bob.joinGroup(welcomeBytes: addBob.welcome)
         
-        // 3. Charlie joins - Bob processes Alice's commit, then Alice adds Charlie
-        _ = try bob.processCommit(channelId: "1", isVoice: true, commitBytes: addBob.commit)
+        // 3. Charlie joins. Bob joined from the welcome, already at Alice's
+        // epoch 1, so only the commit adding Charlie is new to him.
         
         let charlieKp = try charlie.createKeyPackage()
         let addCharlie = try alice.addMember(channelId: "1", isVoice: true, keyPackageBytes: charlieKp)
@@ -127,11 +133,36 @@ struct MlsProtocolTests {
         print("[Test] Three-party MLS group with commit processing succeeded")
     }
     
+    @Test func testGroupMembersCarryStableIdentityKeys() async throws {
+        // Trust decisions key on the identity key, so it must be the one the
+        // member logged in with, and the same on every connection.
+        let aliceSecret = generateIdentitySecret()
+        let founder = try MlsWrapper(userId: "U_alice", identitySecret: aliceSecret)
+        let joiner = try makeWrapper("U_bob")
+        
+        try founder.createGroup(channelId: "1", isVoice: true)
+        let added = try founder.addMember(channelId: "1", isVoice: true, keyPackageBytes: try joiner.createKeyPackage())
+        try joiner.joinGroup(welcomeBytes: added.welcome)
+        
+        let seenByBob = try joiner.groupMembers(channelId: "1", isVoice: true)
+        let alice = seenByBob.first { $0.identity == "U_alice" }
+        #expect(seenByBob.count == 2)
+        #expect(seenByBob.allSatisfy { $0.identityKey.count == 1_984 })
+        #expect(alice?.isSelf == false)
+        #expect(alice?.identityKey == (try identityPublicKey(identitySecret: aliceSecret)))
+        
+        // A new connection with the same identity presents the same key
+        let reconnected = try MlsWrapper(userId: "U_alice", identitySecret: aliceSecret)
+        try reconnected.createGroup(channelId: "2", isVoice: true)
+        let me = try reconnected.groupMembers(channelId: "2", isVoice: true).first { $0.isSelf }
+        #expect(me?.identityKey == alice?.identityKey)
+    }
+    
     // MARK: - Key Derivation Tests
     
     @Test func testPerSenderKeyDerivation() async throws {
         // Test that different sender IDs produce different keys
-        let wrapper = try MlsWrapper(identityName: "test-user")
+        let wrapper = try makeWrapper("U_test-user")
         try wrapper.createGroup(channelId: "1", isVoice: true)
         
         let key1 = try wrapper.exportAudioKey(channelId: "1", senderSessionId: 1)
@@ -147,7 +178,7 @@ struct MlsProtocolTests {
     
     @Test func testSeparateVoiceAndTextGroups() async throws {
         // Test that voice and text groups are independent
-        let wrapper = try MlsWrapper(identityName: "test-user")
+        let wrapper = try makeWrapper("U_test-user")
         
         try wrapper.createGroup(channelId: "1", isVoice: true)
         try wrapper.createGroup(channelId: "1", isVoice: false)
@@ -166,7 +197,7 @@ struct MlsProtocolTests {
     @Test func testTextKeyRetainedAcrossEpochChange() async throws {
         // A message encrypted at epoch 0 must stay decryptable once a join has
         // advanced the group to epoch 1.
-        let founder = try MlsWrapper(identityName: "founder")
+        let founder = try makeWrapper("U_founder")
         try founder.createGroup(channelId: "1", isVoice: false)
 
         let senderSessionId: UInt32 = 77
@@ -174,7 +205,7 @@ struct MlsProtocolTests {
             channelId: "1", senderSessionId: senderSessionId, epoch: 0)
 
         // A joiner advances the epoch.
-        let joiner = try MlsWrapper(identityName: "joiner")
+        let joiner = try makeWrapper("U_joiner")
         let keyPackage = try joiner.createKeyPackage()
         _ = try founder.addMember(channelId: "1", isVoice: false, keyPackageBytes: keyPackage)
         #expect(try founder.currentEpoch(channelId: "1", isVoice: false) == 1)

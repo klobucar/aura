@@ -45,6 +45,7 @@ public class UntrustedCertificateException : Exception
 public class AuraNetworkClient : IAsyncDisposable
 {
     // Protocol message types
+    private const byte MSG_AUTH_RESPONSE = 0x04;
     private const byte MSG_JOIN_CHANNEL = 0x10;
     private const byte MSG_USER_JOINED = 0x11;
     private const byte MSG_USER_LEFT = 0x12;
@@ -65,7 +66,7 @@ public class AuraNetworkClient : IAsyncDisposable
     private QuicStream? _controlStream;
     private uint _userId;
     private string? _sessionToken;
-    private string? _userUuid;          // Stable user UUID derived from Ed25519 public key hex
+    private string? _userUuid;          // Server-assigned account id (U_…) from the login response
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _textGroupReady = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _voiceGroupReady = new();
     private RustAudioEngine? _audioEngine;
@@ -196,7 +197,12 @@ public class AuraNetworkClient : IAsyncDisposable
     }
     
     /// <summary>
-    /// Authenticate using TOFU with Ed25519 signature.
+    /// Log in with the hybrid identity (login v2).
+    ///
+    /// The server opens with <c>[0x02][32-byte challenge]</c>. We answer with the
+    /// frame aura-core builds and signs (<c>[0x03][u32 LE length][AuthRequest]</c>)
+    /// and read back <c>[0x04][u32 LE length][AuthResponse]</c>, which has the
+    /// same shape on success and failure.
     /// </summary>
     public async Task AuthenticateAsync(UserIdentity identity, string? serverPassword = null, CancellationToken ct = default)
     {
@@ -206,40 +212,43 @@ public class AuraNetworkClient : IAsyncDisposable
         Console.WriteLine($"[AuraClient] Authenticating as '{identity.DisplayName}'...");
         OnStatusChanged?.Invoke("Authenticating...");
         
-        // 1. Receive challenge (Server-first protocol: server sends challenge immediately on connection)
-        Console.WriteLine("[AuraClient] Waiting for challenge response (ServerHello)...");
+        // 1. Receive challenge (server-first: it is sent as soon as the stream opens)
+        Console.WriteLine("[AuraClient] Waiting for challenge (ServerHello)...");
         var challenge = await ReceiveChallengeResponseAsync(ct);
         Console.WriteLine($"[AuraClient] Received challenge: {Convert.ToHexString(challenge[..8])}...");
         
-        // 3. Sign challenge
-        Console.WriteLine("[AuraClient] Signing challenge...");
-        var signature = identity.Sign(challenge);
-        Console.WriteLine($"[AuraClient] Signature: {Convert.ToHexString(signature[..8])}...");
+        // 2. Send the signed login frame
+        var request = identity.BuildAuthRequest(
+            challenge, string.IsNullOrEmpty(serverPassword) ? null : serverPassword);
+        Console.WriteLine($"[AuraClient] Sending auth request ({request.Length} bytes)...");
+        await _controlStream.WriteAsync(request, ct);
         
-        // 4. Send auth request  
-        Console.WriteLine("[AuraClient] Sending auth request...");
-        await SendAuthRequestAsync(identity.PublicKey, identity.DisplayName, signature, challenge, serverPassword, ct);
-        
-        // 5. Receive auth response
+        // 3. Receive auth response
         Console.WriteLine("[AuraClient] Waiting for auth response...");
-        var (success, userId, sessionToken, verified, errorMessage) = await ReceiveAuthResponseAsync(ct);
-        Console.WriteLine($"[AuraClient] Auth response: success={success}, userId={userId}, error={errorMessage}");
+        var response = await ReceiveAuthResponseAsync(ct);
+        Console.WriteLine($"[AuraClient] Auth response: success={response.Success}, sessionId={response.SessionId}, " +
+                          $"userUuid={response.UserUuid}, isAdmin={response.IsAdmin}, error={response.ErrorMessage}");
         
-        if (!success)
+        if (!response.Success)
         {
-            throw new AuthenticationException(errorMessage ?? "Authentication failed");
+            throw new AuthenticationException(
+                string.IsNullOrEmpty(response.ErrorMessage) ? "Authentication failed" : response.ErrorMessage);
+        }
+        if (string.IsNullOrEmpty(response.UserUuid))
+        {
+            throw new ProtocolException("Auth response has no user id");
         }
         
-        _userId = userId;
-        _sessionToken = sessionToken;
-        // Store the public key hex as the stable user UUID — this is what the server
-        // stores in its database (derived from the Ed25519 public key on first TOFU auth).
-        _userUuid = identity.PublicKeyHex;
+        _userId = response.SessionId;
+        _sessionToken = response.SessionToken;
+        // The server-assigned account id (U_…). It is also our MLS credential
+        // identity, so it matches what Mls reports for our own leaf.
+        _userUuid = response.UserUuid;
         
         // Initialize MLS wrapper for E2EE
         try
         {
-            _mlsWrapper = new MlsWrapper(identity.PublicKeyHex);
+            _mlsWrapper = identity.CreateMlsWrapper(_userUuid);
             Console.WriteLine("[AuraClient] MLS wrapper initialized for E2EE");
         }
         catch (Exception ex)
@@ -247,7 +256,7 @@ public class AuraNetworkClient : IAsyncDisposable
             Console.WriteLine($"[AuraClient] Failed to initialize MLS: {ex.Message} - E2EE will not be available");
         }
         
-        OnStatusChanged?.Invoke($"Authenticated as user {userId}" + (verified ? " (verified)" : ""));
+        OnStatusChanged?.Invoke($"Authenticated as user {response.SessionId}" + (response.Verified ? " (verified)" : ""));
         
         // Start listening for server messages (presence, chat, etc.)
         StartListening();
@@ -390,18 +399,8 @@ public class AuraNetworkClient : IAsyncDisposable
     }
     
     // ========================================================================
-    // Protocol Serialization (simplified for POC - not using protobuf yet)
+    // Login framing
     // ========================================================================
-    
-    private async Task SendChallengeRequestAsync(byte[] publicKey, CancellationToken ct)
-    {
-        // Simple format: [1 byte type][32 bytes pubkey]
-        var buffer = new byte[33];
-        buffer[0] = 0x01; // ChallengeRequest type
-        publicKey.CopyTo(buffer, 1);
-        
-        await _controlStream!.WriteAsync(buffer, ct);
-    }
     
     private async Task<byte[]> ReceiveChallengeResponseAsync(CancellationToken ct)
     {
@@ -419,96 +418,21 @@ public class AuraNetworkClient : IAsyncDisposable
         return challenge;
     }
     
-    private async Task SendAuthRequestAsync(byte[] publicKey, string displayName, byte[] signature, 
-        byte[] challenge, string? serverPassword, CancellationToken ct)
+    /// <summary>
+    /// Read <c>[0x04][u32 LE length][AuthResponse]</c> and decode it.
+    /// </summary>
+    private async Task<AuthResponseRecord> ReceiveAuthResponseAsync(CancellationToken ct)
     {
-        // Fixed format to match server expectations:
-        // [1 byte type][1 byte keylen][key][1 byte namelen][name bytes][1 byte siglen][sig][1 byte challen][chal][1 byte pwlen][pw]
-        using var ms = new MemoryStream();
-        
-        ms.WriteByte(0x03); // AuthRequest type
-        
-        ms.WriteByte((byte)publicKey.Length);
-        ms.Write(publicKey, 0, publicKey.Length);
-        
-        var nameBytes = System.Text.Encoding.UTF8.GetBytes(displayName);
-        ms.WriteByte((byte)nameBytes.Length);
-        ms.Write(nameBytes, 0, nameBytes.Length);
-        
-        ms.WriteByte((byte)signature.Length);
-        ms.Write(signature, 0, signature.Length);
-        
-        ms.WriteByte((byte)challenge.Length);
-        ms.Write(challenge, 0, challenge.Length);
-        
-        var pwBytes = string.IsNullOrEmpty(serverPassword) ? Array.Empty<byte>() : System.Text.Encoding.UTF8.GetBytes(serverPassword);
-        ms.WriteByte((byte)pwBytes.Length);
-        if (pwBytes.Length > 0)
-        {
-            ms.Write(pwBytes, 0, pwBytes.Length);
-        }
-        
-        var data = ms.ToArray();
-        Console.WriteLine($"[AuraClient] SendAuthRequest: {data.Length} bytes");
-        await _controlStream!.WriteAsync(data, ct);
-    }
-    
-    private async Task<(bool success, uint userId, string? sessionToken, bool verified, string? errorMessage)> 
-        ReceiveAuthResponseAsync(CancellationToken ct)
-    {
-        // 1. Read message type
         var typeBuf = new byte[1];
         await ReadExactAsync(typeBuf, ct);
-        byte msgType = typeBuf[0];
         
-        if (msgType != 0x04) // AuthResponse type
+        if (typeBuf[0] != MSG_AUTH_RESPONSE)
         {
-            throw new Exception($"Invalid auth response: type={msgType:X2}");
+            throw new ProtocolException($"Invalid auth response: type=0x{typeBuf[0]:X2}");
         }
         
-        // 2. Read success (1 byte)
-        var successBuf = new byte[1];
-        await ReadExactAsync(successBuf, ct);
-        bool success = successBuf[0] != 0;
-        
-        // 3. Read userId (4 bytes)
-        var userIdBuf = new byte[4];
-        await ReadExactAsync(userIdBuf, ct);
-        uint userId = BinaryPrimitives.ReadUInt32LittleEndian(userIdBuf);
-        
-        // 4. Read token
-        var lenBuf = new byte[1];
-        await ReadExactAsync(lenBuf, ct);
-        byte tokenLen = lenBuf[0];
-        string? sessionToken = null;
-        if (tokenLen > 0)
-        {
-            var tokenBuf = new byte[tokenLen];
-            await ReadExactAsync(tokenBuf, ct);
-            sessionToken = System.Text.Encoding.UTF8.GetString(tokenBuf);
-        }
-        
-        // 5. Read verified (1 byte)
-        await ReadExactAsync(lenBuf, ct);
-        bool verified = lenBuf[0] != 0;
-        
-        // 6. Read is_admin (1 byte) - new in server protocol
-        await ReadExactAsync(lenBuf, ct);
-        bool isAdmin = lenBuf[0] != 0;
-        
-        // 7. Read error message
-        await ReadExactAsync(lenBuf, ct);
-        byte errorLen = lenBuf[0];
-        string? errorMessage = null;
-        if (errorLen > 0)
-        {
-            var errorBuf = new byte[errorLen];
-            await ReadExactAsync(errorBuf, ct);
-            errorMessage = System.Text.Encoding.UTF8.GetString(errorBuf);
-        }
-        
-        Console.WriteLine($"[AuraClient] ReceiveAuthResponse: success={success}, userId={userId}, isAdmin={isAdmin}");
-        return (success, userId, sessionToken, verified, errorMessage);
+        var payload = await ReadHardenedPayloadAsync(MaxAuthResponseSize, ct);
+        return AuraCoreMethods.DecodeAuthResponse(payload);
     }
     
     public async ValueTask DisposeAsync()
@@ -529,6 +453,9 @@ public class AuraNetworkClient : IAsyncDisposable
 
     private const int MaxAudioPacketSize = 65536;
     private const int MaxControlPacketSize = 2 * 1024 * 1024;
+
+    /// <summary>An AuthResponse is a few short strings and flags.</summary>
+    private const int MaxAuthResponseSize = 64 * 1024;
 
     public event Action<string, uint, string>? OnUserJoined; // channelId, sessionId, name
     public event Action<string, uint>? OnUserLeft;           // channelId, sessionId

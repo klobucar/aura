@@ -165,36 +165,39 @@ final class EdgeCaseTests: XCTestCase {
     
     // MARK: - UserIdentity Edge Cases
     
-    func testSignWithoutKey() {
+    func testAuthRequestWithoutKey() {
         let identity = UserIdentity()
         // Don't generate key
         
-        let testData = "test".data(using: .utf8)!
-        let signature = identity.sign(testData)
-        
-        XCTAssertNil(signature)
+        XCTAssertThrowsError(try identity.authRequestFrame(challenge: Data(repeating: 0, count: 32), serverPassword: nil))
     }
     
-    func testSignEmptyData() {
+    func testAuthRequestWithEmptyDisplayName() throws {
         let identity = UserIdentity()
+        identity.displayName = ""
         identity.generateKeypair()
         
-        let emptyData = Data()
-        let signature = identity.sign(emptyData)
+        let frame = try identity.authRequestFrame(challenge: Data(repeating: 0, count: 32), serverPassword: nil)
+        let fields = authRequestFields(frame)
         
-        XCTAssertNotNil(signature)
-        XCTAssertEqual(signature?.count, 64)
+        XCTAssertNotNil(fields)
+        XCTAssertNil(fields?[2]) // An empty string is omitted from the protobuf
+        XCTAssertEqual(fields?[3]?.count, IdentitySizes.signature)
     }
     
-    func testSignLargeData() {
+    func testAuthRequestWithLongDisplayNameAndPassword() throws {
         let identity = UserIdentity()
+        identity.displayName = String(repeating: "A", count: 1000)
         identity.generateKeypair()
+        let password = String(repeating: "p", count: 300)
         
-        let largeData = Data(repeating: 0x42, count: 1_000_000) // 1MB
-        let signature = identity.sign(largeData)
+        let frame = try identity.authRequestFrame(challenge: Data(repeating: 0x42, count: 32), serverPassword: password)
+        let fields = authRequestFields(frame)
         
-        XCTAssertNotNil(signature)
-        XCTAssertEqual(signature?.count, 64)
+        // Lengths past 255 need the u32 frame length, not a one-byte prefix
+        XCTAssertEqual(fields?[2]?.count, 1000)
+        XCTAssertEqual(fields?[4], Data(password.utf8))
+        XCTAssertEqual(fields?[3]?.count, IdentitySizes.signature)
     }
     
     func testExportWithoutKey() {

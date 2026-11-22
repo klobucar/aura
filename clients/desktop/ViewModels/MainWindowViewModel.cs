@@ -271,14 +271,25 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// <summary>`ROSTER · 7 ONLINE`</summary>
     public string RosterLabel => $"ROSTER · {Channels.Sum(c => c.Users.Count)} ONLINE";
 
-    /// <summary>`verified · 3f8a…5503`, the identity card's fingerprint line.</summary>
+    /// <summary>
+    /// `verified · 3f8a…5503`, the identity card's fingerprint line. Same short
+    /// fingerprint the trust sheet shows for our own key, so the two can be
+    /// compared at a glance.
+    /// </summary>
     public string FingerprintDisplay
     {
         get
         {
-            var hex = _identity?.PublicKeyHex;
-            if (string.IsNullOrEmpty(hex) || hex.Length < 8) return "no identity";
-            return $"verified · {hex[..4]}…{hex[^4..]}";
+            var key = _identity?.IdentityPublicKey;
+            if (key == null || key.Length == 0) return "no identity";
+            try
+            {
+                return $"verified · {uniffi.aura_core.AuraCoreMethods.IdentityFingerprintShort(key)}";
+            }
+            catch
+            {
+                return "no identity";
+            }
         }
     }
 
@@ -455,10 +466,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         // Check QUIC support
         QuicSupport.CheckQuicSupport();
 
-        // Try to load existing identity
+        // Try to load existing identity. Loading goes through aura-core (and
+        // may upgrade a v1 file), so the native library resolver comes first.
         var identityPath = UserIdentity.GetIdentityFilePath();
         try
         {
+            NativeLibraryLoader.Initialize();
             if (System.IO.File.Exists(identityPath))
             {
                 _identity = UserIdentity.Load(identityPath);

@@ -1,24 +1,29 @@
 ---
 title: Post-Quantum Migration
-description: Hybrid post-quantum key exchange in Aura's transport and MLS layers, and the plan for hybrid signatures.
+description: Hybrid post-quantum key exchange and signatures across Aura's transport, MLS and identity layers.
 ---
 # Post-Quantum Migration
 
 Aura protects recorded traffic against a future quantum computer ("harvest
-now, decrypt later") by using **hybrid** key exchange: classical X25519
-combined with ML-KEM-768 (FIPS 203). A session stays confidential unless
-*both* are broken, so the change cannot make Aura weaker than it was against a
-classical attacker.
+now, decrypt later") with **hybrid** key exchange: classical X25519 combined
+with ML-KEM-768 (FIPS 203). It protects identities against forgery with
+**hybrid** signatures: Ed25519 combined with ML-DSA-65 (FIPS 204). In both
+cases an attacker has to break the classical *and* the post-quantum half, so
+these changes cannot make Aura weaker than it was against a classical attacker.
 
 | Layer | Status | Algorithm |
 |---|---|---|
 | Media/text payloads (DAVE) | Unchanged, already PQ-adequate | XChaCha20-Poly1305, 256-bit keys |
 | QUIC / TLS 1.3 key exchange | **Phase 1, done** | `X25519MLKEM768`, classical fallback |
-| MLS group key exchange (E2EE) | **Phase 2, done** | `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` |
-| Identity & MLS signatures | **Phase 3, planned** | Ed25519 today; Ed25519 + ML-DSA-65 planned |
+| MLS group key exchange (E2EE) | **Phase 2, done** | X-Wing (X25519 + ML-KEM-768) |
+| Long-term identity: login, profiles, MLS credentials | **Phase 3, done** | Ed25519 + ML-DSA-65, both required |
+| MLS message signatures | **Phase 3, done** | ML-DSA-44, with a key certified by the identity |
 
 Symmetric primitives with 256-bit keys keep ~128-bit security against
 Grover's algorithm, so the DAVE wire format did not change.
+
+The MLS ciphersuite is
+`MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44` (Phases 2 and 3).
 
 ---
 
@@ -53,35 +58,35 @@ packets) and a classical-only client.
 
 ---
 
-## Phase 2: Hybrid MLS (E2EE voice and text)
+## Phase 2: Hybrid MLS key exchange (E2EE voice and text)
 
 **Where:** `crates/aura-core/src/mls.rs` (`CIPHERSUITE`, `leaf_capabilities`).
 
 ### Ciphersuite
 
-`MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` from
+`MLS_128_MLKEM768X25519_CHACHA20POLY1305_SHA384_MLDSA44` from
 draft-ietf-mls-pq-ciphersuites, via OpenMLS 0.9 and its RustCrypto provider:
 
 - **KEM:** MLKEM768-X25519, which is X-Wing (draft-connolly-cfrg-xwing-kem-06).
   It protects every group secret MLS distributes: Welcome group secrets and
   UpdatePath secrets.
-- **AEAD:** AES-256-GCM. **Hash/KDF:** SHA-384.
-- **Signatures:** Ed25519 (unchanged; see Phase 3).
-- The "128" in the name is the draft's security category for ML-KEM-768, not
-  the AEAD key size. The code point (0x004E) is **provisional** until IANA
-  assigns one.
+- **AEAD:** ChaCha20-Poly1305 (256-bit key). **Hash/KDF:** SHA-384.
+- **Signatures:** ML-DSA-44. See Phase 3 for how each member's signing key is
+  tied to their hybrid identity.
+- The "128" in the name is the draft's security category, not the AEAD key
+  size. The code point (0x0052) is **provisional** until IANA assigns one.
 
-DAVE sender keys are still 32-byte MLS exporter outputs, so their derivation,
-the epoch-retention logic and the data plane are unchanged.
+It is the only OpenMLS suite that pairs ML-DSA with the hybrid KEM; the
+ML-DSA-65 suite (0x0051) uses pure ML-KEM-768. DAVE sender keys are still
+32-byte MLS exporter outputs, so their derivation, the epoch-retention logic
+and the data plane are unchanged.
 
-**Why this suite and provider.** OpenMLS also has the individual-draft suite
-`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` (0x004D), but only its libcrux
-provider implements it, and `openmls_libcrux_crypto` 0.4.0 pins `libcrux-kem`
-0.0.9. That version's X-Wing public-key decoder panics on short input
-(RUSTSEC-2026-0331), and in MLS the public keys come from peers: a crafted
+**Why the RustCrypto provider.** OpenMLS's libcrux provider pins
+`libcrux-kem` 0.0.9, whose hybrid public-key decoder panics on short input
+(RUSTSEC-2026-0331). In MLS the public keys come from peers, so a crafted
 KeyPackage would crash the founder's client. The RustCrypto provider decodes
-the same KEM through RustCrypto's `x-wing`/`ml-kem` crates, which reject
-malformed keys with an error. Revisit once a fixed libcrux provider ships.
+X-Wing through RustCrypto's `x-wing`/`ml-kem` crates, which reject malformed
+keys with an error.
 
 ### Downgrade protection
 
@@ -96,131 +101,142 @@ malformed keys with an error. Revisit once a fixed libcrux provider ships.
 
 ### Compatibility: all clients must upgrade together
 
-There is no suite negotiation. A client from before this change cannot join a
-group created by a new one, and vice versa. The founder logs `Ciphersuite
+There is no suite negotiation. A client from before a suite change cannot join
+a group created by a new one, and vice versa; the founder logs `Ciphersuite
 mismatch … (peer client may need updating)`. MLS state is in memory only, so
-nothing persisted needs migrating; the server needs no MLS changes (it relays
-opaque bytes).
+nothing persisted needs migrating, and the server relays MLS messages as
+opaque bytes.
+
+---
+
+## Phase 3: Hybrid signatures
+
+Signatures aren't exposed to harvest-now-decrypt-later (a recorded signature
+gives an attacker nothing to decrypt), but once a quantum computer exists it
+could forge any classical signature, including every long-term identity pinned
+by TOFU. Phase 3 replaces those identities before that point.
+
+### Long-term identity: Ed25519 + ML-DSA-65
+
+**Where:** `crates/aura-identity`.
+
+- **Keys.** A 64-byte secret (Ed25519 secret key, then ML-DSA-65 seed), a
+  1,984-byte public key (ML-DSA-65, then Ed25519) and 3,373-byte signatures.
+- **Both halves required.** A signature is the ML-DSA-65 signature followed
+  by the Ed25519 signature over the same message, and it verifies only if both
+  do (an AND combiner, in the style of draft-ietf-lamps-pq-composite-sigs,
+  without claiming wire compatibility).
+- **Purpose binding.** The signed message is
+  `PREFIX || len(label) || label || message`, with a label per use (`auth`,
+  `profile`, `mls-credential`), so a signature for one purpose never verifies
+  as another. The ML-DSA half also carries the prefix as its FIPS 204 context
+  string.
+- **Upgrading.** An Ed25519-only identity upgrades by keeping its Ed25519
+  secret and adding a fresh ML-DSA seed, so its Ed25519 public key, and the
+  account pinned to it, stay the same.
+
+Signing happens only in Rust. The clients call the aura-core FFI
+(`generate_identity_secret`, `upgrade_ed25519_identity`,
+`build_auth_request`, `MlsWrapper(user_id, identity_secret)`, …) with the
+stored secret, so the signature formats are defined in one place.
+
+### Login (TOFU)
+
+**Where:** `crates/aura-server/src/{auth,connection,db}.rs`,
+`crates/aura-core/src/identity_ffi.rs`.
+
+- The server opens with `[0x02][32-byte challenge]`. The client replies
+  `[0x03][u32 LE length][AuthRequest]` with its identity key and a hybrid
+  signature over `auth_transcript`: the challenge, the display name it claims
+  and its whole identity key. The server answers
+  `[0x04][u32 LE length][AuthResponse]`, including the account's user id
+  (`U_…`) and `is_admin`.
+- Accounts are found by the Ed25519 half of the key. Schema v2 adds a nullable
+  `users.identity_public_key`. An account created before hybrid identities, or
+  a bootstrap admin, gets its key pinned at its next login: its pinned Ed25519
+  key signed a transcript containing the whole identity key, which vouches for
+  the new ML-DSA half. Once pinned, a different key is refused.
+- `AURA_BOOTSTRAP_ADMIN_KEY` is still the admin's 64-hex Ed25519 public key.
+
+### MLS: a persistent ML-DSA-44 key, certified by the identity
+
+The suite fixes MLS signatures to ML-DSA-44, and MLS has no hybrid signature
+scheme. So each member signs MLS messages with an ML-DSA-44 key and proves
+which identity it belongs to with a **credential**
+(`aura_identity::MemberCredential`, carried in the MLS `BasicCredential`):
+their user id, their identity public key, and the identity's hybrid signature
+over (signature scheme, user id, MLS public key).
+
+- **Persistent.** The MLS key is derived from the identity secret
+  (`IdentitySecret::mls_signing_key`, a one-way hash KDF), so a member presents
+  the same key on every connection and keeps one stored secret. Trust pinned
+  on a member survives reconnects.
+- **Checked on entry.** `MlsClient` verifies the credential against the leaf's
+  own signature key for every leaf in a Welcome, every KeyPackage it adds, and
+  every leaf a commit adds or updates, before acting on it
+  (`MlsError::InvalidCredential`). OpenMLS checks that leaves sign with their
+  key, but not whose key it is.
+- **Replaceable.** A future suite with a stronger or hybrid signature changes
+  only the MLS key and its certificate; the identity stays the same.
+
+What ML-DSA-44 doesn't give: MLS messages are signed by ML-DSA-44 alone, so
+anyone able to break ML-DSA-44 could forge messages from an existing member's
+leaf. The credential protects who a key belongs to, not each message.
+
+### Verification and profiles
+
+- **Safety words and fingerprints** are computed over the 1,984-byte identity
+  key from each member's verified credential, with fingerprint version 1
+  (`00 01`), so they can't be confused with the old values over 32-byte
+  Ed25519 keys. Everyone's safety words changed once with this release.
+- **Profiles** are signed with the hybrid identity (`Purpose::Profile`). The
+  signed payload and content hash are unchanged. Server-side verification of
+  profile signatures is still to do.
 
 ### Payload sizes and frame caps
 
-X-Wing public keys are 1,216 bytes and ciphertexts 1,120 bytes (X25519: 32
-bytes each). Measured with the founder adding members one at a time and
+Measured with real credentials, the founder adding members one at a time and
 ratcheting every eight adds:
 
 | Group size | KeyPackage | Welcome | Ratchet commit | Commit + Welcome upload |
 |---:|---:|---:|---:|---:|
-| 2 | 2.6 KB | 8 KB | 4 KB | 16 KB |
-| 64 | 2.6 KB | 101 KB | 84 KB | 188 KB |
-| 100 | 2.6 KB | 151 KB | 128 KB | 281 KB |
-| 256 | 2.6 KB | 370 KB | 314 KB | 688 KB |
-| 380 | 2.6 KB | 542 KB | 463 KB | 1,007 KB |
+| 2 | 13.7 KB | 25 KB | — | 53 KB |
+| 32 | 13.7 KB | 335 KB | 55 KB | 402 KB |
+| 64 | 13.7 KB | 660 KB | 93 KB | 766 KB |
+| 86 | 13.7 KB | 885 KB | 113 KB | 1,017 KB |
 
-The classical suite was ~9× smaller (77 KB for the 256-member upload).
+Each member adds about 10.2 KB to every Welcome, because the ratchet tree
+carries each member's ML-DSA-44 key and leaf signature plus their identity key
+and certificate. With X-Wing and Ed25519 alone it was 1.4 KB.
 
-All MLS framing is `[type u8][len u32][protobuf]`, so no field-level caps
-apply. The binding limit was the server's 256 KB inbound control-frame cap,
-which the founder's combined Commit + Welcome (`MSG_MLS_COMMIT_WELCOME`)
-crosses at about 90 members. The server now allows **1 MiB for
-`MSG_MLS_COMMIT_WELCOME` and `MSG_MLS_RATCHET_COMMIT` only**; other control
-messages keep 256 KB. That supports channels of roughly **390 members**. Both
-clients already accept 2 MB inbound frames, which covers a Welcome for any
-group the server cap admits, including `JoinResponse` with two Welcomes.
-
-**Tests** (`mls::tests`): suite parameters; KeyPackages carry real 1,216-byte
-X-Wing keys and advertise only this suite; join → add → non-founder ratchet
-with key agreement at every epoch; rejection of a legacy KeyPackage; rejection
-of a classical-suite Welcome with nothing persisted.
-
----
-
-## Phase 3: Hybrid signatures (design)
-
-Signatures are not exposed to harvest-now-decrypt-later: a recorded signature
-gives an attacker nothing to decrypt. The risk is **forgery once a
-cryptographically relevant quantum computer exists**. Every long-term Ed25519
-identity pinned by TOFU would then be forgeable, so this migration must finish
-*before* that point, but it is not urgent the way key exchange was.
-
-### Target: Ed25519 + ML-DSA-65 composite identity
-
-Each identity becomes a pair `(Ed25519, ML-DSA-65)`. A signature is valid only
-if **both** halves verify (AND-combiner), with domain separation in the style
-of draft-ietf-lamps-pq-composite-sigs (`id-MLDSA65-Ed25519`): both halves sign
-`Prefix || Domain || len(ctx) || ctx || M`. Sizes: ML-DSA-65 public key
-1,952 B, signature 3,309 B.
-
-Implement it once in **aura-core** (RustCrypto `ml-dsa`, already in the
-dependency graph through OpenMLS) and expose it over UniFFI, so both clients
-share one implementation regardless of platform crypto support.
-
-### TOFU authentication (`auth.rs`, `connection.rs`, `db.rs`)
-
-1. **Wire:** the auth request uses `u8` length prefixes for key and signature
-   (255-byte max), which ML-DSA cannot fit. Add an `AuthRequestV2` message
-   with `u16` lengths carrying both public keys and both signatures over the
-   challenge. Keep v1 for accounts that haven't upgraded.
-2. **Storage:** add a nullable `mldsa65_public_key BLOB` column next to
-   `ed25519_public_key`.
-3. **Upgrading an existing account:** on its first v2 login, accept the
-   ML-DSA key only together with a **binding statement signed by the
-   already-pinned Ed25519 key**
-   (`Ed25519.sign("aura-pq-bind-v1" || mldsa65_pk)`). Without that, a
-   quantum-capable attacker who can forge Ed25519 could attach their own
-   ML-DSA key.
-4. **Downgrade lock:** once an account has an ML-DSA key, refuse v1
-   (Ed25519-only) authentication for it.
-5. **New accounts** register both keys from the start.
-
-### Identity verification and profiles (`verification.rs`, `profile.rs`)
-
-- Bump `FINGERPRINT_VERSION` and hash both public keys into key and pairwise
-  fingerprints. Upgraded users' **safety words will change once**; the UI
-  should explain the re-verification and must keep v1 words for contacts who
-  haven't upgraded.
-- Profiles carry both signatures. Verifiers require both once the signer's
-  account is ML-DSA-bound.
-- The known-answer tests added with this work (`fingerprints_match_known_answers`,
-  `signature_and_hash_match_known_answers`) pin the v1 outputs; v2 needs its own.
-
-### MLS leaf credentials (`mls.rs`)
-
-OpenMLS's `SignatureScheme` is a closed enum and offers no composite
-Ed25519 + ML-DSA scheme. The draft-ietf-mls-pq-ciphersuites suites with
-ML-DSA (`…_MLDSA44`, `…_MLDSA65`) are **pure** ML-DSA, and the ML-DSA-65 one
-also drops the X25519 half of the KEM. Options, in order of preference:
-
-1. **Wait for a standardized hybrid-signature MLS suite** and adopt it as
-   another all-clients-at-once suite change.
-2. **Application-layer binding now:** keep Ed25519 as the MLS signature and
-   put the member's ML-DSA-65 public key plus an ML-DSA signature over the
-   leaf's Ed25519 key in a leaf-node extension, verified by aura-core on every
-   KeyPackage, Welcome and Commit (both must pass). Cost: about +5.3 KB per
-   member in the ratchet tree, which cuts the 1 MiB-cap group size from about
-   390 to roughly 150 unless Welcomes stop embedding the tree.
-3. **Switch to a pure ML-DSA suite.** This loses the classical half of the
-   signature and, for ML-DSA-65, the classical half of the KEM.
+The server caps `MSG_MLS_COMMIT_WELCOME` and `MSG_MLS_RATCHET_COMMIT` at 1 MiB
+(other control messages at 256 KB), which limits channels to **86 members**:
+the founder's Commit + Welcome is the binding size. Clients accept 2 MB inbound
+frames, enough for a `JoinResponse` carrying two Welcomes at that size.
+Doubling the server cap to 2 MiB and the clients' to 4 MB would allow about
+170 members.
 
 ### Platform key storage
 
-| Platform | Ed25519 (today) | ML-DSA-65 (planned) |
-|---|---|---|
-| macOS 26+ | Software key, wrapped by a Secure Enclave **P-256** key | Either software (wrapped like Ed25519), or Enclave-resident via CryptoKit `SecureEnclave.MLDSA65` |
-| macOS 14–15 | Software key, wrapped by a Secure Enclave P-256 key | Software, wrapped the same way. The Enclave holds only P-256 keys on these versions. |
-| Desktop | File under the user's profile directory | Same file, via aura-core |
+| Platform | Identity secret (64 bytes) |
+|---|---|
+| macOS | Keychain. Biometric profiles wrap it with a Secure Enclave P-256 key (ECIES). |
+| Desktop | `identity.json` (v2) under the user's profile directory, mode 600. |
 
-The Secure Enclave never holds Ed25519 keys on any macOS version. An
-Enclave-resident ML-DSA key **cannot be exported**, which breaks profile
-export/import, so the default should be a software ML-DSA key wrapped like
-the Ed25519 key, with Enclave residency as an opt-in for non-portable
-identities. The wrapping key (P-256 ECIES) is classical. That protects keys at
-rest on the device, not traffic in transit, so it is outside the
-harvest-now model.
+The Secure Enclave holds P-256 keys, and on macOS 26+ also ML-DSA-65 and -87
+(`SecureEnclave.MLDSA65`). A non-exportable, Enclave-resident ML-DSA-65
+identity would break profile export, and the MLS key derivation needs the
+secret, so it would have to become an opt-in with a separately stored MLS key.
 
-### Suggested order
+### Tests
 
-1. Composite sign/verify in aura-core, with known-answer tests.
-2. `AuthRequestV2`, DB column, binding statement, downgrade lock.
-3. v2 fingerprints and safety words, and profile dual signatures.
-4. MLS leaf binding (option 2 above), or adopt a hybrid MLS suite if one has
-   been standardized by then.
+- `aura-identity`: round trips, purpose binding, both halves required
+  (mixed-signature rejection), upgrade keeps the Ed25519 key, credential
+  tampering, known answers.
+- `mls::tests`: the suite signs with ML-DSA-44; one identity gives the same
+  MLS key on every client; `group_members` reports verified identity keys;
+  forged credentials are rejected in a KeyPackage, a Welcome (nothing stored)
+  and a commit (epoch unchanged).
+- Server: legacy-account pinning, pinned-key swap refused, signature for
+  another name refused, schema v1 → v2 migration, and login over real QUIC
+  for both success and failure.

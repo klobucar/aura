@@ -3,11 +3,12 @@
 //! Profiles are the one payload Aura deliberately leaves in plaintext: the
 //! server stores and serves them so clients can render other people without a
 //! round of MLS. That makes them the one payload a hostile server could
-//! *forge*, so they carry an Ed25519 signature over their own contents.
+//! *forge*, so they carry a signature over their own contents, made with the
+//! user's hybrid Ed25519 + ML-DSA-65 identity (see `aura_identity`).
 //!
 //! Both the canonical byte layout and the signing live here rather than in each
-//! client, for a reason that matters more than code reuse. Ed25519 interoperates
-//! fine between CryptoKit and NSec; what silently diverges between two
+//! client, for a reason that matters more than code reuse. Signature schemes
+//! interoperate fine across platforms; what silently diverges between two
 //! independent implementations is the payload construction — field order,
 //! length framing, how an empty field encodes. A one-byte disagreement produces
 //! signatures that fail to verify only across platforms. One implementation
@@ -21,19 +22,19 @@
 //! earlier sighting — see [`verify_profile`], which takes the pinned key as a
 //! separate argument specifically so this cannot be got wrong by accident.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use aura_identity::{IdentityError, IdentityPublicKey, IdentitySecret, IdentitySignature, Purpose};
 use sha2::{Digest, Sha256};
 
 /// Domain separation tag. Keeps a profile signature from ever being accepted as
 /// a signature over some other Aura structure (an auth challenge, say).
 const PROFILE_DOMAIN: &[u8] = b"aura-profile-v1";
 
-/// Length of an Ed25519 secret key seed.
-pub const SECRET_KEY_LEN: usize = 32;
-/// Length of an Ed25519 public key.
-pub const PUBLIC_KEY_LEN: usize = 32;
-/// Length of an Ed25519 signature.
-pub const SIGNATURE_LEN: usize = 64;
+/// Length of an identity secret (Ed25519 secret key, then ML-DSA-65 seed).
+pub const SECRET_KEY_LEN: usize = aura_identity::SECRET_LEN;
+/// Length of an identity public key.
+pub const PUBLIC_KEY_LEN: usize = aura_identity::PUBLIC_KEY_LEN;
+/// Length of a hybrid identity signature.
+pub const SIGNATURE_LEN: usize = aura_identity::SIGNATURE_LEN;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProfileError {
@@ -120,29 +121,29 @@ impl ProfileFields {
     }
 }
 
-/// Sign a profile with the user's Ed25519 secret key.
+/// Sign a profile with the user's 64-byte identity secret.
 pub fn sign_profile(
     fields: &ProfileFields,
-    secret_key: &[u8],
-) -> Result<[u8; SIGNATURE_LEN], ProfileError> {
-    let seed: [u8; SECRET_KEY_LEN] =
-        secret_key
-            .try_into()
-            .map_err(|_| ProfileError::InvalidKeyLength {
-                expected: SECRET_KEY_LEN,
-                got: secret_key.len(),
-            })?;
-
-    let signing_key = SigningKey::from_bytes(&seed);
-    Ok(signing_key.sign(&fields.signing_payload()).to_bytes())
+    identity_secret: &[u8],
+) -> Result<Vec<u8>, ProfileError> {
+    let identity = IdentitySecret::from_bytes(identity_secret).map_err(|_| {
+        ProfileError::InvalidKeyLength {
+            expected: SECRET_KEY_LEN,
+            got: identity_secret.len(),
+        }
+    })?;
+    Ok(identity
+        .sign(Purpose::Profile, &fields.signing_payload())
+        .as_bytes()
+        .to_vec())
 }
 
-/// Verify a profile against the key **pinned** for that user.
+/// Verify a profile against the identity key **pinned** for that user.
 ///
 /// `pinned_public_key` must come from the caller's own TOFU store, not from the
 /// profile being checked. `expected_user_id` is the identity that key is pinned
 /// against; passing it lets this reject a valid signature that belongs to a
-/// different user.
+/// different user. Both halves of the hybrid signature must verify.
 pub fn verify_profile(
     fields: &ProfileFields,
     signature: &[u8],
@@ -156,26 +157,17 @@ pub fn verify_profile(
         });
     }
 
-    let key_bytes: [u8; PUBLIC_KEY_LEN] =
-        pinned_public_key
-            .try_into()
-            .map_err(|_| ProfileError::InvalidKeyLength {
-                expected: PUBLIC_KEY_LEN,
-                got: pinned_public_key.len(),
-            })?;
-
-    let sig_bytes: [u8; SIGNATURE_LEN] = signature
-        .try_into()
+    let key = IdentityPublicKey::from_bytes(pinned_public_key).map_err(|e| match e {
+        IdentityError::BadLength { got, .. } => ProfileError::InvalidKeyLength {
+            expected: PUBLIC_KEY_LEN,
+            got,
+        },
+        _ => ProfileError::MalformedPublicKey,
+    })?;
+    let signature = IdentitySignature::from_bytes(signature)
         .map_err(|_| ProfileError::InvalidSignatureLength(signature.len()))?;
 
-    let verifying_key =
-        VerifyingKey::from_bytes(&key_bytes).map_err(|_| ProfileError::MalformedPublicKey)?;
-
-    verifying_key
-        .verify(
-            &fields.signing_payload(),
-            &Signature::from_bytes(&sig_bytes),
-        )
+    key.verify(Purpose::Profile, &fields.signing_payload(), &signature)
         .map_err(|_| ProfileError::BadSignature)
 }
 
@@ -194,10 +186,10 @@ pub fn check_version(offered: u64, cached: Option<u64>) -> Result<(), ProfileErr
 mod tests {
     use super::*;
 
-    fn keypair(seed_byte: u8) -> ([u8; 32], [u8; 32]) {
-        let seed = [seed_byte; 32];
-        let signing = SigningKey::from_bytes(&seed);
-        (seed, signing.verifying_key().to_bytes())
+    /// (identity secret, identity public key) from a fixed byte.
+    fn keypair(seed_byte: u8) -> (Vec<u8>, Vec<u8>) {
+        let id = IdentitySecret::from_parts(&[seed_byte; 32], &[!seed_byte; 32]);
+        (id.to_bytes().to_vec(), id.public_key().as_bytes().to_vec())
     }
 
     fn fields() -> ProfileFields {
@@ -340,23 +332,32 @@ mod tests {
         assert_eq!(
             sign_profile(&f, &[0u8; 16]),
             Err(ProfileError::InvalidKeyLength {
-                expected: 32,
+                expected: SECRET_KEY_LEN,
                 got: 16
             })
         );
+        let (_, public) = keypair(0x01);
         assert_eq!(
-            verify_profile(&f, &[0u8; 10], &[0u8; 32], "user-abc"),
+            verify_profile(&f, &[0u8; 10], &public, "user-abc"),
             Err(ProfileError::InvalidSignatureLength(10))
+        );
+        // A bare Ed25519 key from before the hybrid identity.
+        assert_eq!(
+            verify_profile(&f, &[0u8; SIGNATURE_LEN], &[0u8; 32], "user-abc"),
+            Err(ProfileError::InvalidKeyLength {
+                expected: PUBLIC_KEY_LEN,
+                got: 32
+            })
         );
     }
 
-    /// Known answers produced by ed25519-dalek 2.2 / sha2 0.10, before the
-    /// upgrade to 3.0 / 0.11. Profiles signed by older clients must keep
-    /// verifying, and content hashes are cache keys shared with the server.
+    /// Known answers for hybrid-signed profiles. The content hash is unchanged
+    /// from the Ed25519-only format (computed with sha2 0.10) because content
+    /// hashes are cache keys shared with the server.
     #[test]
     fn signature_and_hash_match_known_answers() {
-        const SIG: &str = "d60cbc0f456aebc714017731f310d54e2d40b06efb5956c4039a48c0435b74bd\
-                           4d35ef5cbb987143e0b555ac74eb9833623e6fb44adfaf6c6987592cc2618b05";
+        use sha2::{Digest, Sha256};
+        const SIG_DIGEST: &str = "8019d5d6068e9d227f1d4a655b13d308b7a8b26dbd27178f2a4f4307a83ccb58";
         const HASH: &str = "0f75b3e995c7492301ac077edfe0be87fbcfc8a2c8b321c1a613f2be1b225354";
         let fields = ProfileFields {
             user_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -366,17 +367,13 @@ mod tests {
             banner_data: vec![],
             version: 7,
         };
-        let (seed, public) = keypair(0x09);
+        let (secret, public) = keypair(0x09);
 
-        let sig = sign_profile(&fields, &seed).unwrap();
-        assert_eq!(hex::encode(sig), SIG);
+        let sig = sign_profile(&fields, &secret).unwrap();
+        assert_eq!(hex::encode(Sha256::digest(&sig)), SIG_DIGEST);
+        // The signed payload, and so the content hash, is unchanged from the
+        // Ed25519-only format.
         assert_eq!(hex::encode(fields.content_hash()), HASH);
-        verify_profile(
-            &fields,
-            &hex::decode(SIG).unwrap(),
-            &public,
-            &fields.user_id,
-        )
-        .unwrap();
+        verify_profile(&fields, &sig, &public, &fields.user_id).unwrap();
     }
 }

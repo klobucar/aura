@@ -1687,7 +1687,7 @@ mod tests {
 
         // Create a user
         let key = [0x42u8; 32];
-        let user_uuid = db.create_user(&key, "TestUser").unwrap();
+        let user_uuid = db.create_user(&key, None, "TestUser").unwrap();
 
         // Test with Optional mode (default)
         let mut config = Config::default();
