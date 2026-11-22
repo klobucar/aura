@@ -36,6 +36,13 @@ OUTPUT_DIR="$XCODE_PROJECT/Aura/Generated"
 # Ensure Rust tools are in PATH (especially for Xcode)
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+# Xcode exports SDKROOT, DEVELOPER_DIR and TOOLCHAINS to Run Script phases; a
+# terminal or CI shell doesn't. The `cc` crate re-runs C builds (opus16-sys)
+# when any of them changes, so a build from the command line followed by one
+# from Xcode compiled the C code twice. Clearing them gives both the same
+# environment; `cc` then finds the SDK via xcrun, which follows xcode-select.
+unset SDKROOT DEVELOPER_DIR TOOLCHAINS
+
 echo "Environment Diagnostics:"
 echo "  PATH: $PATH"
 echo "  SHELL: $SHELL"
