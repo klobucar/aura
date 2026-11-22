@@ -1603,15 +1603,16 @@ mod tests {
                     .map(|kv| format!("{}={} ", kv.key, kv.value))
             })
             .collect();
-        for secret in [
-            "Alice",
-            ok.user_uuid.as_str(),
-            ok.session_token.as_str(),
-            "127.0.0.1",
+        // Name the field on failure, never print its value (or the export).
+        for (field, value) in [
+            ("display name", "Alice"),
+            ("user id", ok.user_uuid.as_str()),
+            ("session token", ok.session_token.as_str()),
+            ("client address", "127.0.0.1"),
         ] {
             assert!(
-                !exported.contains(secret),
-                "{secret:?} leaked into {exported}"
+                !exported.contains(value),
+                "the {field} leaked into exported span attributes"
             );
         }
         assert!(
