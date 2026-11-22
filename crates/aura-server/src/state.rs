@@ -689,6 +689,7 @@ impl ServerState {
             .seen_messages
             .check_and_mark(channel_id.clone(), message_id)
         {
+            crate::metrics::METRICS.text_replay_rejected();
             warn!(
                 "Replay attack detected! Duplicate message ID '{}' from session {} in channel {}",
                 message_id, sender_session_id, channel_id

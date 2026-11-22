@@ -18,6 +18,9 @@ primary_region = 'ord'
   # TCP listeners (ACME HTTP-01, health check) must use 0.0.0.0 instead.
   AURA_BIND_ADDRESS = 'fly-global-services:8443'
   AURA_HTTP_BIND_IP = '0.0.0.0'
+  # Prometheus metrics for Fly's managed Grafana (fly-metrics.net). Aggregate
+  # counts only; the port is not in [[services]], so only Fly's scraper reaches it.
+  AURA_METRICS_ADDR = '[::]:9091'
   # Opt-in tracing: set OTEL_EXPORTER_OTLP_ENDPOINT (and _HEADERS) as Fly
   # secrets, not here; see docs/OBSERVABILITY.md.
   AURA_DATABASE_PATH = '/data/aura.db'
@@ -57,3 +60,7 @@ primary_region = 'ord'
   memory = '256mb'
   cpus = 1
   memory_mb = 256
+
+[metrics]
+  port = 9091
+  path = '/metrics'
