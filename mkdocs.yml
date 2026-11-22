@@ -61,6 +61,7 @@ nav:
       - DAVE Deviations: 05_dave_protocol_deviations.md
       - MLS Security: MLS_SECURITY.md
       - Post-Quantum Migration: PQ_MIGRATION.md
+      - Observability: OBSERVABILITY.md
   - Developer Guides:
       - Architecture Patterns: development/architecture_patterns.md
       - Codec & Protocol: development/codec_and_protocol.md

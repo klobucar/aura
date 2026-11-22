@@ -42,6 +42,8 @@ openmls_rust_crypto = { version = "0.6.0", features = ["draft-ietf-mls-pq-cipher
 hex = "0.4.3"
 openmls_basic_credential = { version = "0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 aura-identity = { path = "../aura-identity" }
+aura-telemetry = { path = "../aura-telemetry" }
+tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry", "std"] }
 uuid = { version = "1.23.0", features = ["v4"] }
 # default features pull in the `bin` CLI (clap 3 -> unmaintained `atty`); we only use DenoiseState
 nnnoiseless = { version = "0.5.2", default-features = false }
@@ -55,3 +57,6 @@ default = ["native-audio"]
 native-audio = ["dep:cpal"]
 webrtc-audio = ["dep:webrtc-audio-processing"]
 
+
+[dev-dependencies]
+aura-telemetry = { path = "../aura-telemetry", features = ["testing"] }

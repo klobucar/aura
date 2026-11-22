@@ -16,6 +16,7 @@ pub mod noise_suppression;
 pub mod opus;
 pub mod opus16;
 pub mod profile;
+pub mod telemetry_ffi;
 pub mod text_crypto;
 pub mod tts;
 pub mod uniffi_bindings;

@@ -297,11 +297,34 @@ public class QuicNetworkClient {
         }
     }
     
+    // MARK: - Telemetry
+
+    /// Run an app-level operation inside an opt-in telemetry span (aura-core
+    /// `TelemetrySpan`). The span carries only the operation and its outcome;
+    /// it does nothing unless telemetry was started.
+    private func traced(_ operation: ClientOperation, _ body: () async throws -> Void) async throws {
+        let span = TelemetrySpan(operation: operation)
+        do {
+            try await body()
+            span.finish(outcome: .ok)
+        } catch is CancellationError {
+            span.finish(outcome: .cancelled)
+            throw CancellationError()
+        } catch {
+            span.finish(outcome: .failed)
+            throw error
+        }
+    }
+
     // MARK: - Connection
     
     /// Connect to the Aura server via QUIC using NWConnectionGroup.
     /// This allows accepting server-initiated streams.
     public func connect(host: String, port: UInt16 = 8443) async throws {
+        try await traced(.connect) { try await self.performConnect(host: host, port: port) }
+    }
+
+    private func performConnect(host: String, port: UInt16) async throws {
         // Clear intentional disconnect flag for fresh connections
         isIntentionalDisconnect = false
         
@@ -550,6 +573,12 @@ public class QuicNetworkClient {
     ///     client → [0x03][u32 LE length][AuthRequest]   (built and signed by aura-core)
     ///     server → [0x04][u32 LE length][AuthResponse]  (success and failure alike)
     public func authenticate(identity: UserIdentity, serverPassword: String? = nil) async throws {
+        try await traced(.login) {
+            try await self.performAuthenticate(identity: identity, serverPassword: serverPassword)
+        }
+    }
+
+    private func performAuthenticate(identity: UserIdentity, serverPassword: String?) async throws {
         guard identity.hasIdentity else {
             throw QuicClientError.noIdentity
         }
@@ -2209,6 +2238,10 @@ public class QuicNetworkClient {
     // MARK: - Channel
     
     public func joinChannel(_ channelId: String) async throws {
+        try await traced(.joinChannel) { try await self.performJoinChannel(channelId) }
+    }
+
+    private func performJoinChannel(_ channelId: String) async throws {
         guard let stream = controlStream else {
             throw QuicClientError.notConnected
         }
