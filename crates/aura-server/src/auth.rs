@@ -23,6 +23,9 @@ pub enum AuthError {
     #[error("Username '{0}' is already taken")]
     UsernameTaken(String),
 
+    #[error("Invalid username: {0}")]
+    InvalidUsername(String),
+
     #[error("Invalid identity public key")]
     InvalidPublicKey,
     /// The account's Ed25519 key matches but its pinned ML-DSA key does not.
@@ -58,6 +61,7 @@ impl AuthError {
         match self {
             AuthError::InvalidPassword => "invalid_password",
             AuthError::UsernameTaken(_) => "username_taken",
+            AuthError::InvalidUsername(_) => "invalid_username",
             AuthError::InvalidPublicKey => "invalid_public_key",
             AuthError::IdentityKeyMismatch => "identity_key_mismatch",
             AuthError::InvalidSignature => "invalid_signature",
@@ -141,6 +145,54 @@ impl AuthService {
             .map_err(|_| AuthError::InvalidSignature)
     }
 
+    /// Reject display names that could spoof another user or a role.
+    ///
+    /// Printable ASCII only, which rules out homoglyphs (Cyrillic `а` for
+    /// Latin `a`) and invisible characters (zero-width space, control
+    /// characters). Reserved names are matched after dropping everything but
+    /// letters and digits, so `a.d.m.i.n` and `R O O T` are caught too.
+    fn validate_display_name(display_name: &str) -> Result<(), AuthError> {
+        if display_name.is_empty() || display_name.len() > 64 {
+            return Err(AuthError::InvalidUsername(
+                "must be 1 to 64 characters".to_string(),
+            ));
+        }
+
+        if display_name != display_name.trim() {
+            return Err(AuthError::InvalidUsername(
+                "cannot have leading or trailing whitespace".to_string(),
+            ));
+        }
+
+        if !display_name
+            .chars()
+            .all(|c| c.is_ascii() && !c.is_ascii_control())
+        {
+            return Err(AuthError::InvalidUsername(
+                "must contain only printable ASCII characters".to_string(),
+            ));
+        }
+
+        let canonical: String = display_name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+
+        if canonical.is_empty() {
+            return Err(AuthError::InvalidUsername(
+                "must contain at least one letter or digit".to_string(),
+            ));
+        }
+
+        const RESERVED_NAMES: &[&str] = &["admin", "system", "server", "aura", "root", "moderator"];
+        if RESERVED_NAMES.contains(&canonical.as_str()) {
+            return Err(AuthError::UsernameTaken(display_name.to_string()));
+        }
+
+        Ok(())
+    }
+
     /// Authenticate a user with TOFU identity verification.
     ///
     /// Flow:
@@ -190,15 +242,11 @@ impl AuthService {
                 existing_user
             }
             None => {
-                // New user - check if username is available
-                if self.db.find_user_by_name(display_name)?.is_some() {
-                    return Err(AuthError::UsernameTaken(display_name.to_string()));
-                }
+                // New user - the name must be valid and not reserved...
+                Self::validate_display_name(display_name)?;
 
-                // Check for reserved or spoofing names
-                let display_name_lower = display_name.to_lowercase();
-                let reserved_names = ["admin", "system", "server", "aura", "root", "moderator"];
-                if reserved_names.contains(&display_name_lower.as_str()) {
+                // ...and available
+                if self.db.find_user_by_name(display_name)?.is_some() {
                     return Err(AuthError::UsernameTaken(display_name.to_string()));
                 }
 
@@ -563,6 +611,55 @@ mod tests {
                 matches!(result, Err(AuthError::UsernameTaken(_))),
                 "Name {} should have been rejected as reserved",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn test_spoofing_usernames_rejected() {
+        let (auth, id) = create_test_auth_service();
+
+        let invalid_names = [
+            "\u{0430}dmin",  // Cyrillic 'а'
+            "\u{0410}lice",  // Cyrillic 'А'
+            "admin\u{200B}", // zero-width space
+            " admin",        // leading space
+            "admin\n",       // control character
+            "---",           // no letters or digits
+            "",              // empty
+            &"a".repeat(65), // too long
+        ];
+        for name in invalid_names {
+            let challenge = AuthService::generate_challenge();
+            let (pk, sig) = login(&id, name, &challenge);
+            let result = auth.authenticate(&pk, name, &sig, &challenge, None);
+            assert!(
+                matches!(result, Err(AuthError::InvalidUsername(_))),
+                "name {name:?} should have been rejected as invalid"
+            );
+        }
+
+        // Reserved names disguised with punctuation or spaces
+        for name in ["a.d.m.i.n", "_system_", "s-e-r-v-e-r", "R O O T"] {
+            let challenge = AuthService::generate_challenge();
+            let (pk, sig) = login(&id, name, &challenge);
+            let result = auth.authenticate(&pk, name, &sig, &challenge, None);
+            assert!(
+                matches!(result, Err(AuthError::UsernameTaken(_))),
+                "disguised reserved name {name:?} should have been rejected"
+            );
+        }
+
+        // Ordinary names with punctuation and digits are fine (a fresh
+        // identity each, since one identity registers one name)
+        for name in ["alice_1", "Bob Smith", "c.d-e"] {
+            let id = IdentitySecret::generate();
+            let challenge = AuthService::generate_challenge();
+            let (pk, sig) = login(&id, name, &challenge);
+            let result = auth.authenticate(&pk, name, &sig, &challenge, None);
+            assert!(
+                result.is_ok(),
+                "name {name:?} should be allowed: {result:?}"
             );
         }
     }

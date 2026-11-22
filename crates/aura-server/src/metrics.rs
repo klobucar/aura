@@ -20,6 +20,7 @@ const LOGIN_OUTCOMES: &[&str] = &[
     "ok",
     "invalid_password",
     "username_taken",
+    "invalid_username",
     "invalid_public_key",
     "identity_key_mismatch",
     "invalid_signature",
@@ -53,7 +54,7 @@ const MESSAGE_TYPES: &[&str] = &[
 /// Why a connection was dropped before it got going.
 const REJECT_REASONS: &[&str] = &["rate_limited", "handshake_failed", "other"];
 
-const MAX_LABELS: usize = 16;
+const MAX_LABELS: usize = 24;
 
 /// A counter split by one label whose values come from a fixed list.
 struct LabeledCounter {
