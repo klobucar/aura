@@ -1,6 +1,6 @@
 # Aura
 
-![Aura — Encrypted Voice & Chat. A winking anime mascot in a fox-ear headset plays at an arcade stick.](docs/images/social-banner.jpg)
+![Aura — Encrypted Voice & Chat. A winking anime mascot wears a gaming headset and plays at an arcade stick.](docs/images/social-banner.jpg)
 
 **Self-hosted voice and text chat for small groups.** Run a server for your friends and give everyone a room to drop into during a game or while hanging out. Voice and text are end-to-end encrypted.
 
