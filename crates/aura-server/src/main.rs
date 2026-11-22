@@ -107,6 +107,9 @@ async fn main() -> Result<()> {
     // Create server state with persistence
     let state = Arc::new(ServerState::new(Arc::clone(&db), config.clone()));
 
+    // Sweep expired replay-protection entries so the set stays bounded.
+    Arc::clone(&state.seen_messages).spawn_cleanup(state::SEEN_MESSAGE_SWEEP_INTERVAL);
+
     // Create initial channel for testing if none exist in DB
     if db.get_all_channels()?.is_empty() {
         let channel_id = format!("C_{}", uuid::Uuid::new_v4());

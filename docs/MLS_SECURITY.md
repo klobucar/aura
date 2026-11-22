@@ -156,21 +156,24 @@ The server tracks seen message IDs to prevent replay attacks:
 
 ```rust
 pub struct SeenMessages {
-    messages: DashMap<u32, Vec<SeenMessageEntry>>,
+    ttl: Duration,
+    // channel_id -> (message_id -> expires_at)
+    messages: DashMap<String, HashMap<String, Instant>>,
 }
 
 impl SeenMessages {
-    pub fn check_and_mark(&self, channel_id: u32, message_id: &str) -> bool {
-        // Returns false if message_id already seen
-        // Entries expire after 5 minutes
+    pub fn check_and_mark(&self, channel_id: String, message_id: &str) -> bool {
+        // Returns false if message_id was seen within the TTL
     }
 }
 ```
 
 **Attack mitigation:**
-- Duplicate `message_id` → rejected by server
-- Expired entries cleaned up automatically
-- TTL: 300 seconds (5 minutes)
+- Duplicate `message_id` within the TTL → rejected by server
+- TTL: 300 seconds (5 minutes); after that the ID is accepted again
+- A background task sweeps expired entries every 60 seconds
+  (`SEEN_MESSAGE_SWEEP_INTERVAL`), so memory holds at most one TTL's worth
+  of message IDs
 
 ---
 
@@ -257,7 +260,7 @@ enough for channels of about 390 members. See
 | MLS Core (incl. PQ suite, downgrade guards) | 19 | ✅ All pass |
 | DAVE Crypto (incl. known-answer vector) | 18 | ✅ All pass |
 | Text Crypto | 4 | ✅ All pass |
-| Replay Protection | 3 | ✅ All pass |
+| Replay Protection | 5 | ✅ All pass |
 | Server State | 33 | ✅ All pass |
 
 ---
