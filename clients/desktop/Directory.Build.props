@@ -1,0 +1,24 @@
+<Project>
+  <!--
+    The desktop client ships only to Windows, Linux and macOS: the three
+    platforms System.Net.Quic supports. Declaring that once at the assembly
+    level tells the platform-compatibility analyzer (CA1416) that the QUIC
+    calls in AuraNetworkClient are reachable only there. Whether QUIC actually
+    works on a given machine is a runtime question that QuicSupport answers
+    before connecting.
+
+    Applies to both Aura.Desktop and Tests/Aura.Desktop.Tests, so the tests
+    can call into the app assembly without tripping the same warning.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>windows</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>linux</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.Versioning.SupportedOSPlatformAttribute">
+      <_Parameter1>macos</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+</Project>
