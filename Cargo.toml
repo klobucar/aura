@@ -2,6 +2,7 @@
 members = [
     "crates/aura-protocol",
     "crates/aura-server",
+    "crates/aura-identity",
     "crates/aura-core",
     "crates/opus16-sys",
 ]

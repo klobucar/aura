@@ -1,0 +1,19 @@
+[package]
+name = "aura-identity"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Aura's hybrid post-quantum identity: Ed25519 + ML-DSA-65 composite signatures"
+
+[dependencies]
+ed25519-dalek = "3.0.0"
+# ML-DSA (FIPS 204). Already in the graph through OpenMLS's RustCrypto
+# provider; `zeroize` wipes the signing seed on drop.
+ml-dsa = { version = "0.1.2", default-features = false, features = ["alloc", "zeroize"] }
+rand = "0.10.1"
+sha2 = "0.11.1"
+thiserror = "2.0.18"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+hex = "0.4.3"
