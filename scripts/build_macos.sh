@@ -190,8 +190,13 @@ install_name_tool -id "@rpath/libaura_core.dylib" "$OUTPUT_DIR/libaura_core.dyli
 echo ""
 echo "🔧 Generating UniFFI bindings..."
 
-# Use the first built dylib (or the fat one) for binding generation
-cargo run -p aura-core --bin uniffi-bindgen generate \
+# Use the first built dylib (or the fat one) for binding generation.
+# Build uniffi-bindgen with the same profile and an explicit host target so
+# cargo reuses the artifacts from the library build above. A bare
+# `cargo run` builds into a different directory and compiles every
+# dependency again.
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+cargo run -p aura-core --target "$HOST_TARGET" $CARGO_FLAGS --bin uniffi-bindgen generate \
     --library "$OUTPUT_DIR/libaura_core.dylib" \
     --language swift \
     --out-dir "$OUTPUT_DIR"
