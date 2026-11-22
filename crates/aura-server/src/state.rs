@@ -118,7 +118,8 @@ pub enum ServiceMessage {
         fallback_channel_id: String,
     },
     /// Ask the group founder to issue an empty commit, advancing the epoch for
-    /// forward secrecy. Sent when a text group crosses its ratchet threshold.
+    /// forward secrecy. Sent when a text group crosses its ratchet threshold,
+    /// or when a voice group has been on one epoch for 15 minutes.
     MlsRatchetRequest {
         channel_id: String,
         is_voice: bool,
@@ -156,12 +157,16 @@ pub struct PendingMlsJoin {
 #[derive(Debug)]
 pub struct VoiceGroup {
     pub id: String,
+    pub channel_id: String,
     pub current_epoch: u64,
     pub members: DashSet<u32>, // Session IDs
     /// Session ID of the group founder (first joiner who created the MLS group)
     pub founder_session_id: Option<u32>,
     /// Pending key packages from joiners waiting to be added
     pub pending_joins: Vec<PendingMlsJoin>,
+    /// When the epoch last advanced by a ratchet commit (for the periodic
+    /// forward-secrecy timer)
+    pub last_ratchet: Instant,
 }
 
 /// Text MLS Group - HIGH CHURN with batched ratcheting
@@ -193,6 +198,12 @@ impl std::fmt::Debug for TextGroup {
 /// Constants for batched ratcheting
 const TEXT_RATCHET_MESSAGE_THRESHOLD: u32 = 50;
 const TEXT_RATCHET_TIME_THRESHOLD_SECS: u64 = 300; // 5 minutes
+/// Voice groups rarely change membership, so without a timer they could keep
+/// one epoch (and one set of media keys) for hours. Ask for a ratchet when a
+/// group has been on the same epoch this long.
+const VOICE_RATCHET_TIME_THRESHOLD_SECS: u64 = 900; // 15 minutes
+/// How often the server checks voice groups against that threshold.
+pub const VOICE_RATCHET_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// TTL for seen message IDs (replay protection)
 const SEEN_MESSAGE_TTL_SECS: u64 = 300; // 5 minutes
@@ -473,10 +484,12 @@ impl ServerState {
             .or_insert_with(|| {
                 Arc::new(RwLock::new(VoiceGroup {
                     id: voice_group_id,
+                    channel_id: channel_id.clone(),
                     current_epoch: 0,
                     members: DashSet::new(),
                     founder_session_id: None,
                     pending_joins: Vec::new(),
+                    last_ratchet: Instant::now(),
                 }))
             });
 
@@ -801,6 +814,55 @@ impl ServerState {
         }
     }
 
+    /// Ask the founder of each voice group that has been on the same epoch
+    /// for `VOICE_RATCHET_TIME_THRESHOLD_SECS` to issue an empty commit.
+    /// Called every `VOICE_RATCHET_CHECK_INTERVAL` from `main`.
+    pub async fn request_due_voice_ratchets(&self) {
+        self.request_due_voice_ratchets_after(Duration::from_secs(
+            VOICE_RATCHET_TIME_THRESHOLD_SECS,
+        ))
+        .await;
+    }
+
+    /// [`request_due_voice_ratchets`](Self::request_due_voice_ratchets) with
+    /// the threshold as a parameter, so tests don't wait 15 minutes.
+    pub async fn request_due_voice_ratchets_after(&self, threshold: Duration) {
+        let group_locks: Vec<Arc<RwLock<VoiceGroup>>> = self
+            .voice_groups
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
+
+        for group_lock in group_locks {
+            let due = {
+                let mut group = group_lock.write().await;
+                if group.members.is_empty() || group.last_ratchet.elapsed() < threshold {
+                    None
+                } else if let Some(founder_session_id) = group.founder_session_id {
+                    // Reset up front so a slow or disconnected founder isn't
+                    // asked again on every check.
+                    group.last_ratchet = Instant::now();
+                    Some((founder_session_id, group.channel_id.clone()))
+                } else {
+                    None
+                }
+            };
+
+            if let Some((founder_session_id, channel_id)) = due {
+                if let Some(founder) = self.sessions.get(&founder_session_id) {
+                    info!(
+                        "Asking founder {} to ratchet voice group {}",
+                        founder_session_id, channel_id
+                    );
+                    let _ = founder.sender.send(ServiceMessage::MlsRatchetRequest {
+                        channel_id,
+                        is_voice: true,
+                    });
+                }
+            }
+        }
+    }
+
     /// Distribute a ratchet (empty) commit to every group member but the
     /// committer, and advance the server's epoch counter.
     ///
@@ -820,6 +882,7 @@ impl ServerState {
                 Some(group_lock) => {
                     let mut group = group_lock.write().await;
                     group.current_epoch += 1;
+                    group.last_ratchet = Instant::now();
                     group.members.iter().map(|id| *id).collect()
                 }
                 None => return,
@@ -830,6 +893,7 @@ impl ServerState {
                 Some(group_lock) => {
                     let mut group = group_lock.write().await;
                     group.current_epoch += 1;
+                    group.last_ratchet = Instant::now();
                     group.members.iter().map(|id| *id).collect()
                 }
                 None => return,
@@ -982,10 +1046,12 @@ impl ServerState {
                 );
                 Arc::new(RwLock::new(VoiceGroup {
                     id: group_id.clone(),
+                    channel_id: channel_id.clone(),
                     current_epoch: 0,
                     members: DashSet::new(),
                     founder_session_id: None,
                     pending_joins: Vec::new(),
+                    last_ratchet: Instant::now(),
                 }))
             })
             .clone();
@@ -2133,5 +2199,53 @@ mod tests {
         } else {
             panic!("Should have received MlsCreateGroup for text!");
         }
+    }
+
+    #[tokio::test]
+    async fn voice_ratchet_timer_asks_the_founder() {
+        let state = create_test_state();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let addr = "127.0.0.1:9999".parse().unwrap();
+        let session_id = state.register_session("uuid-voice-ratchet".into(), addr, tx);
+
+        let channel_id = "voice-ratchet-ch".to_string();
+        state.create_channel(channel_id.clone());
+        state
+            .handle_voice_mls_join(
+                channel_id.clone(),
+                session_id,
+                "uuid-voice-ratchet".into(),
+                vec![1, 2, 3],
+                &state.sessions.get(&session_id).unwrap().sender,
+            )
+            .await;
+
+        // The first joiner is told to create the group, and becomes founder.
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServiceMessage::MlsCreateGroup { is_voice: true, .. })
+        ));
+
+        // Not due yet.
+        state
+            .request_due_voice_ratchets_after(Duration::from_secs(900))
+            .await;
+        assert!(rx.try_recv().is_err());
+
+        // Due: the founder is asked once...
+        state.request_due_voice_ratchets_after(Duration::ZERO).await;
+        match rx.recv().await {
+            Some(ServiceMessage::MlsRatchetRequest {
+                channel_id: c,
+                is_voice: true,
+            }) => assert_eq!(c, channel_id),
+            other => panic!("expected a voice MlsRatchetRequest, got {other:?}"),
+        }
+
+        // ...and the clock restarts, so the next check doesn't ask again.
+        state
+            .request_due_voice_ratchets_after(Duration::from_secs(900))
+            .await;
+        assert!(rx.try_recv().is_err());
     }
 }

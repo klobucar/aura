@@ -130,6 +130,18 @@ async fn main() -> Result<()> {
     // Sweep expired replay-protection entries so the set stays bounded.
     Arc::clone(&state.seen_messages).spawn_cleanup(state::SEEN_MESSAGE_SWEEP_INTERVAL);
 
+    // Forward secrecy for long-lived voice groups: ask founders to ratchet
+    // groups that have been on one epoch too long.
+    let ratchet_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(state::VOICE_RATCHET_CHECK_INTERVAL);
+        interval.tick().await; // the first tick is immediate; skip it
+        loop {
+            interval.tick().await;
+            ratchet_state.request_due_voice_ratchets().await;
+        }
+    });
+
     // Prometheus metrics (aggregate counts only), when AURA_METRICS_ADDR is set.
     if let Some(addr) = config.server.metrics_address {
         let metrics_state = Arc::clone(&state);
