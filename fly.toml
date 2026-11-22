@@ -14,7 +14,10 @@ primary_region = 'ord'
   AURA_ACME_CONTACT = '<PLACEHOLDER>'
   AURA_ACME_BIND_PORT = '8080'
   AURA_ACME_CACHE_PATH = '/data/acme'
-  AURA_BIND_ADDRESS = '0.0.0.0:8443'
+  # Fly delivers UDP only to fly-global-services (needs a dedicated IPv4);
+  # TCP listeners (ACME HTTP-01, health check) must use 0.0.0.0 instead.
+  AURA_BIND_ADDRESS = 'fly-global-services:8443'
+  AURA_HTTP_BIND_IP = '0.0.0.0'
   AURA_DATABASE_PATH = '/data/aura.db'
   # Unset = Let's Encrypt production. Uncomment to test against staging:
   # AURA_ACME_DIRECTORY_URL = 'https://acme-staging-v02.api.letsencrypt.org/directory'

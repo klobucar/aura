@@ -2,7 +2,9 @@
 //!
 //! Loads configuration from `server.toml` with sensible defaults.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 /// Root configuration structure for the Aura server.
@@ -16,7 +18,8 @@ pub struct Config {
 /// Server network and general settings.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
-    /// Address to bind the server to (e.g., "0.0.0.0:8443")
+    /// UDP address for the QUIC listener (e.g. "0.0.0.0:8443"). The host may
+    /// be a name: Fly.io requires UDP to bind "fly-global-services:<port>".
     pub bind_address: String,
 
     /// Maximum number of concurrent connections
@@ -58,6 +61,12 @@ pub struct ServerConfig {
     /// Useful for running as non-root behind a proxy (e.g., Fly.io).
     #[serde(default)]
     pub acme_bind_port: Option<u16>,
+
+    /// IP for the TCP listener on `acme_bind_port` (ACME HTTP-01 challenges
+    /// and the health check). Defaults to the IP of `bind_address`. Fly.io
+    /// needs "0.0.0.0" here, because TCP must not bind `fly-global-services`.
+    #[serde(default)]
+    pub http_bind_ip: Option<IpAddr>,
 
     /// Maximum new handshake attempts permitted per source IP per minute.
     #[serde(default = "default_handshake_per_minute")]
@@ -117,6 +126,7 @@ impl Default for Config {
                 acme_cache_path: Some(PathBuf::from("data/acme")),
                 acme_directory_url: None,
                 acme_bind_port: Some(443),
+                http_bind_ip: None,
                 handshake_per_minute: default_handshake_per_minute(),
                 handshake_burst: default_handshake_burst(),
             },
@@ -172,6 +182,14 @@ impl Config {
                 config.server.acme_bind_port = Some(port);
             }
         }
+        if let Ok(ip) = std::env::var("AURA_HTTP_BIND_IP") {
+            // Fail loudly: a silently ignored value would leave TCP on the
+            // QUIC bind IP, which on Fly.io is not a valid TCP address.
+            config.server.http_bind_ip = Some(
+                ip.parse()
+                    .with_context(|| format!("AURA_HTTP_BIND_IP is not an IP address: {ip:?}"))?,
+            );
+        }
         if let Ok(v) = std::env::var("AURA_HANDSHAKE_PER_MINUTE") {
             if let Ok(n) = v.parse() {
                 config.server.handshake_per_minute = n;
@@ -199,6 +217,17 @@ impl Config {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Resolve `server.bind_address`, whose host may be a name rather than
+    /// an IP literal (e.g. "fly-global-services:8443").
+    pub async fn resolve_bind_address(&self) -> anyhow::Result<SocketAddr> {
+        let addr = &self.server.bind_address;
+        tokio::net::lookup_host(addr)
+            .await
+            .with_context(|| format!("cannot resolve bind address {addr:?}"))?
+            .next()
+            .with_context(|| format!("bind address {addr:?} resolved to no addresses"))
     }
 
     /// Whether a server password is required to connect.
@@ -265,5 +294,45 @@ mode = "required"
         assert_eq!(config.server.max_connections, 500);
         assert_eq!(config.server.password, Some("test-password".to_string()));
         assert_eq!(config.verification.mode, VerificationMode::Required);
+        assert!(config.server.http_bind_ip.is_none());
+    }
+
+    #[test]
+    fn test_parse_http_bind_ip() {
+        let toml_str = r#"
+[server]
+bind_address = "fly-global-services:8443"
+http_bind_ip = "0.0.0.0"
+max_connections = 500
+log_level = "info"
+
+[database]
+path = "test.db"
+
+[verification]
+mode = "optional"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.http_bind_ip, Some(IpAddr::from([0, 0, 0, 0])));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_bind_address() {
+        let mut config = Config::default();
+
+        config.server.bind_address = "127.0.0.1:9000".to_string();
+        assert_eq!(
+            config.resolve_bind_address().await.unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], 9000))
+        );
+
+        // Hostnames resolve, as Fly.io's fly-global-services must.
+        config.server.bind_address = "localhost:9000".to_string();
+        let addr = config.resolve_bind_address().await.unwrap();
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), 9000);
+
+        config.server.bind_address = "missing-port".to_string();
+        assert!(config.resolve_bind_address().await.is_err());
     }
 }
