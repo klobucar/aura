@@ -1086,13 +1086,17 @@ pub struct MlsWrapper {
 
 #[uniffi::export]
 impl MlsWrapper {
-    /// Create a new MLS client with the given identity name
+    /// Create the MLS client for `user_id`, the account's server-assigned id
+    /// (`user_uuid` from the login response).
     ///
-    /// # Arguments
-    /// * `identity_name` - User's UUID or unique identifier
+    /// It signs with the MLS key derived from `identity_secret` (64 bytes; see
+    /// `generate_identity_secret`), the same key on every connection, and
+    /// presents a credential in which that identity certifies the key.
     #[uniffi::constructor]
-    pub fn new(identity_name: String) -> Result<Self, MlsError> {
-        let client = MlsClient::new(&identity_name)?;
+    pub fn new(user_id: String, identity_secret: Vec<u8>) -> Result<Self, MlsError> {
+        let identity = aura_identity::IdentitySecret::from_bytes(&identity_secret)
+            .map_err(|e| MlsError::OperationFailed(format!("identity secret: {e}")))?;
+        let client = MlsClient::new(&user_id, &identity)?;
         Ok(Self {
             inner: Mutex::new(client),
         })
@@ -1317,7 +1321,7 @@ impl MlsWrapper {
             .into_iter()
             .map(|m| MlsGroupMemberRecord {
                 identity: m.identity,
-                signature_key: m.signature_key,
+                identity_key: m.identity_key,
                 is_self: m.is_self,
             })
             .collect())
@@ -1413,7 +1417,7 @@ pub fn encode_update_channel(
 /// Verification error surfaced to the clients.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum VerificationError {
-    #[error("public key must be 32 bytes, got {got}")]
+    #[error("identity public key must be 1984 bytes, got {got}")]
     BadPublicKeyLength { got: u32 },
     #[error("user identifier must not be empty")]
     EmptyIdentifier,
@@ -1437,10 +1441,12 @@ impl From<crate::verification::VerificationError> for VerificationError {
 /// One member of an MLS group, with the key material MLS itself vouches for.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MlsGroupMemberRecord {
-    /// Credential identity — the user's UUID.
+    /// The member's user id (`U_…`), from their verified credential.
     pub identity: String,
-    /// Ed25519 signature public key (32 bytes).
-    pub signature_key: Vec<u8>,
+    /// The member's long-term identity public key (hybrid Ed25519 +
+    /// ML-DSA-65, 1,984 bytes), verified to have certified the MLS key they
+    /// sign with. Stable across connections; trust decisions key on it.
+    pub identity_key: Vec<u8>,
     /// True for the local user's own leaf.
     pub is_self: bool,
 }

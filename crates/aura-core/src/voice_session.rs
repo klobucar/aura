@@ -23,8 +23,8 @@ pub struct VoiceSession {
     group_id: RwLock<Option<Vec<u8>>>,
     /// Our session ID (assigned by server)
     session_id: u32,
-    /// Our identity name
-    _identity: String,
+    /// Our user id
+    _user_id: String,
 }
 
 /// Voice session errors
@@ -47,10 +47,15 @@ impl VoiceSession {
     /// Create a new voice session
     ///
     /// # Arguments
-    /// * `identity` - User identity string (e.g., display name)
+    /// * `user_id` - The user's server-assigned UUID
+    /// * `identity` - The user's long-term identity, which certifies their MLS key
     /// * `session_id` - Session ID assigned by server
-    pub fn new(identity: &str, session_id: u32) -> Result<Self, VoiceSessionError> {
-        let mls = MlsClient::new(identity)?;
+    pub fn new(
+        user_id: &str,
+        identity: &aura_identity::IdentitySecret,
+        session_id: u32,
+    ) -> Result<Self, VoiceSessionError> {
+        let mls = MlsClient::new(user_id, identity)?;
 
         // Initialize sender with a placeholder key (will be set on join)
         let placeholder_key = [0u8; 32];
@@ -63,7 +68,7 @@ impl VoiceSession {
             receiver,
             group_id: RwLock::new(None),
             session_id,
-            _identity: identity.to_string(),
+            _user_id: user_id.to_string(),
         })
     }
 
@@ -318,7 +323,8 @@ mod tests {
 
     #[test]
     fn test_create_voice_session() {
-        let session = VoiceSession::new("alice", 1).expect("Create session");
+        let session = VoiceSession::new("alice", &aura_identity::IdentitySecret::generate(), 1)
+            .expect("Create session");
         assert_eq!(session.session_id(), 1);
         assert!(!session.is_in_channel());
     }
@@ -326,7 +332,8 @@ mod tests {
     #[test]
     fn test_create_and_join_channel() {
         // Alice creates channel
-        let alice = VoiceSession::new("alice", 1).expect("Create alice");
+        let alice = VoiceSession::new("alice", &aura_identity::IdentitySecret::generate(), 1)
+            .expect("Create alice");
         let _alice_kp = alice
             .create_channel(b"test-channel")
             .expect("Create channel");
@@ -334,7 +341,8 @@ mod tests {
         assert_eq!(alice.current_epoch(), Some(0));
 
         // Bob prepares to join
-        let bob = VoiceSession::new("bob", 2).expect("Create bob");
+        let bob = VoiceSession::new("bob", &aura_identity::IdentitySecret::generate(), 2)
+            .expect("Create bob");
         let bob_kp = bob.get_key_package().expect("Get bob KP");
 
         // Alice adds Bob
@@ -354,10 +362,12 @@ mod tests {
     #[test]
     fn test_audio_roundtrip() {
         // Setup: Alice and Bob in same channel
-        let alice = VoiceSession::new("alice", 1).expect("Create alice");
+        let alice = VoiceSession::new("alice", &aura_identity::IdentitySecret::generate(), 1)
+            .expect("Create alice");
         alice.create_channel(b"audio-test").expect("Create channel");
 
-        let bob = VoiceSession::new("bob", 2).expect("Create bob");
+        let bob = VoiceSession::new("bob", &aura_identity::IdentitySecret::generate(), 2)
+            .expect("Create bob");
         let bob_kp = bob.get_key_package().expect("Get bob KP");
         let (_, welcome) = alice.add_member(&bob_kp).expect("Add bob");
         bob.join_channel(&welcome).expect("Bob join");
@@ -385,14 +395,16 @@ mod tests {
     #[test]
     fn test_epoch_key_rotation() {
         // Setup: Alice creates channel
-        let alice = VoiceSession::new("alice", 1).expect("Create alice");
+        let alice = VoiceSession::new("alice", &aura_identity::IdentitySecret::generate(), 1)
+            .expect("Create alice");
         alice
             .create_channel(b"rotation-test")
             .expect("Create channel");
         assert_eq!(alice.current_epoch(), Some(0));
 
         // Add Bob - epoch advances to 1
-        let bob = VoiceSession::new("bob", 2).expect("Create bob");
+        let bob = VoiceSession::new("bob", &aura_identity::IdentitySecret::generate(), 2)
+            .expect("Create bob");
         let bob_kp = bob.get_key_package().expect("Get bob KP");
         let (_commit1, welcome1) = alice.add_member(&bob_kp).expect("Add bob");
         bob.join_channel(&welcome1).expect("Bob join");
@@ -402,7 +414,8 @@ mod tests {
         assert_eq!(bob.current_epoch(), Some(1));
 
         // Add Charlie - epoch advances to 2
-        let charlie = VoiceSession::new("charlie", 3).expect("Create charlie");
+        let charlie = VoiceSession::new("charlie", &aura_identity::IdentitySecret::generate(), 3)
+            .expect("Create charlie");
         let charlie_kp = charlie.get_key_package().expect("Get charlie KP");
         let (commit2, welcome2) = alice.add_member(&charlie_kp).expect("Add charlie");
         charlie.join_channel(&welcome2).expect("Charlie join");

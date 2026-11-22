@@ -25,7 +25,8 @@ struct Peer {
 impl Peer {
     fn new(name: &str, session_id: u32) -> Self {
         Self {
-            mls: MlsClient::new(name).expect("create mls client"),
+            mls: MlsClient::new(name, &aura_identity::IdentitySecret::generate())
+                .expect("create mls client"),
             session_id,
         }
     }

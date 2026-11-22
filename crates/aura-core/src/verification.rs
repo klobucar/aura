@@ -2,9 +2,11 @@
 //!
 //! Two users compare a short, human-readable value out of band (read it aloud,
 //! or over a channel an attacker on this one cannot reach) to prove neither
-//! side is being impersonated. Each MLS group member holds an Ed25519 signature
-//! keypair whose public half every other member learns from the group itself,
-//! so this needs nothing new on the wire.
+//! side is being impersonated. Each MLS group member carries their long-term
+//! identity public key (hybrid Ed25519 + ML-DSA-65, 1,984 bytes) in their MLS
+//! credential, certifying the key they sign MLS messages with. Every other
+//! member learns it from the group itself, so this needs nothing new on the
+//! wire, and it is the same on every connection.
 //!
 //! Two distinct values live here, and they answer different questions:
 //!
@@ -16,9 +18,10 @@
 //!
 //! The pairwise construction follows `docs/protocol.md` § Verification
 //! Fingerprint. Aura deviates from stock DAVE in three ways, each recorded in
-//! `docs/05_dave_protocol_deviations.md`: Ed25519 public keys rather than
-//! P-256, UUID strings rather than u64 snowflakes, and BIP-39 words rather
-//! than the 45-digit displayable code.
+//! `docs/05_dave_protocol_deviations.md`: hybrid Ed25519 + ML-DSA-65 identity
+//! keys rather than P-256 (with fingerprint version 1 to mark it), UUID
+//! strings rather than u64 snowflakes, and BIP-39 words rather than the
+//! 45-digit displayable code.
 //!
 //! **Cost:** [`pairwise_fingerprint`] runs scrypt at N=16384, r=8, p=2 — about
 //! 32 MiB and ~100 ms. That memory-hardness is the point: it prices up an
@@ -44,9 +47,11 @@ pub const SAFETY_WORD_COUNT: usize = 6;
 /// Bits consumed per word. 2^11 = 2048 = the wordlist length.
 const BITS_PER_WORD: usize = 11;
 
-/// Fingerprint version, mixed in so a future format change cannot be
-/// confused with this one. `docs/protocol.md` fixes it at 16 bits of zero.
-const FINGERPRINT_VERSION: [u8; 2] = [0x00, 0x00];
+/// Fingerprint version, mixed in so a format change cannot be confused with
+/// another. `docs/protocol.md` uses 16 bits of zero for its P-256 keys; Aura's
+/// version 1 marks hybrid Ed25519 + ML-DSA-65 identity keys, so no value can
+/// match one computed over an older Ed25519-only key.
+const FINGERPRINT_VERSION: [u8; 2] = [0x00, 0x01];
 
 /// Fixed scrypt salt from `docs/protocol.md` § Verification Fingerprint.
 ///
@@ -70,8 +75,9 @@ pub const PAIRWISE_FINGERPRINT_LEN: usize = 64;
 /// Length of an identity (per-key) fingerprint, in bytes.
 pub const KEY_FINGERPRINT_LEN: usize = 32;
 
-/// Ed25519 public keys are 32 bytes. Anything else is not a key we can verify.
-const ED25519_PUBLIC_KEY_LEN: usize = 32;
+/// Identity public keys are 1,984 bytes (ML-DSA-65 key, then Ed25519 key).
+/// Anything else is not a key we can verify.
+pub const IDENTITY_PUBLIC_KEY_LEN: usize = aura_identity::PUBLIC_KEY_LEN;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum VerificationError {
@@ -168,9 +174,9 @@ fn identity_buffer(public_key: &[u8], id: &str) -> Vec<u8> {
 }
 
 fn check_public_key(public_key: &[u8]) -> Result<(), VerificationError> {
-    if public_key.len() != ED25519_PUBLIC_KEY_LEN {
+    if public_key.len() != IDENTITY_PUBLIC_KEY_LEN {
         return Err(VerificationError::BadPublicKeyLength {
-            expected: ED25519_PUBLIC_KEY_LEN,
+            expected: IDENTITY_PUBLIC_KEY_LEN,
             got: public_key.len(),
         });
     }
@@ -245,8 +251,8 @@ pub fn format_fingerprint_short(fingerprint: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    const KEY_A: [u8; 32] = [0x11; 32];
-    const KEY_B: [u8; 32] = [0x22; 32];
+    const KEY_A: [u8; IDENTITY_PUBLIC_KEY_LEN] = [0x11; IDENTITY_PUBLIC_KEY_LEN];
+    const KEY_B: [u8; IDENTITY_PUBLIC_KEY_LEN] = [0x22; IDENTITY_PUBLIC_KEY_LEN];
     const ID_A: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
     const ID_B: &str = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
@@ -295,7 +301,7 @@ mod tests {
         let baseline = pairwise_fingerprint(&KEY_A, ID_A, &KEY_B, ID_B).unwrap();
 
         // An impostor with a fresh key but the same display identity.
-        let impostor_key = [0x33u8; 32];
+        let impostor_key = [0x33u8; IDENTITY_PUBLIC_KEY_LEN];
         let impostor = pairwise_fingerprint(&KEY_A, ID_A, &impostor_key, ID_B).unwrap();
 
         assert_ne!(baseline, impostor);
@@ -352,14 +358,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_keys_that_are_not_ed25519_sized() {
+    fn rejects_keys_that_are_not_identity_sized() {
         assert_eq!(
             key_fingerprint(&[0u8; 31]),
             Err(VerificationError::BadPublicKeyLength {
-                expected: 32,
+                expected: IDENTITY_PUBLIC_KEY_LEN,
                 got: 31
             })
         );
+        // A bare 32-byte Ed25519 key from before the hybrid identity.
+        assert!(key_fingerprint(&[0u8; 32]).is_err());
         assert!(pairwise_fingerprint(&[0u8; 33], ID_A, &KEY_B, ID_B).is_err());
         assert!(pairwise_fingerprint(&KEY_A, ID_A, &[], ID_B).is_err());
     }
@@ -406,24 +414,20 @@ mod tests {
         assert_eq!(format_fingerprint_short(&[0xab, 0xcd]), "abcd");
     }
 
-    /// Known answers produced with sha2 0.10 before the 0.11 upgrade. If these
-    /// change, every user's safety words change and verified contacts would
-    /// see a mismatch.
+    /// Known answers for fingerprint version 1 (hybrid identity keys). If
+    /// these change, every user's safety words change and verified contacts
+    /// would see a mismatch.
     #[test]
     fn fingerprints_match_known_answers() {
         let fp = pairwise_fingerprint(&KEY_A, ID_A, &KEY_B, ID_B).unwrap();
-        assert_eq!(
-            hex::encode(fp),
-            "4af55baa1458b8fd0e4f1449663a0b47b97065cdb99a5a033b882231f82a1510\
-             6b5f0c646659e7b4a22874083ab4a6c556fee48489928ac61b95e35269420bda"
-        );
+        assert_eq!(hex::encode(fp), "cdf39797e0e42d56592668c4b5fc77292c8f7b8093f5d435cdf9e4e2157b89a1cb642d7db793ec54d261745f3f411ca98fe44a212106c1c5303577cb4af8a814");
         assert_eq!(
             safety_words(&fp),
-            ["enough", "print", "tunnel", "chunk", "merit", "leader"]
+            ["social", "original", "tourist", "scrub", "drift", "private"]
         );
         assert_eq!(
-            hex::encode(key_fingerprint(&[0x07u8; 32]).unwrap()),
-            "f9cd9e38ed251040a9b361a01bf5bc228f98b161e45d204702c223c561d7456d"
+            hex::encode(key_fingerprint(&[0x07u8; IDENTITY_PUBLIC_KEY_LEN]).unwrap()),
+            "3ae357e78d615607205a53b6a32c8cde3d5cb86ed39daade506e3b13dfe69519"
         );
     }
 }
