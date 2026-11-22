@@ -23,9 +23,9 @@ env:
   # Keep this in sync with .github/workflows/ci.yml and vendor/opus/autogen.sh.
   OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
   # Must match the `uniffi` version in crates/aura-core/Cargo.toml (the
-  # "+v0.31.x" suffix), or generated aura_core.cs fails UniFFI's checksum
+  # "+v0.32.x" suffix), or generated aura_core.cs fails UniFFI's checksum
   # validation at runtime.
-  UNIFFI_BINDGEN_CS_TAG: v0.11.1+v0.31.0
+  UNIFFI_BINDGEN_CS_TAG: v0.12.0+v0.32.0
 
 permissions: {}
 

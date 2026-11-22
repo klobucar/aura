@@ -52,7 +52,7 @@ env:
   OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
   # Match desktop.yml so generated aura_core.cs lines up with aura-core's
   # UniFFI runtime version.
-  UNIFFI_BINDGEN_CS_TAG: v0.11.1+v0.31.0
+  UNIFFI_BINDGEN_CS_TAG: v0.12.0+v0.32.0
 
 permissions: {}
 

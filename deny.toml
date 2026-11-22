@@ -34,9 +34,9 @@ ignore = [
     # Re-check on every openmls bump.
     { id = "RUSTSEC-2026-0173", reason = "unmaintained, build-time only (proc macro) via openmls_rust_crypto 0.6.0, the latest release" },
     # basic-toml is unmaintained. Only the askama_derive proc macro uses it,
-    # via uniffi_bindgen 0.31, so it runs at build time only.
+    # via uniffi_bindgen 0.32 (askama 0.16), so it runs at build time only.
     # Re-check on the next uniffi bump.
-    { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time only (proc macro) via uniffi_bindgen 0.31" },
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained, build-time only (proc macro) via uniffi_bindgen 0.32" },
     # chrono is unmaintained, with no known vulnerability. rustls-acme 0.15.4
     # (the latest release) uses it for certificate renewal timing in
     # aura-server. Re-check on every rustls-acme bump.
