@@ -15,6 +15,11 @@ on:
       - 'crates/opus16-sys/**'
       - 'scripts/build_macos.sh'
       - '.github/workflows/macos.yml'
+  # GitHub evicts caches nobody has used for 7 days. When main goes quiet,
+  # every PR then starts from a cold Rust build. A weekly run on main keeps
+  # the cache warm; PRs can restore caches saved on main, not on other PRs.
+  schedule:
+    - cron: '23 7 * * 1'
 
 # macOS minutes are 10x; cancel obsolete PR runs aggressively.
 concurrency:
@@ -74,8 +79,12 @@ jobs:
       - name: build Rust core + Swift bindings
         # scripts/build_macos.sh runs cargo build for the host arch and
         # generates aura_coreFFI.h, aura_core.swift, and the dylib in
-        # clients/macos/Aura/Generated/. Same script Xcode runs locally.
-        run: ./scripts/build_macos.sh release
+        # clients/macos/Aura/Generated/. Xcode's Run Script phase runs the
+        # same script again during `xcodebuild test`, but the generated
+        # Swift must already exist when Xcode plans the build. Use the
+        # Debug profile that `xcodebuild test` uses, so Xcode's run finds
+        # everything up to date instead of recompiling.
+        run: ./scripts/build_macos.sh debug
       - name: xcodebuild test
         # -only-testing:AuraTests excludes the AuraUITests target — XCUITest
         # needs a windowing environment and crashes early on headless CI.
