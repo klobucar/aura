@@ -15,9 +15,10 @@ Aura implements **MLS (Messaging Layer Security)** per RFC 9420 for end-to-end e
 ### Key Components
 
 1. **MLS Client** (`aura-core/src/mls.rs`)
-   - OpenMLS 0.6 implementation
-   - Ciphersuite: `MLS_128_DHKEMP256_AES128GCM_SHA256_P256`
+   - OpenMLS 0.9 with the RustCrypto provider
+   - Ciphersuite: `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` (hybrid post-quantum; see [PQ Migration](PQ_MIGRATION.md))
    - Manages group state, key packages, commits, and welcomes
+   - Accepts only that ciphersuite: other-suite KeyPackages and Welcomes are rejected (`MlsError::CiphersuiteMismatch`)
 
 2. **Server Delivery Service** (`aura-server/src/state.rs`)
    - Routes MLS signaling messages (key packages, commits, welcomes)
@@ -212,17 +213,29 @@ impl SeenMessages {
 ### MLS Configuration
 
 ```rust
-// Ciphersuite
-MLS_128_DHKEMP256_AES128GCM_SHA256_P256
+// Ciphersuite (draft-ietf-mls-pq-ciphersuites, provisional code point 0x004E)
+MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519
 
 // Key schedule
-- HPKE: DHKEM(P-256, HKDF-SHA256)
-- AEAD: AES-128-GCM
-- Hash: SHA-256
+- HPKE KEM: MLKEM768-X25519 (X-Wing): hybrid X25519 + ML-KEM-768
+- AEAD: AES-256-GCM
+- Hash/KDF: SHA-384
+- Signatures: Ed25519 (classical; hybrid ML-DSA-65 planned)
 
 // Extensions
-- None (minimal MLS for now)
+- Ratchet tree extension in Welcomes
+- Leaf capabilities advertise only the ciphersuite above
 ```
+
+The hybrid KEM protects every group secret MLS distributes (Welcome group
+secrets, UpdatePath secrets) against harvest-now-decrypt-later. DAVE sender
+keys remain 32-byte MLS exporter outputs, so the data plane is unchanged.
+
+**Payload sizes.** X-Wing keys make MLS handshake messages ~9× larger than
+with X25519: a KeyPackage is ~2.6 KB, and a Welcome grows by ~1.45 KB per
+group member. The server accepts MLS Commit/Welcome uploads up to 1 MiB,
+enough for channels of about 390 members. See
+[PQ Migration](PQ_MIGRATION.md#payload-sizes-and-frame-caps) for measurements.
 
 ### DAVE Encryption
 
@@ -241,8 +254,8 @@ MLS_128_DHKEMP256_AES128GCM_SHA256_P256
 
 | Component | Tests | Status |
 |-----------|-------|--------|
-| MLS Core | 8 | ✅ All pass |
-| DAVE Crypto | 7 | ✅ All pass |
+| MLS Core (incl. PQ suite, downgrade guards) | 19 | ✅ All pass |
+| DAVE Crypto (incl. known-answer vector) | 18 | ✅ All pass |
 | Text Crypto | 4 | ✅ All pass |
 | Replay Protection | 3 | ✅ All pass |
 | Server State | 33 | ✅ All pass |
@@ -297,7 +310,8 @@ MLS_128_DHKEMP256_AES128GCM_SHA256_P256
 
 ### Under Consideration
 
-- [ ] **Post-quantum MLS** - Hybrid ECDH + Kyber
+- [x] **Post-quantum MLS key exchange** - Hybrid X25519 + ML-KEM-768 (X-Wing)
+- [ ] **Post-quantum signatures** - Hybrid Ed25519 + ML-DSA-65 ([plan](PQ_MIGRATION.md#phase-3-hybrid-signatures-design))
 - [ ] **Deniability** - Off-the-record messaging properties
 - [ ] **Metadata protection** - Onion routing for signaling
 - [ ] **Audit logging** - Cryptographic proofs of server behavior
@@ -313,5 +327,5 @@ MLS_128_DHKEMP256_AES128GCM_SHA256_P256
 
 ---
 
-**Last Updated:** 2025-12-27  
+**Last Updated:** 2026-11-21  
 **Implementation Status:** Phase 4 Complete (MLS + Replay Protection)

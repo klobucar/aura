@@ -5,6 +5,7 @@
 use crate::auth::AuthService;
 use crate::rate_limit::HandshakeRateLimiter;
 use crate::state::{ServerState, ServiceMessage};
+use crate::tls;
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
 use prost::Message;
@@ -46,9 +47,16 @@ const MSG_MLS_RATCHET_COMMIT: u8 = 0x57; // Founder returns the empty commit
 
 // Security limits
 const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
-const MAX_CONTROL_PACKET_SIZE: usize = 256 * 1024; // 256KB for signaling/metadata/MLS welcomes
-                                                   // Hard ceiling on how long a single control frame body may take to arrive.
-                                                   // Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
+const MAX_CONTROL_PACKET_SIZE: usize = 256 * 1024; // 256KB for signaling/metadata
+/// Cap for MLS Commit/Welcome uploads (`MSG_MLS_COMMIT_WELCOME`,
+/// `MSG_MLS_RATCHET_COMMIT`), which grow with group size. Under the X-Wing
+/// ciphersuite each member adds ~1.45 KB to a Welcome (it carries the ratchet
+/// tree) and ~1.2 KB to a Commit; a founder's combined Commit+Welcome measured
+/// ~280 KB at 100 members and ~690 KB at 256. 1 MiB holds groups of roughly
+/// 390. Only these message types get the larger cap.
+const MAX_MLS_PACKET_SIZE: usize = 1024 * 1024;
+// Hard ceiling on how long a single control frame body may take to arrive.
+// Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// QUIC server for handling client connections.
@@ -97,7 +105,10 @@ impl QuicServer {
             .map_err(|e| anyhow!("Failed to get local address: {}", e))?;
 
         info!("✓ QUIC server bound to UDP socket: {}", local_addr);
-        info!("✓ ALPN protocol: 'aura-dave'");
+        info!("✓ ALPN protocol: '{}'", String::from_utf8_lossy(tls::ALPN));
+        info!(
+            "✓ TLS 1.3 key exchange: X25519MLKEM768 (hybrid post-quantum) with classical fallback"
+        );
 
         let rate_limiter = HandshakeRateLimiter::new(
             state.config.server.handshake_per_minute,
@@ -132,9 +143,6 @@ impl QuicServer {
 
         // Ensure cache directory exists
         std::fs::create_dir_all(&cache_path)?;
-
-        // Define ALPN for Aura
-        let alpn = vec![b"aura-dave".to_vec()];
 
         // Build ACME config — must set challenge_type to Http01
         let mut acme_builder = AcmeConfig::new([domain])
@@ -205,16 +213,7 @@ impl QuicServer {
             }
         });
 
-        let mut server_crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(resolver);
-
-        server_crypto.alpn_protocols = alpn;
-
-        let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .map_err(|e| anyhow!("Failed to convert rustls config for ACME: {}", e))?;
-
-        Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
+        Self::quic_server_config(tls::server_config_builder()?.with_cert_resolver(resolver))
     }
 
     /// Minimal TCP listener for Fly.io health checks when ACME is disabled.
@@ -252,16 +251,7 @@ impl QuicServer {
         let key = PrivateKeyDer::from_pem_file(key_path)
             .map_err(|e| anyhow!("Failed to read private key from {:?}: {}", key_path, e))?;
 
-        let mut server_crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)?;
-
-        server_crypto.alpn_protocols = vec![b"aura-dave".to_vec()];
-
-        let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .map_err(|e| anyhow!("Failed to convert manual TLS config: {}", e))?;
-
-        Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
+        Self::quic_server_config_from_cert(cert_chain, key)
     }
 
     /// Generate self-signed TLS certificate for QUIC.
@@ -274,14 +264,25 @@ impl QuicServer {
         let cert_chain = vec![CertificateDer::from(cert_der)];
         let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
 
-        let mut server_crypto = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)?;
+        Self::quic_server_config_from_cert(cert_chain, key)
+    }
 
-        server_crypto.alpn_protocols = vec![b"aura-dave".to_vec()];
+    /// QUIC server config for a fixed certificate chain and key.
+    pub(crate) fn quic_server_config_from_cert(
+        cert_chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<ServerConfig> {
+        Self::quic_server_config(tls::server_config_builder()?.with_single_cert(cert_chain, key)?)
+    }
+
+    /// Wrap a rustls config (built from [`tls::server_config_builder`], so
+    /// hybrid PQ key exchange is on) for QUIC: set ALPN and apply Aura's
+    /// transport settings.
+    fn quic_server_config(mut server_crypto: rustls::ServerConfig) -> Result<ServerConfig> {
+        server_crypto.alpn_protocols = vec![tls::ALPN.to_vec()];
 
         let quinn_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .map_err(|e| anyhow!("Failed to convert self-signed config: {}", e))?;
+            .map_err(|e| anyhow!("Failed to build QUIC TLS config: {}", e))?;
 
         Self::apply_transport_config(ServerConfig::with_crypto(Arc::new(quinn_crypto)))
     }
@@ -1003,7 +1004,7 @@ impl ConnectionContext {
                     .await;
             }
             MSG_MLS_COMMIT_WELCOME => {
-                let buf = self.read_frame_payload().await?;
+                let buf = self.read_frame_payload_limited(MAX_MLS_PACKET_SIZE).await?;
                 let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
                 let channel_id = envelope.channel_id.clone();
                 let is_voice = envelope.group_type() == aura_protocol::MlsGroupType::Voice;
@@ -1043,7 +1044,7 @@ impl ConnectionContext {
                     .await;
             }
             MSG_MLS_RATCHET_COMMIT => {
-                let buf = self.read_frame_payload().await?;
+                let buf = self.read_frame_payload_limited(MAX_MLS_PACKET_SIZE).await?;
                 let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
                 let channel_id = envelope.channel_id.clone();
                 let is_voice = envelope.group_type() == aura_protocol::MlsGroupType::Voice;
@@ -1269,15 +1270,20 @@ impl ConnectionContext {
     }
 
     async fn read_frame_payload(&mut self) -> Result<Vec<u8>> {
+        self.read_frame_payload_limited(MAX_CONTROL_PACKET_SIZE)
+            .await
+    }
+
+    async fn read_frame_payload_limited(&mut self, max_len: usize) -> Result<Vec<u8>> {
         let mut len_buf = [0u8; 4];
         self.recv.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
 
-        if len > MAX_CONTROL_PACKET_SIZE {
+        if len > max_len {
             return Err(anyhow!(
                 "Incoming frame too large: {} bytes (max {})",
                 len,
-                MAX_CONTROL_PACKET_SIZE
+                max_len
             ));
         }
 
@@ -1286,7 +1292,7 @@ impl ConnectionContext {
         }
 
         // Do NOT pre-allocate based on the attacker-controlled length prefix:
-        // that lets a client claim 256KB and then send nothing, pinning one
+        // that lets a client claim the maximum and then send nothing, pinning one
         // buffer per connection. take() caps the upper bound, read_to_end
         // grows the Vec only as bytes actually arrive, and the timeout
         // bounds how long a single frame may remain in flight.
@@ -1321,4 +1327,76 @@ impl ConnectionContext {
 // Helper functions for packet handling
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use rustls::crypto::aws_lc_rs::{self, kx_group};
+    use rustls::crypto::{CryptoProvider, SupportedKxGroup};
+
+    /// Complete a real QUIC handshake against the production server config
+    /// from a client offering only `groups`. Returns the ALPN it agreed on.
+    async fn quic_handshake(groups: &[&'static dyn SupportedKxGroup]) -> Result<Vec<u8>> {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            cert.signing_key.serialize_der(),
+        ));
+
+        let server_config = QuicServer::quic_server_config_from_cert(vec![cert_der.clone()], key)?;
+        let server = Endpoint::server(server_config, "127.0.0.1:0".parse()?)?;
+        let server_addr = server.local_addr()?;
+        let accept = tokio::spawn(async move {
+            let conn = server.accept().await.expect("incoming").await?;
+            conn.closed().await;
+            Ok::<_, quinn::ConnectionError>(())
+        });
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der)?;
+        let provider = CryptoProvider {
+            kx_groups: groups.to_vec(),
+            ..aws_lc_rs::default_provider()
+        };
+        let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![tls::ALPN.to_vec()];
+
+        let mut client = Endpoint::client("127.0.0.1:0".parse()?)?;
+        client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
+        )));
+        let conn = client.connect(server_addr, "localhost")?.await?;
+
+        let alpn = conn
+            .handshake_data()
+            .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+            .and_then(|d| d.protocol)
+            .unwrap_or_default();
+
+        conn.close(0u32.into(), b"done");
+        client.wait_idle().await;
+        let _ = accept.await;
+        Ok(alpn)
+    }
+
+    /// A client that offers *only* X25519MLKEM768 can complete a handshake,
+    /// so the server really negotiates the hybrid group over QUIC. Its ~1.2 KB
+    /// key share also pushes the ClientHello across multiple Initial packets.
+    #[tokio::test]
+    async fn quic_handshake_with_hybrid_pq_only_client() {
+        let alpn = quic_handshake(&[kx_group::X25519MLKEM768])
+            .await
+            .expect("PQ-only client must connect");
+        assert_eq!(alpn, tls::ALPN);
+    }
+
+    /// Clients without ML-KEM support (e.g. macOS < 26) keep working.
+    #[tokio::test]
+    async fn quic_handshake_with_classical_only_client() {
+        let alpn = quic_handshake(&[kx_group::X25519])
+            .await
+            .expect("classical client must still connect");
+        assert_eq!(alpn, tls::ALPN);
+    }
+}

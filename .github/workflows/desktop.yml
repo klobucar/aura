@@ -22,9 +22,10 @@ env:
   RUST_BACKTRACE: 1
   # Keep this in sync with .github/workflows/ci.yml and vendor/opus/autogen.sh.
   OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
-  # Match the local install (uniffi-bindgen 0.10.0+v0.29.4) so generated
-  # aura_core.cs lines up with the UniFFI runtime in aura-core.
-  UNIFFI_BINDGEN_CS_TAG: v0.10.0+v0.29.4
+  # Must match the `uniffi` version in crates/aura-core/Cargo.toml (the
+  # "+v0.31.x" suffix), or generated aura_core.cs fails UniFFI's checksum
+  # validation at runtime.
+  UNIFFI_BINDGEN_CS_TAG: v0.11.1+v0.31.0
 
 permissions: {}
 
@@ -63,11 +64,12 @@ jobs:
         # libaura_core.so is what the C# runtime loads via UniFFI.
         run: cargo build --release -p aura-core
       - name: install uniffi-bindgen-cs
-        # Skip if the rust-cache already restored the binary; otherwise build
-        # from the tagged release that matches the UniFFI version aura-core uses.
+        # Skip only if the rust-cache restored the *same* version. A cache
+        # restored via a fallback key can carry an older binary, so check the
+        # version rather than mere presence, and --force over a stale one.
         run: |
-          if ! command -v uniffi-bindgen-cs >/dev/null; then
-            cargo install \
+          if ! uniffi-bindgen-cs --version 2>/dev/null | grep -qF "${UNIFFI_BINDGEN_CS_TAG#v}"; then
+            cargo install --force \
               --git https://github.com/NordSecurity/uniffi-bindgen-cs \
               --tag "${{ env.UNIFFI_BINDGEN_CS_TAG }}" \
               uniffi-bindgen-cs

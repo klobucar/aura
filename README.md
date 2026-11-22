@@ -56,7 +56,7 @@ For the long-form roadmap and milestones, see [`docs/ROADMAP.md`](docs/ROADMAP.m
 - The server stores no user passwords. Optional `password = ...` in `server.toml` adds a coarse access-control gate independent of identity.
 
 ### Group keying (MLS)
-- Each channel is backed by an **MLS group** ([RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html)) using ciphersuite `MLS_128_DHKEMP256_AES128GCM_SHA256_P256`.
+- Each channel is backed by an **MLS group** ([RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html)) using the hybrid post-quantum ciphersuite `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` (X25519 + ML-KEM-768 key exchange). QUIC/TLS also offers hybrid `X25519MLKEM768`. See [`docs/PQ_MIGRATION.md`](docs/PQ_MIGRATION.md).
 - The first client in a channel becomes the **founder** and owns adds/removes; the server is the MLS Delivery Service and never decrypts.
 - On membership changes, an MLS commit moves the group to a new epoch; clients export new per-sender secrets.
 
@@ -82,11 +82,12 @@ What Aura tries to protect, and what it explicitly does not. The full review is 
 | ✅ **Integrity** of media frames and text messages. | DAVE's AEAD prevents undetected tampering. |
 | ✅ **Authenticity** of speakers within a channel. | Each frame is bound to a sender session whose Ed25519 identity was authenticated at connection time. |
 | ✅ **Forward secrecy across membership changes.** | MLS commits rotate the group secret; departed members cannot decrypt future traffic. |
+| ✅ **Recorded traffic against future quantum computers.** | MLS key exchange is hybrid X25519 + ML-KEM-768, and payloads use 256-bit XChaCha20-Poly1305. Identity signatures are still classical Ed25519; see [`docs/PQ_MIGRATION.md`](docs/PQ_MIGRATION.md#phase-3-hybrid-signatures-design). |
 | ❌ **Metadata.** | The server (and any observer of it) can see *who is connected*, *which channels they're in*, *when they speak*, and packet sizes/timing. This is metadata Aura *needs* to route traffic. Use Tor or a similar layer if metadata resistance matters to you. |
 | ❌ **Endpoint compromise.** | If a participant's machine is compromised, no protocol can save the conversation. |
 | ❌ **Identity verification beyond TOFU.** | First-claim-wins for display names. Out-of-band fingerprint verification between users is not yet exposed in the UI. |
 | ❌ **Denial of service.** | Aura mitigates several DoS vectors (per-IP handshake rate limiting, capped buffer growth) but cannot guarantee availability against a determined attacker. |
-| ❌ **Audited cryptographic implementation.** | All primitives are widely-used libraries (`ring`, `openmls`, `quinn`, `opus`), but Aura itself has had no third-party audit. |
+| ❌ **Audited cryptographic implementation.** | All primitives are widely-used libraries (`openmls`, RustCrypto, `aws-lc-rs`, `quinn`, `opus`), but Aura itself has had no third-party audit. |
 
 ---
 
@@ -297,7 +298,9 @@ Aura stands on a lot of other people's careful work:
 - [**OpenMLS**](https://github.com/openmls/openmls) — the MLS implementation Aura uses.
 - [**quinn**](https://github.com/quinn-rs/quinn) — Rust QUIC.
 - [**Opus**](https://opus-codec.org/) and [**RNNoise**](https://gitlab.xiph.org/xiph/rnnoise) — audio codec and noise suppression from Xiph.
-- [**ring**](https://github.com/briansmith/ring) — primitives for X25519 / Ed25519 / AEAD.
+- [**RustCrypto**](https://github.com/RustCrypto) — X-Wing / ML-KEM, AEAD, and hash primitives for MLS and DAVE.
+- [**aws-lc-rs**](https://github.com/aws/aws-lc-rs) — TLS 1.3 cryptography, including hybrid `X25519MLKEM768`.
+- [**dalek-cryptography**](https://github.com/dalek-cryptography/curve25519-dalek) — Ed25519 identity signatures.
 - The [**DAVE protocol**](https://github.com/discord/dave-protocol) (Discord, CC BY-NC-SA 4.0) — adapted for Aura's media frames.
 - [**UniFFI**](https://github.com/mozilla/uniffi-rs) — Mozilla's binding generator that lets one Rust core back both clients.
 - [**Avalonia**](https://avaloniaui.net/) — the cross-platform .NET UI framework powering the desktop client.

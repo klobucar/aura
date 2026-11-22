@@ -405,4 +405,25 @@ mod tests {
         // misleading when there is nothing to elide.
         assert_eq!(format_fingerprint_short(&[0xab, 0xcd]), "abcd");
     }
+
+    /// Known answers produced with sha2 0.10 before the 0.11 upgrade. If these
+    /// change, every user's safety words change and verified contacts would
+    /// see a mismatch.
+    #[test]
+    fn fingerprints_match_known_answers() {
+        let fp = pairwise_fingerprint(&KEY_A, ID_A, &KEY_B, ID_B).unwrap();
+        assert_eq!(
+            hex::encode(fp),
+            "4af55baa1458b8fd0e4f1449663a0b47b97065cdb99a5a033b882231f82a1510\
+             6b5f0c646659e7b4a22874083ab4a6c556fee48489928ac61b95e35269420bda"
+        );
+        assert_eq!(
+            safety_words(&fp),
+            ["enough", "print", "tunnel", "chunk", "merit", "leader"]
+        );
+        assert_eq!(
+            hex::encode(key_fingerprint(&[0x07u8; 32]).unwrap()),
+            "f9cd9e38ed251040a9b361a01bf5bc228f98b161e45d204702c223c561d7456d"
+        );
+    }
 }

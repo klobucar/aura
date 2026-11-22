@@ -10,26 +10,37 @@ name = "aura_core"
 
 [dependencies]
 aura-protocol = { path = "../aura-protocol" }
-uniffi = { version = "0.29.0", features = ["cli"] }
+uniffi = { version = "0.31.2", features = ["cli"] }
 lazy_static = "1.5.0"
 regex = "1.12.3"
 prost = "0.14.3"
 bytes = "1.11.1"
 thiserror = "2.0.18"
 opus16-sys = { path = "../opus16-sys" }
-cpal = { version = "0.17.3", optional = true }
+cpal = { version = "0.18.2", optional = true }
 tokio = { version = "1.51.1", features = ["full"] }
 # Profile signing — same version the server verifies with, so the two cannot
 # drift on curve or encoding.
-ed25519-dalek = "2.2.0"
-sha2 = "0.10.9"
+ed25519-dalek = "3.0.0"
+sha2 = "0.11.1"
 # DAVE Protocol Encryption
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = "0.11.0"
 rand = "0.10.1"
-openmls = { version = "0.8.1" }
-openmls_rust_crypto = "0.5.0"
+openmls = "0.9.2"
+# RustCrypto backend; X-Wing comes from RustCrypto's `x-wing`/`ml-kem` via
+# hpke-rs-rust-crypto. (openmls_libcrux_crypto 0.4.0 pins libcrux-kem 0.0.9,
+# whose X-Wing public-key decoder panics on short input — RUSTSEC-2026-0331 —
+# and peers supply those keys.)
+#
+# `draft-ietf-mls-pq-ciphersuites` also turns on the `openmls_traits` feature
+# that defines the hybrid `Ciphersuite` variants. Deliberately NOT enabled on
+# `openmls` itself: that feature names the optional `openmls_sqlite_storage`,
+# whose rusqlite pin then collides with aura-server's on the `sqlite3` native
+# link during resolution. The only thing openmls gates on it is its *default*
+# leaf capabilities, which `mls.rs` sets explicitly anyway.
+openmls_rust_crypto = { version = "0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 hex = "0.4.3"
-openmls_basic_credential = "0.5.0"
+openmls_basic_credential = "0.6.0"
 uuid = { version = "1.23.0", features = ["v4"] }
 # default features pull in the `bin` CLI (clap 3 -> unmaintained `atty`); we only use DenoiseState
 nnnoiseless = { version = "0.5.2", default-features = false }
@@ -43,5 +54,3 @@ default = ["native-audio"]
 native-audio = ["dep:cpal"]
 webrtc-audio = ["dep:webrtc-audio-processing"]
 
-[build-dependencies]
-uniffi = { version = "0.29.0", features = ["build"] }

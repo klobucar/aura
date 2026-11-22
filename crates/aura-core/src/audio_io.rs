@@ -80,7 +80,7 @@ impl AudioCapture {
 
         let stream = device
             .build_input_stream(
-                &config,
+                config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
@@ -165,7 +165,7 @@ impl AudioPlayback {
 
         let stream = device
             .build_output_stream(
-                &config,
+                config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         // Output silence when not running

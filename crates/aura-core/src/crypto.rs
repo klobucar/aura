@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     XChaCha20Poly1305, XNonce,
 };
 
@@ -41,9 +41,13 @@ impl DaveCrypto {
         rand::rng().random()
     }
 
-    /// Generate a random nonce
+    /// Generate a random nonce.
+    ///
+    /// XChaCha20's 192-bit nonce is sized for random generation; `rand::rng()`
+    /// is a CSPRNG seeded and periodically reseeded from the OS.
     pub fn random_nonce() -> [u8; NONCE_SIZE] {
-        XChaCha20Poly1305::generate_nonce(&mut OsRng).into()
+        use rand::RngExt;
+        rand::rng().random()
     }
 
     /// Encrypt audio data with DAVE zero-padding commitment
@@ -62,9 +66,9 @@ impl DaveCrypto {
         let mut padded = vec![0u8; ZERO_PAD_SIZE];
         padded.extend_from_slice(plaintext);
 
-        let nonce = XNonce::from_slice(nonce);
+        let nonce = XNonce::from(*nonce);
         self.cipher
-            .encrypt(nonce, padded.as_ref())
+            .encrypt(&nonce, padded.as_ref())
             .map_err(|_| CryptoError::EncryptionFailed)
     }
 
@@ -79,11 +83,11 @@ impl DaveCrypto {
         ciphertext: &[u8],
         nonce: &[u8; NONCE_SIZE],
     ) -> Result<Vec<u8>, CryptoError> {
-        let nonce = XNonce::from_slice(nonce);
+        let nonce = XNonce::from(*nonce);
 
         let padded = self
             .cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| CryptoError::DecryptionFailed)?;
 
         // Verify zero-padding commitment
