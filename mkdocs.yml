@@ -59,6 +59,7 @@ nav:
   - Protocol Details:
       - Base Protocol: protocol.md
       - DAVE Deviations: 05_dave_protocol_deviations.md
+      - Threat Model: THREAT_MODEL.md
       - MLS Security: MLS_SECURITY.md
       - Post-Quantum Migration: PQ_MIGRATION.md
       - Observability: OBSERVABILITY.md
