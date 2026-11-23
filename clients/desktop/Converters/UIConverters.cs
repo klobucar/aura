@@ -65,8 +65,10 @@ public class ChatBubbleColorConverter : IValueConverter
         if (value is ChatMessage msg)
         {
             if (msg.System) return Brushes.Transparent;
-            // Outgoing: the primary -> secondary brand gradient. Incoming: glass.
-            return TokenBrush.Get(msg.IsFromCurrentUser ? "AuraBrandGradientBrush" : "AuraPanelFillBrush");
+            // Outgoing: the primary -> secondary brand gradient. Incoming: glass,
+            // or the caution tint when it mentions us.
+            if (msg.IsFromCurrentUser) return TokenBrush.Get("AuraBrandGradientBrush");
+            return TokenBrush.Get(msg.IsMention ? "AuraMentionFillBrush" : "AuraPanelFillBrush");
         }
         return TokenBrush.Get("AuraPanelFillBrush");
     }
@@ -272,6 +274,79 @@ public class BoolToColorConverter : IValueConverter
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
         => TokenBrush.Get(value is bool isConnected && isConnected ? "AuraGoodBrush" : "AuraTextDimBrush");
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>
+/// The chat-column banner: danger for failures, caution for "reconnecting".
+/// Binds to <c>BannerIsError</c>.
+/// </summary>
+public class BannerBrushConverter : IValueConverter
+{
+    public static readonly BannerBrushConverter Fill = new() { ErrorKey = "AuraDangerFillBrush", InfoKey = "AuraCautionFillBrush" };
+    public static readonly BannerBrushConverter Border = new() { ErrorKey = "AuraDangerBorderBrush", InfoKey = "AuraCautionBorderBrush" };
+    public static readonly BannerBrushConverter Text = new() { ErrorKey = "AuraTextBrush", InfoKey = "AuraCautionTextBrush" };
+
+    public string ErrorKey { get; set; } = "";
+    public string InfoKey { get; set; } = "";
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => TokenBrush.Get(value is bool isError && isError ? ErrorKey : InfoKey);
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>
+/// Link colour inside a bubble: the link token on glass, white on the
+/// outgoing gradient where the blue link colour would disappear.
+/// </summary>
+public class ChatLinkBrushConverter : IValueConverter
+{
+    public static readonly ChatLinkBrushConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => value is ChatMessage { IsFromCurrentUser: true } ? Brushes.White : TokenBrush.Get("AuraLinkBrush");
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>Profile-card trust pill border: accent when verified, panel rim otherwise.</summary>
+public class VerifiedPillBorderConverter : IValueConverter
+{
+    public static readonly VerifiedPillBorderConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => TokenBrush.Get(value is bool v && v ? "AuraAccentPillBorderBrush" : "AuraPanelBorderBrush");
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>Profile-card trust pill text: accent when verified, dim otherwise.</summary>
+public class VerifiedPillTextConverter : IValueConverter
+{
+    public static readonly VerifiedPillTextConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => TokenBrush.Get(value is bool v && v ? "AuraAccentBrush" : "AuraTextDimBrush");
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>Bubble rim: caution @38% on a mention, the panel rim otherwise.</summary>
+public class ChatBubbleBorderConverter : IValueConverter
+{
+    public static readonly ChatBubbleBorderConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => TokenBrush.Get(value is ChatMessage { IsMention: true, IsFromCurrentUser: false }
+            ? "AuraMentionBorderBrush"
+            : "AuraPanelBorderBrush");
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotImplementedException();

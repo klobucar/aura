@@ -66,6 +66,20 @@ public sealed class UserIdentity : IDisposable
         CreatedAt = createdAt;
     }
 
+    /// <summary>An identity from a secret recovered out of an encrypted backup.</summary>
+    public static UserIdentity FromSecret(byte[] secret, string displayName) =>
+        new((byte[])secret.Clone(), displayName, DateTime.UtcNow);
+
+    /// <summary>
+    /// A copy of the 64-byte secret, for <c>EncryptIdentityBackup</c> only.
+    /// The caller must zero it when done.
+    /// </summary>
+    public byte[] ExportSecretForBackup()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return (byte[])_secret.Clone();
+    }
+
     /// <summary>Generate a new identity with a fresh secret.</summary>
     public static UserIdentity Generate(string displayName) =>
         new(AuraCoreMethods.GenerateIdentitySecret(), displayName, DateTime.UtcNow);

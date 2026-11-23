@@ -21,9 +21,22 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             StartTelemetry(desktop);
+
+            // Clicking an aura:// link launches us with the link as the first
+            // argument. Registration is per-user and Windows-only; a link
+            // opened while Aura is already running starts a second instance
+            // (forwarding to the running one is not implemented).
+            UrlSchemeRegistration.EnsureRegistered();
+
+            var viewModel = new MainWindowViewModel();
+            if (desktop.Args is { Length: > 0 } args && AuraInviteLink.LooksLikeInvite(args[0]))
+            {
+                viewModel.ApplyInviteLink(args[0]);
+            }
+
             desktop.MainWindow = new MainWindow
             {
-                DataContext = new MainWindowViewModel(),
+                DataContext = viewModel,
             };
         }
 

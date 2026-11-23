@@ -38,6 +38,12 @@ public class RustAudioEngine : IDisposable
     /// <summary>Master output volume, 0.0–1.0 (attenuation only). Applied to mixed playback.</summary>
     public float Volume { get; set; } = 1.0f;
 
+    /// <summary>
+    /// Deafen. Playback is dropped rather than attenuated, so the master volume
+    /// the user chose is untouched and comes back as it was on undeafen.
+    /// </summary>
+    public bool OutputMuted { get; set; }
+
     public event Action<byte[]>? OnAudioData;
     public event Action<string>? OnError;
 
@@ -122,7 +128,7 @@ public class RustAudioEngine : IDisposable
 
     public void PlayAudio(byte[] pcmData)
     {
-        if (_handle == IntPtr.Zero) return;
+        if (_handle == IntPtr.Zero || OutputMuted) return;
 
         // Convert byte[] back to short[]
         var sampleCount = pcmData.Length / 2;

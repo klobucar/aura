@@ -50,6 +50,54 @@ public class AppSettings
     [JsonPropertyName("AuraThemeSelection")]
     public string Theme { get; set; } = "zenith";
 
+    /// <summary>dark / light / system. The palette above comes in both variants.</summary>
+    [JsonPropertyName("AuraAppearance")]
+    public string Appearance { get; set; } = "dark";
+
+    /// <summary>ptt / vad / always_on — the macOS raw values. macOS key: AuraTransmissionMode.</summary>
+    [JsonPropertyName("AuraTransmissionMode")]
+    public string TransmissionMode { get; set; } = "ptt";
+
+    /// <summary>0 = very sensitive … 1 = loud speech only. macOS key: AuraVADSensitivity.</summary>
+    [JsonPropertyName("AuraVADSensitivity")]
+    public double VadSensitivity { get; set; } = 0.5;
+
+    /// <summary>
+    /// Push-to-talk key. Same key name as macOS; the value is this platform's
+    /// own key encoding (see <see cref="PushToTalkBinding.ToSetting"/>), since
+    /// key codes do not carry across operating systems.
+    /// </summary>
+    [JsonPropertyName("AuraPTTHotkey")]
+    public string PttBinding { get; set; } = PushToTalkBinding.Default.ToSetting();
+
+    /// <summary>Last server connected to, so the form is filled in next launch.</summary>
+    [JsonPropertyName("AuraLastServerHost")]
+    public string LastServerHost { get; set; } = "127.0.0.1";
+
+    [JsonPropertyName("AuraLastServerPort")]
+    public int LastServerPort { get; set; } = 8443;
+
+    /// <summary>all / mentions / none. Same key and values as macOS.</summary>
+    [JsonPropertyName("AuraNotifyLevel")]
+    public string NotifyLevel { get; set; } = "mentions";
+
+    /// <summary>Comma-separated words that also count as mentions.</summary>
+    [JsonPropertyName("AuraNotifyKeywords")]
+    public string NotifyKeywords { get; set; } = "";
+
+    [JsonPropertyName("AuraNotifyShowText")]
+    public bool NotifyShowText { get; set; } = true;
+
+    [JsonPropertyName("AuraNotifyBadge")]
+    public bool NotifyBadge { get; set; } = true;
+
+    [JsonPropertyName("AuraNotifyJoinLeave")]
+    public bool NotifyJoinLeave { get; set; }
+
+    /// <summary>When the identity was last saved to an encrypted backup; null = never.</summary>
+    [JsonPropertyName("AuraIdentityBackedUpAt")]
+    public DateTimeOffset? IdentityBackedUpAt { get; set; }
+
     /// <summary>
     /// Per-user playback gain, keyed by the stable user UUID rather than the
     /// session id — session ids are reallocated every connection, so keying on
