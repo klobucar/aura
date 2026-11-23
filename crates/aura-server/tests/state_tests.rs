@@ -231,7 +231,7 @@ async fn test_mls_first_joiner_becomes_founder() {
                 .get(&aura_protocol::make_mls_group_id(&channel_id, true));
             if let Some(group_lock) = group_ref {
                 let group = group_lock.read().await;
-                assert_eq!(group.founder_session_id, Some(session_id));
+                assert_eq!(group.mls.founder(), Some(session_id));
             }
         }
     }
@@ -304,10 +304,24 @@ async fn test_mls_commit_welcome_distribution() {
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     let new_member_id = state.register_session("uuid-2".to_string(), addr, tx2);
 
-    // Add founder to group
+    // The founder joins first and founds the group: only the founder's
+    // commits are accepted.
     state
         .add_to_voice_group(channel_id.clone(), founder_id)
         .await;
+    state
+        .handle_mls_join(
+            channel_id.clone(),
+            true,
+            founder_id,
+            "uuid-1".into(),
+            vec![0],
+        )
+        .await;
+    assert!(matches!(
+        rx1.recv().await,
+        Some(ServiceMessage::MlsCreateGroup { is_voice: true, .. })
+    ));
 
     let commit = vec![1, 2, 3];
     let welcome = vec![4, 5, 6];

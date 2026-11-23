@@ -61,6 +61,48 @@ Client                    Server                    Founder
 - Founder manages group additions via `addMember()`
 - All subsequent joins go through founder
 - Server queues key packages in `pending_joins`
+- The founder is the **only committer**: adds, ratchets and removals all come
+  from it, so a group never has two commits racing for the same epoch. The
+  server drops a commit (and its Welcome) from anyone else.
+- The server keeps an ordered roster of who is actually in each MLS tree,
+  separate from who is in the channel (which includes sessions still waiting
+  for a Welcome). The founder is the roster's first entry.
+
+### 1a. Leaving a channel
+
+Leaving a channel — switching away, disconnecting, or having the session
+removed — takes the member out of the MLS group, not just out of the server's
+routing:
+
+```
+Leaver            Server                         Founder            Others
+  |-- JOIN other -->|                               |                  |
+  |   (or drops)    |-- MLS_SYNC_MEMBERS (0x58) --->|                  |
+  |                 |   [ids that should remain]    |                  |
+  |                 |<-- MLS_RATCHET_COMMIT (0x57) -|                  |
+  |                 |    (Remove commit)            |                  |
+  |                 |-- MLS_COMMIT ------------------------------------>|
+```
+
+- The founder commits a Remove for every leaf whose **verified** credential
+  identity is not in the list, then everyone remaining moves to an epoch the
+  leaver cannot derive. Clients also delete their own copy of a channel's
+  groups when they leave it.
+- `MLS_SYNC_MEMBERS` can only shrink a group. A server that lies in it can drop
+  members — which it could already do by not relaying — but cannot add one.
+- **Founder hand-off:** if the founder is the one leaving, the next-longest
+  member becomes founder (and receives any key packages still waiting) before
+  the removal is requested. If nobody is left in the tree, the first session
+  still waiting for a Welcome starts a fresh group and adds the rest; a group
+  is never split between an old tree and a new one.
+- **Limitation:** membership is per account id, the identity in the MLS
+  credential. One account in a channel from two devices keeps both leaves
+  until both have left.
+
+Before this, leaving only stopped the server routing to the member. They
+stayed in the tree, so anyone able to show them later commits (a malicious
+server) could let them keep deriving the group's keys; and a founder who moved
+to another channel kept receiving every newcomer's key package.
 
 ### 2. Key Derivation
 
@@ -193,7 +235,7 @@ impl SeenMessages {
 ✅ **Route messages** - Opaque relay of ciphertext  
 ✅ **Track presence** - Who is in which channel  
 ✅ **Enforce rate limits** - Prevent DoS  
-✅ **Manage membership** - Add/remove from groups  
+✅ **Manage membership** - Route only to the channel's sessions, and ask the founder to remove members who left (it can request removals, never additions)  
 ✅ **Detect replays** - Message ID tracking
 
 ### Threat Model

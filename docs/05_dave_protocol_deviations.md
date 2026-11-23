@@ -118,3 +118,32 @@ the stronger check has it on screen.
 **The wordlist is a protocol constant.** Changing the list, the word count, or
 the bit-extraction order silently invalidates every verification users have
 already stored, without any visible error. Treat it as frozen.
+
+## 6. Membership Changes
+
+### Deviation: Founder-committed removals vs. external-sender proposals
+*   **Aura**: There is no external sender. The server tells the group's
+    founder which account ids should remain (`MlsSyncMembers`, 0x58), and the
+    founder commits a Remove for every other leaf, returned on 0x57.
+*   **Standard DAVE**: The voice gateway is an MLS external sender and
+    broadcasts external Remove proposals that members commit.
+
+**Rationale:**
+Aura's server is a pure Delivery Service and holds no MLS credential, so it
+cannot propose anything. Sending the *remaining* ids rather than the leaver's
+makes the request idempotent (a lost or repeated request converges on the same
+tree) and one-directional: it can only shrink the group. Removals are matched
+against each leaf's verified credential identity, which is the account id, so
+two leaves for one account (two devices) are kept or removed together.
+
+### Deviation: Single committer with founder hand-off vs. any member committing
+*   **Aura**: Only the founder commits. If the founder leaves, the next-longest
+    member takes over; if the tree empties, the first waiting session starts a
+    fresh group. The server drops commits from anyone else.
+*   **Standard DAVE**: Any member may commit pending proposals; the gateway
+    picks the winning commit.
+
+**Rationale:**
+With one committer the epoch cannot fork, so the server never has to choose
+between competing commits. The cost is that commits stall briefly while a
+departing founder is replaced, which the hand-off keeps to one round trip.

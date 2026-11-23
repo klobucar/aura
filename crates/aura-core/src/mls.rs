@@ -801,6 +801,98 @@ impl MlsClient {
         Ok(commit_bytes)
     }
 
+    /// Commit the removal of every member whose user id is not in `keep`,
+    /// staying in the group ourselves. Returns the serialized Commit to
+    /// distribute, or `None` when nobody needs removing.
+    ///
+    /// This is how a group follows its channel. The server knows who is still
+    /// in the room but cannot commit, so it sends the founder the user ids that
+    /// should remain (`MlsSyncMembers`) and the founder removes everyone else.
+    /// That can only ever shrink the group: a server that lies here can drop
+    /// members (which it could already do by not relaying), never add them.
+    ///
+    /// Ids are matched against each leaf's *verified* credential; a leaf whose
+    /// credential does not verify has no business in the group and is removed.
+    /// Several leaves with the same user id (one person, two devices) are kept
+    /// or removed together.
+    pub fn remove_members_except(
+        &mut self,
+        group_id: &[u8],
+        keep: &[String],
+    ) -> Result<Option<Vec<u8>>, MlsError> {
+        traced(
+            tracing::info_span!(target: "aura::core", "mls.remove_members", outcome = tracing::field::Empty),
+            || self.remove_members_except_inner(group_id, keep),
+        )
+    }
+
+    fn remove_members_except_inner(
+        &mut self,
+        group_id: &[u8],
+        keep: &[String],
+    ) -> Result<Option<Vec<u8>>, MlsError> {
+        let departed: Vec<LeafNodeIndex> = {
+            let group = self
+                .groups
+                .get(group_id)
+                .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
+            let own_index = group.own_leaf_index();
+            group
+                .members()
+                .filter(|m| m.index != own_index)
+                .filter(|m| {
+                    !verify_leaf_credential(&m.credential, &m.signature_key)
+                        .map(|member| keep.iter().any(|id| id == member.user_id()))
+                        .unwrap_or(false)
+                })
+                .map(|m| m.index)
+                .collect()
+        };
+
+        if departed.is_empty() {
+            return Ok(None);
+        }
+
+        // Retain the outgoing epoch's keys before the commit is merged.
+        self.snapshot_epoch_keys(group_id);
+
+        let identity = self.identity.as_ref().ok_or(MlsError::NoCredential)?;
+        let group = self
+            .groups
+            .get_mut(group_id)
+            .ok_or_else(|| MlsError::GroupNotFound(format!("{:02x?}", group_id)))?;
+
+        let (commit_out, _welcome, _group_info) = group
+            .remove_members(&self.provider, &identity.signer, &departed)
+            .map_err(|e| MlsError::OpenMls(format!("Remove members error: {:?}", e)))?;
+
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| MlsError::OpenMls(format!("Merge commit error: {:?}", e)))?;
+
+        let commit_bytes = commit_out
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(format!("Commit serialize error: {:?}", e)))?;
+
+        Ok(Some(commit_bytes))
+    }
+
+    /// Drop everything we hold for a group: the group itself, what OpenMLS
+    /// persisted for it, and any retained epoch keys. Local only; nothing is
+    /// sent. A no-op for a group we are not in.
+    ///
+    /// Called when we leave a channel, so a departed member stops holding the
+    /// group's secrets the moment it goes, and coming back later starts from a
+    /// fresh Welcome rather than a stale copy of the group.
+    pub fn forget_group(&mut self, group_id: &[u8]) {
+        if let Some(mut group) = self.groups.remove(group_id) {
+            if let Err(e) = group.delete(self.provider.storage()) {
+                tracing::warn!(target: "aura::core", "Failed to delete stored MLS group state: {e:?}");
+            }
+        }
+        self.forget_group_keys(group_id);
+    }
+
     /// Get serialized KeyPackage for sharing with others
     pub fn get_key_package_bytes(&self) -> Result<Vec<u8>, MlsError> {
         let kp_bundle = self.generate_key_package()?;
@@ -1164,6 +1256,106 @@ mod tests {
         assert!(!bob.is_member(group_id));
         assert!(bob.exported_keys.keys().all(|(gid, _)| gid != group_id));
         assert!(!bob.known_senders.contains_key(group_id.as_slice()));
+    }
+
+    /// A member who leaves the channel is removed from the MLS group, so the
+    /// epochs after their departure are ones they cannot derive.
+    #[test]
+    fn test_remove_members_except_drops_departed_members() {
+        let group_id = b"test-voice-channel-sync";
+        let mut alice = new_client("alice").expect("alice");
+        alice.create_group(group_id).expect("create");
+
+        let mut bob = new_client("bob").expect("bob");
+        let (_c1, w1) = alice
+            .add_member(group_id, &bob.get_key_package_bytes().unwrap())
+            .expect("add bob");
+        bob.process_welcome(&w1).expect("bob joins");
+
+        let mut carol = new_client("carol").expect("carol");
+        let (c2, w2) = alice
+            .add_member(group_id, &carol.get_key_package_bytes().unwrap())
+            .expect("add carol");
+        carol.process_welcome(&w2).expect("carol joins");
+        bob.process_commit(group_id, &c2)
+            .expect("bob sees carol added");
+
+        // Nothing to do while everyone is still in the room.
+        let everyone = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+        assert!(alice
+            .remove_members_except(group_id, &everyone)
+            .expect("sync")
+            .is_none());
+
+        // Bob leaves the channel: the founder removes him.
+        let remaining = vec!["alice".to_string(), "carol".to_string()];
+        let removal = alice
+            .remove_members_except(group_id, &remaining)
+            .expect("sync")
+            .expect("bob's leaf must be removed");
+        carol
+            .process_commit(group_id, &removal)
+            .expect("carol follows");
+
+        let ids = |c: &MlsClient| -> Vec<String> {
+            let mut v: Vec<String> = c
+                .group_members(group_id)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.identity)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&alice), remaining);
+        assert_eq!(ids(&carol), remaining);
+
+        // Alice and Carol agree on the new epoch's keys; Bob, stuck on the old
+        // epoch, cannot derive them.
+        let sender = 7u32;
+        let alice_key = alice.export_sender_key(group_id, sender).unwrap();
+        assert_eq!(
+            alice_key,
+            carol.export_sender_key(group_id, sender).unwrap()
+        );
+        assert_ne!(alice_key, bob.export_sender_key(group_id, sender).unwrap());
+        assert!(alice.epoch(group_id).unwrap() > bob.epoch(group_id).unwrap());
+    }
+
+    /// Forgetting a group drops it and its retained keys, and a later Welcome
+    /// back into the same channel works from a clean slate.
+    #[test]
+    fn test_forget_group_then_rejoin() {
+        let group_id = b"test-voice-channel-forget";
+        let mut alice = new_client("alice").expect("alice");
+        alice.create_group(group_id).expect("create");
+
+        let mut bob = new_client("bob").expect("bob");
+        let (_c, w) = alice
+            .add_member(group_id, &bob.get_key_package_bytes().unwrap())
+            .expect("add bob");
+        bob.process_welcome(&w).expect("bob joins");
+        bob.export_sender_key(group_id, 3).expect("bob key");
+
+        bob.forget_group(group_id);
+        assert!(!bob.is_member(group_id));
+        assert!(bob.exported_keys.keys().all(|(gid, _)| gid != group_id));
+        bob.forget_group(group_id); // idempotent
+
+        // Alice removes Bob's old leaf, then adds him back.
+        let removal = alice
+            .remove_members_except(group_id, &["alice".to_string()])
+            .expect("sync")
+            .expect("bob's old leaf goes");
+        assert!(!removal.is_empty());
+        let (_c, w) = alice
+            .add_member(group_id, &bob.get_key_package_bytes().unwrap())
+            .expect("re-add bob");
+        bob.process_welcome(&w).expect("bob rejoins");
+        assert_eq!(
+            alice.export_sender_key(group_id, 3).unwrap(),
+            bob.export_sender_key(group_id, 3).unwrap()
+        );
     }
 
     #[test]

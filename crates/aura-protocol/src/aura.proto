@@ -34,6 +34,18 @@ message MlsCommitWelcome {
     uint32 new_member_session_id = 3;
 }
 
+// Server -> group founder (MSG_MLS_SYNC_MEMBERS, 0x58): the account ids that
+// should still be in a channel's MLS group. Sent after a member leaves the
+// channel or disconnects. The founder commits a Remove for every leaf whose
+// verified identity is not listed and returns that commit as
+// MSG_MLS_RATCHET_COMMIT (0x57); if nothing needs removing it sends nothing.
+// It can only ever shrink a group, never grow it.
+message MlsSyncMembers {
+    string channel_id = 1;
+    MlsGroupType group_type = 2;
+    repeated string member_uuids = 3;
+}
+
 // The user's position in 3D space.
 message Position {
     float x = 1;
