@@ -44,7 +44,8 @@ const MSG_UPDATE_STATUS: u8 = 0x45;
 const MSG_MLS_JOIN: u8 = 0x50; // Client sends key package on channel join
 const MSG_MLS_COMMIT_WELCOME: u8 = 0x51; // Client sends commit + welcome after adding member
 const MSG_MLS_RATCHET_REQUEST: u8 = 0x56; // Server asks founder to advance the epoch
-const MSG_MLS_RATCHET_COMMIT: u8 = 0x57; // Founder returns the empty commit
+const MSG_MLS_RATCHET_COMMIT: u8 = 0x57; // Founder returns a commit with no Welcome (ratchet or removals)
+const MSG_MLS_SYNC_MEMBERS: u8 = 0x58; // Server tells the founder who should remain in a group
 
 // Security limits
 const MAX_AUDIO_PACKET_SIZE: usize = 65536; // 64KB for audio (far more than enough for Opus)
@@ -1310,6 +1311,22 @@ impl ConnectionContext {
                 };
                 self.send_proto_response(MSG_MLS_RATCHET_REQUEST, envelope)
                     .await?;
+            }
+            ServiceMessage::MlsSyncMembers {
+                channel_id,
+                is_voice,
+                member_uuids,
+            } => {
+                let sync = aura_protocol::MlsSyncMembers {
+                    channel_id,
+                    group_type: if is_voice {
+                        aura_protocol::MlsGroupType::Voice as i32
+                    } else {
+                        aura_protocol::MlsGroupType::Text as i32
+                    },
+                    member_uuids,
+                };
+                self.send_proto_response(MSG_MLS_SYNC_MEMBERS, sync).await?;
             }
         }
         Ok(())

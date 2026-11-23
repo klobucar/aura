@@ -860,6 +860,28 @@ pub fn decode_user_left(data: Vec<u8>) -> Result<UserLeftRecord, AudioError> {
     })
 }
 
+/// `MlsSyncMembers` (0x58): the account ids the server says should still be
+/// in a channel's group. Pass `member_uuids` to
+/// [`MlsWrapper::remove_members_except`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MlsSyncMembersRecord {
+    pub channel_id: String,
+    pub is_voice: bool,
+    pub member_uuids: Vec<String>,
+}
+
+#[uniffi::export]
+pub fn decode_mls_sync_members(data: Vec<u8>) -> Result<MlsSyncMembersRecord, AudioError> {
+    use prost::Message;
+    let proto = aura_protocol::MlsSyncMembers::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(MlsSyncMembersRecord {
+        is_voice: proto.group_type() == aura_protocol::MlsGroupType::Voice,
+        channel_id: proto.channel_id,
+        member_uuids: proto.member_uuids,
+    })
+}
+
 #[uniffi::export]
 pub fn decode_channel_deleted(data: Vec<u8>) -> Result<ChannelDeletedRecord, AudioError> {
     use prost::Message;
@@ -1201,6 +1223,39 @@ impl MlsWrapper {
             .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
         let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
         client.self_update(&group_id).map_err(Into::into)
+    }
+
+    /// Answer the server's `MlsSyncMembers` (0x58): commit the removal of every
+    /// member whose user id is not in `keep_user_ids`.
+    ///
+    /// Returns the Commit to send back as `MSG_MLS_RATCHET_COMMIT` (0x57), or
+    /// `None` when the group already matches and there is nothing to send.
+    pub fn remove_members_except(
+        &self,
+        channel_id: String,
+        is_voice: bool,
+        keep_user_ids: Vec<String>,
+    ) -> Result<Option<Vec<u8>>, MlsError> {
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
+        client
+            .remove_members_except(&group_id, &keep_user_ids)
+            .map_err(Into::into)
+    }
+
+    /// Drop our local state for a channel's group when we leave the channel.
+    /// Sends nothing. A no-op if we were never in the group.
+    pub fn forget_group(&self, channel_id: String, is_voice: bool) -> Result<(), MlsError> {
+        let mut client = self
+            .inner
+            .lock()
+            .map_err(|_| MlsError::OperationFailed("Lock poisoned".into()))?;
+        let group_id = aura_protocol::make_mls_group_id(&channel_id, is_voice).into_bytes();
+        client.forget_group(&group_id);
+        Ok(())
     }
 
     /// Export encryption key for audio (voice group)

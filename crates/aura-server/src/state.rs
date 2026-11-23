@@ -124,6 +124,14 @@ pub enum ServiceMessage {
         channel_id: String,
         is_voice: bool,
     },
+    /// Tell the group founder which members should still be in the group, so
+    /// it commits a Remove for everyone else. Sent after a member leaves the
+    /// channel or disconnects. It can only ever shrink the group.
+    MlsSyncMembers {
+        channel_id: String,
+        is_voice: bool,
+        member_uuids: Vec<String>,
+    },
 }
 
 /// Static metadata for a channel (persisted in DB)
@@ -153,6 +161,238 @@ pub struct PendingMlsJoin {
     pub key_package: Vec<u8>,
 }
 
+/// Who the server believes is in a group's MLS tree, in the order they got
+/// there.
+///
+/// A group's `members` is the *routing* set: everyone in the channel,
+/// including sessions still waiting for their Welcome. Only the roster says who
+/// actually holds the group's keys. Its first entry is the founder, the one
+/// member asked to commit (adds, ratchets, removals), so there is never more
+/// than one committer and the group cannot fork. When the founder goes, the
+/// next-longest member takes over; when the roster empties, the next joiner
+/// starts a fresh group.
+#[derive(Debug, Default)]
+pub struct MlsRoster {
+    members: Vec<(u32, String)>, // (session_id, user_uuid)
+}
+
+impl MlsRoster {
+    /// The member that commits, if anyone holds the group.
+    pub fn founder(&self) -> Option<u32> {
+        self.members.first().map(|(session_id, _)| *session_id)
+    }
+
+    pub fn contains(&self, session_id: u32) -> bool {
+        self.members.iter().any(|(s, _)| *s == session_id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    fn insert(&mut self, session_id: u32, user_uuid: String) {
+        if !self.contains(session_id) {
+            self.members.push((session_id, user_uuid));
+        }
+    }
+
+    /// Remove a session; true if it was a member.
+    fn remove(&mut self, session_id: u32) -> bool {
+        let before = self.members.len();
+        self.members.retain(|(s, _)| *s != session_id);
+        self.members.len() != before
+    }
+
+    fn retain_live(&mut self, is_live: impl Fn(u32) -> bool) {
+        self.members.retain(|(s, _)| is_live(*s));
+    }
+
+    /// The user ids that should remain in the MLS group, without repeats.
+    fn user_uuids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::with_capacity(self.members.len());
+        for (_, uuid) in &self.members {
+            if !ids.contains(uuid) {
+                ids.push(uuid.clone());
+            }
+        }
+        ids
+    }
+}
+
+/// Messages to send once a group's lock is released: `(recipient, message)`.
+type MlsActions = Vec<(u32, ServiceMessage)>;
+
+fn add_member_request(channel_id: &str, is_voice: bool, join: &PendingMlsJoin) -> ServiceMessage {
+    ServiceMessage::MlsAddMemberRequest {
+        channel_id: channel_id.to_string(),
+        is_voice,
+        joiner_session_id: join.joiner_session_id,
+        joiner_uuid: join.joiner_uuid.clone(),
+        key_package: join.key_package.clone(),
+    }
+}
+
+/// A session offered its KeyPackage for a group. Either it starts a fresh
+/// group, because nobody holds this one, and then adds everyone already
+/// waiting; or its KeyPackage goes to the founder. Returns the messages to
+/// send and whether a fresh group was started.
+#[allow(clippy::too_many_arguments)]
+fn mls_offer_key_package(
+    roster: &mut MlsRoster,
+    pending: &mut Vec<PendingMlsJoin>,
+    routing: &DashSet<u32>,
+    channel_id: &str,
+    is_voice: bool,
+    join: PendingMlsJoin,
+    is_live: impl Fn(u32) -> bool,
+) -> (MlsActions, bool) {
+    roster.retain_live(&is_live);
+    pending
+        .retain(|p| is_live(p.joiner_session_id) && p.joiner_session_id != join.joiner_session_id);
+
+    match roster.founder() {
+        None => {
+            let founder = join.joiner_session_id;
+            roster.insert(founder, join.joiner_uuid);
+            routing.insert(founder);
+            let mut actions: MlsActions = vec![(
+                founder,
+                ServiceMessage::MlsCreateGroup {
+                    channel_id: channel_id.to_string(),
+                    is_voice,
+                },
+            )];
+            actions.extend(
+                pending
+                    .iter()
+                    .map(|p| (founder, add_member_request(channel_id, is_voice, p))),
+            );
+            (actions, true)
+        }
+        Some(founder) => {
+            let request = add_member_request(channel_id, is_voice, &join);
+            pending.push(join);
+            (vec![(founder, request)], false)
+        }
+    }
+}
+
+/// A session left a group's channel (or disconnected). If it was in the MLS
+/// tree: hand the founder role on if it held it, and ask the founder to remove
+/// it; if nobody is left holding the group, the first session still waiting
+/// starts a fresh one. Returns the messages to send and whether a fresh group
+/// was started.
+fn mls_member_departed(
+    roster: &mut MlsRoster,
+    pending: &mut Vec<PendingMlsJoin>,
+    channel_id: &str,
+    is_voice: bool,
+    session_id: u32,
+    is_live: impl Fn(u32) -> bool,
+) -> (MlsActions, bool) {
+    pending.retain(|p| p.joiner_session_id != session_id && is_live(p.joiner_session_id));
+    let was_founder = roster.founder() == Some(session_id);
+    if !roster.remove(session_id) {
+        return (Vec::new(), false);
+    }
+    roster.retain_live(&is_live);
+
+    match roster.founder() {
+        None if pending.is_empty() => (Vec::new(), false),
+        None => {
+            let first = pending.remove(0);
+            let founder = first.joiner_session_id;
+            roster.insert(founder, first.joiner_uuid);
+            let mut actions: MlsActions = vec![(
+                founder,
+                ServiceMessage::MlsCreateGroup {
+                    channel_id: channel_id.to_string(),
+                    is_voice,
+                },
+            )];
+            actions.extend(
+                pending
+                    .iter()
+                    .map(|p| (founder, add_member_request(channel_id, is_voice, p))),
+            );
+            (actions, true)
+        }
+        Some(founder) => {
+            let mut actions: MlsActions = Vec::new();
+            if was_founder {
+                // The old founder may never have handled these.
+                actions.extend(
+                    pending
+                        .iter()
+                        .map(|p| (founder, add_member_request(channel_id, is_voice, p))),
+                );
+            }
+            actions.push((
+                founder,
+                ServiceMessage::MlsSyncMembers {
+                    channel_id: channel_id.to_string(),
+                    is_voice,
+                    member_uuids: roster.user_uuids(),
+                },
+            ));
+            (actions, false)
+        }
+    }
+}
+
+/// The founder added someone (Commit + Welcome). Returns the sessions the
+/// Commit goes to, plus a follow-up for the founder when the newcomer has
+/// already gone (their fresh leaf must be removed again); or `None` when
+/// `committer` is not the founder. A commit from anyone else would fork the
+/// group's epoch, so it is dropped whole, Welcome included.
+#[allow(clippy::too_many_arguments)]
+fn mls_member_added(
+    roster: &mut MlsRoster,
+    pending: &mut Vec<PendingMlsJoin>,
+    routing: &DashSet<u32>,
+    channel_id: &str,
+    is_voice: bool,
+    committer: u32,
+    new_member: u32,
+    new_member_uuid: Option<String>,
+) -> Option<(Vec<u32>, Option<ServiceMessage>)> {
+    if roster.founder() != Some(committer) {
+        return None;
+    }
+    pending.retain(|p| p.joiner_session_id != new_member);
+
+    // `new_member_uuid` is `None` when the session is gone: it left before the
+    // founder's commit arrived, so its leaf needs removing straight away.
+    let follow_up = match new_member_uuid {
+        Some(uuid) => {
+            routing.insert(new_member);
+            roster.insert(new_member, uuid);
+            None
+        }
+        None => Some(ServiceMessage::MlsSyncMembers {
+            channel_id: channel_id.to_string(),
+            is_voice,
+            member_uuids: roster.user_uuids(),
+        }),
+    };
+
+    let recipients = routing
+        .iter()
+        .map(|id| *id)
+        .filter(|id| *id != committer && *id != new_member)
+        .collect();
+    Some((recipients, follow_up))
+}
+
+/// The channel a group id (`voice-v1-…` / `text-v1-…`) belongs to.
+fn channel_of_group(group_id: &str, is_voice: bool) -> String {
+    let prefix = if is_voice { "voice-v1-" } else { "text-v1-" };
+    group_id
+        .strip_prefix(prefix)
+        .unwrap_or(group_id)
+        .to_string()
+}
+
 /// Voice MLS Group - LOW CHURN
 #[derive(Debug)]
 pub struct VoiceGroup {
@@ -160,8 +400,8 @@ pub struct VoiceGroup {
     pub channel_id: String,
     pub current_epoch: u64,
     pub members: DashSet<u32>, // Session IDs
-    /// Session ID of the group founder (first joiner who created the MLS group)
-    pub founder_session_id: Option<u32>,
+    /// Who is in the MLS tree; the first is the founder.
+    pub mls: MlsRoster,
     /// Pending key packages from joiners waiting to be added
     pub pending_joins: Vec<PendingMlsJoin>,
     /// When the epoch last advanced by a ratchet commit (for the periodic
@@ -178,8 +418,8 @@ pub struct TextGroup {
     pub message_count: AtomicU32,
     /// Last ratchet time (for time-based ratcheting)
     pub last_ratchet: Instant,
-    /// Session ID of the group founder
-    pub founder_session_id: Option<u32>,
+    /// Who is in the MLS tree; the first is the founder.
+    pub mls: MlsRoster,
     /// Pending key packages from joiners waiting to be added
     pub pending_joins: Vec<PendingMlsJoin>,
 }
@@ -430,18 +670,19 @@ impl ServerState {
     /// Remove a client session.
     pub async fn remove_session(&self, session_id: u32) {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
-            // Broadcast user left before removing from groups
+            // Still in a channel: the connection's own cleanup normally leaves
+            // first, so this is for sessions removed from elsewhere (a deleted
+            // account). The session fields hold *group* ids; UserLeft wants
+            // the channel id.
             if let Some(voice_id) = session.voice_group_id {
-                self.broadcast_user_left(voice_id.clone(), session_id).await;
-
-                if let Some(group) = self.voice_groups.get(&voice_id) {
-                    group.value().write().await.members.remove(&session_id);
-                }
+                let channel_id = channel_of_group(&voice_id, true);
+                self.broadcast_user_left(channel_id.clone(), session_id)
+                    .await;
+                self.leave_mls_group(&channel_id, true, session_id).await;
             }
             if let Some(text_id) = session.text_group_id {
-                if let Some(group) = self.text_groups.get(&text_id) {
-                    group.value().write().await.members.remove(&session_id);
-                }
+                let channel_id = channel_of_group(&text_id, false);
+                self.leave_mls_group(&channel_id, false, session_id).await;
             }
             info!("Removed session {}", session_id);
 
@@ -487,7 +728,7 @@ impl ServerState {
                     channel_id: channel_id.clone(),
                     current_epoch: 0,
                     members: DashSet::new(),
-                    founder_session_id: None,
+                    mls: MlsRoster::default(),
                     pending_joins: Vec::new(),
                     last_ratchet: Instant::now(),
                 }))
@@ -502,7 +743,7 @@ impl ServerState {
                     members: DashSet::new(),
                     message_count: AtomicU32::new(0),
                     last_ratchet: Instant::now(),
-                    founder_session_id: None,
+                    mls: MlsRoster::default(),
                     pending_joins: Vec::new(),
                 }))
             });
@@ -795,7 +1036,7 @@ impl ServerState {
             // their own request for the same threshold crossing.
             group.message_count.store(0, Ordering::Relaxed);
             group.last_ratchet = Instant::now();
-            group.founder_session_id
+            group.mls.founder()
         };
 
         let Some(founder_session_id) = founder_session_id else {
@@ -838,7 +1079,7 @@ impl ServerState {
                 let mut group = group_lock.write().await;
                 if group.members.is_empty() || group.last_ratchet.elapsed() < threshold {
                     None
-                } else if let Some(founder_session_id) = group.founder_session_id {
+                } else if let Some(founder_session_id) = group.mls.founder() {
                     // Reset up front so a slow or disconnected founder isn't
                     // asked again on every check.
                     group.last_ratchet = Instant::now();
@@ -863,8 +1104,9 @@ impl ServerState {
         }
     }
 
-    /// Distribute a ratchet (empty) commit to every group member but the
-    /// committer, and advance the server's epoch counter.
+    /// Distribute a commit that carries no Welcome (a ratchet, or the removals
+    /// answering `MlsSyncMembers`) to every group member but the committer,
+    /// and advance the server's epoch counter. Only the founder's is accepted.
     ///
     /// Distinct from [`handle_mls_commit_welcome`](Self::handle_mls_commit_welcome):
     /// there is no new member and no Welcome, so nothing must be added to the
@@ -876,28 +1118,43 @@ impl ServerState {
         committer_session_id: u32,
         commit: Vec<u8>,
     ) {
-        let members: Vec<u32> = if is_voice {
+        // Only the founder commits; anyone else's commit would fork the epoch.
+        let members: Option<Vec<u32>> = if is_voice {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
-            match self.voice_groups.get(&group_id) {
-                Some(group_lock) => {
-                    let mut group = group_lock.write().await;
-                    group.current_epoch += 1;
-                    group.last_ratchet = Instant::now();
-                    group.members.iter().map(|id| *id).collect()
-                }
-                None => return,
+            let Some(group_lock) = self.voice_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut group = group_lock.write().await;
+            if group.mls.founder() == Some(committer_session_id) {
+                group.current_epoch += 1;
+                group.last_ratchet = Instant::now();
+                Some(group.members.iter().map(|id| *id).collect())
+            } else {
+                None
             }
         } else {
             let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
-            match self.text_groups.get(&group_id) {
-                Some(group_lock) => {
-                    let mut group = group_lock.write().await;
-                    group.current_epoch += 1;
-                    group.last_ratchet = Instant::now();
-                    group.members.iter().map(|id| *id).collect()
-                }
-                None => return,
+            let Some(group_lock) = self.text_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut group = group_lock.write().await;
+            if group.mls.founder() == Some(committer_session_id) {
+                group.current_epoch += 1;
+                group.last_ratchet = Instant::now();
+                Some(group.members.iter().map(|id| *id).collect())
+            } else {
+                None
             }
+        };
+
+        let Some(members) = members else {
+            warn!(
+                "[MLS] Dropping commit for {} group {} from session {}: not the founder",
+                if is_voice { "voice" } else { "text" },
+                channel_id,
+                committer_session_id
+            );
+            return;
         };
 
         let mut delivered = 0;
@@ -952,15 +1209,81 @@ impl ServerState {
     }
 
     pub async fn remove_from_voice_group(&self, channel_id: String, session_id: u32) {
-        let voice_group_id = aura_protocol::make_mls_group_id(&channel_id, true);
-        if let Some(group) = self.voice_groups.get(&voice_group_id) {
-            group.value().write().await.members.remove(&session_id);
-        }
+        self.leave_mls_group(&channel_id, true, session_id).await;
 
         // Clear voice_group_id on session
         if let Some(mut session) = self.sessions.get_mut(&session_id) {
             session.voice_group_id = None;
         }
+    }
+
+    /// A session leaves a channel's voice or text group: stop routing to it,
+    /// and if it was in the MLS tree, have the founder remove it (handing the
+    /// founder role on first if it held it). Without the removal it would stay
+    /// a member and could keep following the group's keys from any commits it
+    /// still saw.
+    async fn leave_mls_group(&self, channel_id: &str, is_voice: bool, session_id: u32) {
+        let group_id = aura_protocol::make_mls_group_id(channel_id, is_voice);
+        let is_live = |s: u32| s != session_id && self.sessions.contains_key(&s);
+
+        let (actions, fresh) = if is_voice {
+            let Some(group_lock) = self.voice_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            group.members.remove(&session_id);
+            let (actions, fresh) = mls_member_departed(
+                &mut group.mls,
+                &mut group.pending_joins,
+                channel_id,
+                true,
+                session_id,
+                is_live,
+            );
+            if fresh {
+                group.current_epoch = 0;
+                group.last_ratchet = Instant::now();
+            }
+            (actions, fresh)
+        } else {
+            let Some(group_lock) = self.text_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            group.members.remove(&session_id);
+            let (actions, fresh) = mls_member_departed(
+                &mut group.mls,
+                &mut group.pending_joins,
+                channel_id,
+                false,
+                session_id,
+                is_live,
+            );
+            if fresh {
+                group.current_epoch = 0;
+                group.message_count.store(0, Ordering::Relaxed);
+                group.last_ratchet = Instant::now();
+            }
+            (actions, fresh)
+        };
+
+        if fresh {
+            info!(
+                "[MLS] {} group {} emptied; a waiting session starts it afresh",
+                if is_voice { "Voice" } else { "Text" },
+                channel_id
+            );
+        } else if !actions.is_empty() {
+            info!(
+                "[MLS] Session {} left {} group {}; asking the founder to remove it",
+                session_id,
+                if is_voice { "voice" } else { "text" },
+                channel_id
+            );
+        }
+        self.dispatch_mls(actions);
     }
 
     pub async fn add_to_text_group(&self, channel_id: String, session_id: u32) {
@@ -976,10 +1299,7 @@ impl ServerState {
     }
 
     pub async fn remove_from_text_group(&self, channel_id: String, session_id: u32) {
-        let text_group_id = aura_protocol::make_mls_group_id(&channel_id, false);
-        if let Some(group) = self.text_groups.get(&text_group_id) {
-            group.value().write().await.members.remove(&session_id);
-        }
+        self.leave_mls_group(&channel_id, false, session_id).await;
 
         // Clear text_group_id on session
         if let Some(mut session) = self.sessions.get_mut(&session_id) {
@@ -1001,29 +1321,16 @@ impl ServerState {
         user_uuid: String,
         key_package: Vec<u8>,
     ) {
-        let session = match self.sessions.get(&session_id) {
-            Some(s) => s.clone(),
-            None => return,
-        };
+        if !self.sessions.contains_key(&session_id) {
+            return;
+        }
 
         if is_voice {
-            self.handle_voice_mls_join(
-                channel_id,
-                session_id,
-                user_uuid,
-                key_package,
-                &session.sender,
-            )
-            .await;
+            self.handle_voice_mls_join(channel_id, session_id, user_uuid, key_package)
+                .await;
         } else {
-            self.handle_text_mls_join(
-                channel_id,
-                session_id,
-                user_uuid,
-                key_package,
-                &session.sender,
-            )
-            .await;
+            self.handle_text_mls_join(channel_id, session_id, user_uuid, key_package)
+                .await;
         }
     }
 
@@ -1033,7 +1340,6 @@ impl ServerState {
         session_id: u32,
         user_uuid: String,
         key_package: Vec<u8>,
-        sender: &tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
     ) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
         let group_lock = self
@@ -1049,62 +1355,48 @@ impl ServerState {
                     channel_id: channel_id.clone(),
                     current_epoch: 0,
                     members: DashSet::new(),
-                    founder_session_id: None,
+                    mls: MlsRoster::default(),
                     pending_joins: Vec::new(),
                     last_ratchet: Instant::now(),
                 }))
             })
             .clone();
 
-        let mut group = group_lock.write().await;
-
-        // Check if founder is set AND active
-        let founder_is_active = if let Some(founder_id) = group.founder_session_id {
-            self.sessions.contains_key(&founder_id)
-        } else {
-            false
+        let (actions, fresh) = {
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            let (actions, fresh) = mls_offer_key_package(
+                &mut group.mls,
+                &mut group.pending_joins,
+                &group.members,
+                &channel_id,
+                true,
+                PendingMlsJoin {
+                    joiner_session_id: session_id,
+                    joiner_uuid: user_uuid,
+                    key_package,
+                },
+                |s| self.sessions.contains_key(&s),
+            );
+            if fresh {
+                group.current_epoch = 0;
+                group.last_ratchet = Instant::now();
+            }
+            (actions, fresh)
         };
 
-        if !founder_is_active {
-            // No active founder - this client takes over
-            group.founder_session_id = Some(session_id);
-            group.members.insert(session_id);
-            group.pending_joins.clear(); // Clear any stale joins from previous dead founder
+        if fresh {
             info!(
                 "[MLS] Session {} is the new founder of voice group {}",
                 session_id, channel_id
             );
-
-            let _ = sender.send(ServiceMessage::MlsCreateGroup {
-                channel_id: channel_id.clone(),
-                is_voice: true,
-            });
         } else {
-            // Active founder exists - queue key package and notify them
-            let founder_id = group.founder_session_id.unwrap();
-            let pending = PendingMlsJoin {
-                joiner_session_id: session_id,
-                joiner_uuid: user_uuid.clone(),
-                key_package: key_package.clone(),
-            };
-            group.pending_joins.push(pending);
-
-            if let Some(founder_session) = self.sessions.get(&founder_id) {
-                info!(
-                    "[MLS] Forwarding key package from {} to founder {} for voice group {}",
-                    session_id, founder_id, channel_id
-                );
-                let _ = founder_session
-                    .sender
-                    .send(ServiceMessage::MlsAddMemberRequest {
-                        channel_id: channel_id.clone(),
-                        is_voice: true,
-                        joiner_session_id: session_id,
-                        joiner_uuid: user_uuid,
-                        key_package,
-                    });
-            }
+            info!(
+                "[MLS] Forwarding key package from {} to the founder of voice group {}",
+                session_id, channel_id
+            );
         }
+        self.dispatch_mls(actions);
     }
 
     async fn handle_text_mls_join(
@@ -1113,7 +1405,6 @@ impl ServerState {
         session_id: u32,
         user_uuid: String,
         key_package: Vec<u8>,
-        sender: &tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
     ) {
         let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
         let group_lock = self
@@ -1130,53 +1421,51 @@ impl ServerState {
                     members: DashSet::new(),
                     message_count: AtomicU32::new(0),
                     last_ratchet: Instant::now(),
-                    founder_session_id: None,
+                    mls: MlsRoster::default(),
                     pending_joins: Vec::new(),
                 }))
             })
             .clone();
 
-        let mut group = group_lock.write().await;
-
-        // Check if founder is set AND active
-        let founder_is_active = if let Some(founder_id) = group.founder_session_id {
-            self.sessions.contains_key(&founder_id)
-        } else {
-            false
+        let (actions, fresh) = {
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            let (actions, fresh) = mls_offer_key_package(
+                &mut group.mls,
+                &mut group.pending_joins,
+                &group.members,
+                &channel_id,
+                false,
+                PendingMlsJoin {
+                    joiner_session_id: session_id,
+                    joiner_uuid: user_uuid,
+                    key_package,
+                },
+                |s| self.sessions.contains_key(&s),
+            );
+            if fresh {
+                group.current_epoch = 0;
+                group.message_count.store(0, Ordering::Relaxed);
+                group.last_ratchet = Instant::now();
+            }
+            (actions, fresh)
         };
 
-        if !founder_is_active {
-            group.founder_session_id = Some(session_id);
-            group.members.insert(session_id);
-            group.pending_joins.clear();
+        if fresh {
             info!(
                 "[MLS] Session {} is the new founder of text group {}",
                 session_id, channel_id
             );
+        }
+        self.dispatch_mls(actions);
+    }
 
-            let _ = sender.send(ServiceMessage::MlsCreateGroup {
-                channel_id: channel_id.clone(),
-                is_voice: false,
-            });
-        } else {
-            let founder_id = group.founder_session_id.unwrap();
-            let pending = PendingMlsJoin {
-                joiner_session_id: session_id,
-                joiner_uuid: user_uuid.clone(),
-                key_package: key_package.clone(),
-            };
-            group.pending_joins.push(pending);
-
-            if let Some(founder_session) = self.sessions.get(&founder_id) {
-                let _ = founder_session
-                    .sender
-                    .send(ServiceMessage::MlsAddMemberRequest {
-                        channel_id: channel_id.clone(),
-                        is_voice: false,
-                        joiner_session_id: session_id,
-                        joiner_uuid: user_uuid,
-                        key_package,
-                    });
+    /// Send what an MLS membership change decided, once the group's lock is
+    /// released.
+    fn dispatch_mls(&self, actions: MlsActions) {
+        for (recipient, message) in actions {
+            if let Some(session) = self.sessions.get(&recipient) {
+                let _ = session.sender.send(message);
             }
         }
     }
@@ -1192,7 +1481,67 @@ impl ServerState {
         commit: Vec<u8>,
         welcome: Vec<u8>,
     ) {
-        // Send Welcome to new member
+        let new_member_uuid = self
+            .sessions
+            .get(&new_member_session_id)
+            .map(|s| s.user_uuid.clone());
+
+        // Bookkeeping first, under the group's lock: only the founder's commit
+        // is accepted, and only then does anything go out.
+        let outcome = if is_voice {
+            let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
+            let Some(group_lock) = self.voice_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            let outcome = mls_member_added(
+                &mut group.mls,
+                &mut group.pending_joins,
+                &group.members,
+                &channel_id,
+                true,
+                committer_session_id,
+                new_member_session_id,
+                new_member_uuid,
+            );
+            if outcome.is_some() {
+                group.current_epoch += 1;
+            }
+            outcome
+        } else {
+            let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
+            let Some(group_lock) = self.text_groups.get(&group_id).map(|g| g.clone()) else {
+                return;
+            };
+            let mut guard = group_lock.write().await;
+            let group = &mut *guard;
+            let outcome = mls_member_added(
+                &mut group.mls,
+                &mut group.pending_joins,
+                &group.members,
+                &channel_id,
+                false,
+                committer_session_id,
+                new_member_session_id,
+                new_member_uuid,
+            );
+            if outcome.is_some() {
+                group.current_epoch += 1;
+            }
+            outcome
+        };
+
+        let Some((recipients, follow_up)) = outcome else {
+            warn!(
+                "[MLS] Dropping commit for {} group {} from session {}: not the founder",
+                if is_voice { "voice" } else { "text" },
+                channel_id,
+                committer_session_id
+            );
+            return;
+        };
+
         if let Some(new_session) = self.sessions.get(&new_member_session_id) {
             info!(
                 "[MLS] Sending Welcome to session {} for {} group {}",
@@ -1207,41 +1556,7 @@ impl ServerState {
             });
         }
 
-        // Get members list and advance epoch
-        let members: Vec<u32> = if is_voice {
-            let group_id = aura_protocol::make_mls_group_id(&channel_id, true);
-            if let Some(group_lock) = self.voice_groups.get(&group_id) {
-                let mut group = group_lock.write().await;
-                group.current_epoch += 1;
-                group.members.insert(new_member_session_id); // Add new member
-                                                             // Remove from pending
-                group
-                    .pending_joins
-                    .retain(|p| p.joiner_session_id != new_member_session_id);
-                group.members.iter().map(|id| *id).collect()
-            } else {
-                return;
-            }
-        } else {
-            let group_id = aura_protocol::make_mls_group_id(&channel_id, false);
-            if let Some(group_lock) = self.text_groups.get(&group_id) {
-                let mut group = group_lock.write().await;
-                group.current_epoch += 1;
-                group.members.insert(new_member_session_id);
-                group
-                    .pending_joins
-                    .retain(|p| p.joiner_session_id != new_member_session_id);
-                group.members.iter().map(|id| *id).collect()
-            } else {
-                return;
-            }
-        };
-
-        // Broadcast Commit to all existing members (except new member and committer)
-        for member_id in members {
-            if member_id == new_member_session_id || member_id == committer_session_id {
-                continue;
-            }
+        for member_id in recipients {
             if let Some(session) = self.sessions.get(&member_id) {
                 let _ = session.sender.send(ServiceMessage::MlsCommit {
                     channel_id: channel_id.clone(),
@@ -1249,6 +1564,10 @@ impl ServerState {
                     commit: commit.clone(),
                 });
             }
+        }
+
+        if let Some(sync) = follow_up {
+            self.dispatch_mls(vec![(committer_session_id, sync)]);
         }
 
         info!(
@@ -2151,7 +2470,6 @@ mod tests {
                 session_id,
                 "uuid-lazy".into(),
                 vec![0, 1, 2], // Fake key package
-                &state.sessions.get(&session_id).unwrap().sender,
             )
             .await;
 
@@ -2179,7 +2497,6 @@ mod tests {
                 session_id,
                 "uuid-lazy".into(),
                 vec![0, 1, 2],
-                &state.sessions.get(&session_id).unwrap().sender,
             )
             .await;
 
@@ -2216,7 +2533,6 @@ mod tests {
                 session_id,
                 "uuid-voice-ratchet".into(),
                 vec![1, 2, 3],
-                &state.sessions.get(&session_id).unwrap().sender,
             )
             .await;
 
@@ -2247,5 +2563,204 @@ mod tests {
             .request_due_voice_ratchets_after(Duration::from_secs(900))
             .await;
         assert!(rx.try_recv().is_err());
+    }
+
+    // --- MLS membership follows the channel ---
+
+    type Rx = tokio::sync::mpsc::UnboundedReceiver<ServiceMessage>;
+
+    fn drain(rx: &mut Rx) -> Vec<ServiceMessage> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// Join a session to `channel` and, if a founder exists, have the founder
+    /// add it (Commit + Welcome), the way the clients do.
+    async fn join_voice(state: &ServerState, channel: &str, session: u32, uuid: &str) {
+        state.add_to_voice_group(channel.to_string(), session).await;
+        state
+            .handle_voice_mls_join(channel.to_string(), session, uuid.into(), vec![1])
+            .await;
+        let founder = {
+            let group_id = aura_protocol::make_mls_group_id(channel, true);
+            let lock = state.voice_groups.get(&group_id).unwrap().clone();
+            let founder = lock.read().await.mls.founder();
+            founder
+        };
+        if let Some(founder) = founder {
+            if founder != session {
+                state
+                    .handle_mls_commit_welcome(
+                        channel.to_string(),
+                        true,
+                        founder,
+                        session,
+                        vec![2],
+                        vec![3],
+                    )
+                    .await;
+            }
+        }
+    }
+
+    fn session(state: &ServerState, uuid: &str) -> (u32, Rx) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let addr = "127.0.0.1:9999".parse().unwrap();
+        (state.register_session(uuid.into(), addr, tx), rx)
+    }
+
+    fn sync_uuids(msgs: &[ServiceMessage]) -> Option<Vec<String>> {
+        msgs.iter().find_map(|m| match m {
+            ServiceMessage::MlsSyncMembers { member_uuids, .. } => Some(member_uuids.clone()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn founder_leaving_hands_over_and_asks_for_their_removal() {
+        let state = create_test_state();
+        state.create_channel("C".into());
+        let (alice, mut rx_a) = session(&state, "alice");
+        let (bob, mut rx_b) = session(&state, "bob");
+        let (carol, mut rx_c) = session(&state, "carol");
+        join_voice(&state, "C", alice, "alice").await;
+        join_voice(&state, "C", bob, "bob").await;
+        join_voice(&state, "C", carol, "carol").await;
+        drain(&mut rx_a);
+        drain(&mut rx_b);
+        drain(&mut rx_c);
+
+        state.remove_from_voice_group("C".into(), alice).await;
+
+        // Bob, the next-longest member, takes over and is asked to remove Alice.
+        let to_bob = drain(&mut rx_b);
+        assert_eq!(
+            sync_uuids(&to_bob),
+            Some(vec!["bob".to_string(), "carol".to_string()])
+        );
+        assert!(drain(&mut rx_c).is_empty());
+
+        // Ratchets now go to Bob...
+        state.request_due_voice_ratchets_after(Duration::ZERO).await;
+        assert!(matches!(
+            drain(&mut rx_b).as_slice(),
+            [ServiceMessage::MlsRatchetRequest { is_voice: true, .. }]
+        ));
+        assert!(drain(&mut rx_a).is_empty());
+
+        // ...and a commit from Alice, no longer the founder, goes nowhere.
+        state
+            .handle_mls_ratchet_commit("C".into(), true, alice, vec![9])
+            .await;
+        assert!(drain(&mut rx_c).is_empty());
+        state
+            .handle_mls_ratchet_commit("C".into(), true, bob, vec![9])
+            .await;
+        assert!(matches!(
+            drain(&mut rx_c).as_slice(),
+            [ServiceMessage::MlsCommit { is_voice: true, .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn disconnect_asks_the_founder_to_remove_the_member() {
+        let state = create_test_state();
+        state.create_channel("C".into());
+        let (alice, mut rx_a) = session(&state, "alice");
+        let (bob, _rx_b) = session(&state, "bob");
+        let (carol, mut rx_c) = session(&state, "carol");
+        join_voice(&state, "C", alice, "alice").await;
+        join_voice(&state, "C", bob, "bob").await;
+        join_voice(&state, "C", carol, "carol").await;
+        drain(&mut rx_a);
+        drain(&mut rx_c);
+
+        // Removed without the connection's own cleanup (e.g. a deleted account).
+        state.remove_session(bob).await;
+
+        let to_alice = drain(&mut rx_a);
+        assert_eq!(
+            sync_uuids(&to_alice),
+            Some(vec!["alice".to_string(), "carol".to_string()])
+        );
+        // UserLeft names the channel, not the MLS group id.
+        assert!(drain(&mut rx_c).iter().any(|m| matches!(
+            m,
+            ServiceMessage::UserLeft { channel_id, session_id } if channel_id == "C" && *session_id == bob
+        )));
+    }
+
+    #[tokio::test]
+    async fn emptied_group_restarts_instead_of_splitting() {
+        let state = create_test_state();
+        state.create_channel("C".into());
+        let (alice, mut rx_a) = session(&state, "alice");
+        join_voice(&state, "C", alice, "alice").await;
+        drain(&mut rx_a);
+
+        // Bob offers his key package but Alice leaves before adding him.
+        let (bob, mut rx_b) = session(&state, "bob");
+        state.add_to_voice_group("C".into(), bob).await;
+        state
+            .handle_voice_mls_join("C".into(), bob, "bob".into(), vec![1])
+            .await;
+        assert!(drain(&mut rx_b).is_empty());
+        // As founder, Alice was handed Bob's key package.
+        assert!(matches!(
+            drain(&mut rx_a).as_slice(),
+            [ServiceMessage::MlsAddMemberRequest { joiner_session_id, .. }] if *joiner_session_id == bob
+        ));
+        state.remove_from_voice_group("C".into(), alice).await;
+
+        // Bob starts a fresh group rather than waiting forever.
+        assert!(matches!(
+            drain(&mut rx_b).as_slice(),
+            [ServiceMessage::MlsCreateGroup { is_voice: true, .. }]
+        ));
+
+        // Alice is still connected (she only switched channels). A newcomer
+        // goes to Bob, not to her.
+        let (dave, mut rx_d) = session(&state, "dave");
+        state.add_to_voice_group("C".into(), dave).await;
+        state
+            .handle_voice_mls_join("C".into(), dave, "dave".into(), vec![1])
+            .await;
+        assert!(drain(&mut rx_d).is_empty());
+        assert!(matches!(
+            drain(&mut rx_b).as_slice(),
+            [ServiceMessage::MlsAddMemberRequest { joiner_session_id, .. }] if *joiner_session_id == dave
+        ));
+        assert!(drain(&mut rx_a).is_empty());
+    }
+
+    #[tokio::test]
+    async fn welcome_from_a_non_founder_is_dropped() {
+        let state = create_test_state();
+        state.create_channel("C".into());
+        let (alice, _rx_a) = session(&state, "alice");
+        let (mallory, _rx_m) = session(&state, "mallory");
+        join_voice(&state, "C", alice, "alice").await;
+        join_voice(&state, "C", mallory, "mallory").await;
+
+        let (bob, mut rx_b) = session(&state, "bob");
+        state.add_to_voice_group("C".into(), bob).await;
+        state
+            .handle_voice_mls_join("C".into(), bob, "bob".into(), vec![1])
+            .await;
+        state
+            .handle_mls_commit_welcome("C".into(), true, mallory, bob, vec![2], vec![3])
+            .await;
+        assert!(drain(&mut rx_b).is_empty(), "no Welcome from a non-founder");
+
+        state
+            .handle_mls_commit_welcome("C".into(), true, alice, bob, vec![2], vec![3])
+            .await;
+        assert!(matches!(
+            drain(&mut rx_b).as_slice(),
+            [ServiceMessage::MlsWelcome { .. }]
+        ));
     }
 }
