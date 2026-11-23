@@ -219,28 +219,46 @@ message ChallengeResponse {
 // ============================================================================
 // Admin Operations
 // ============================================================================
+//
+// Sent on the control stream once logged in (message types 0x48-0x4C; see
+// docs/protocol/control_stream.md). The server authorises each request with
+// the identity the connection logged in as and the admin permissions that
+// account holds right now. The `session_token` fields are left over from an
+// earlier design and are ignored.
 
-// Request to verify a user (admin only)
+// Request to verify a user (needs verify_users)
 message VerifyUserRequest {
-    string session_token = 1;       // Admin's session token
+    string session_token = 1;       // Ignored
     string target_user_uuid = 2;      // User to verify
 }
 
-// Request to ban/unban a user (admin only)
+// Request to ban/unban a user (needs ban_users). A ban drops the user's live
+// connections and refuses their logins until they are unbanned.
 message BanUserRequest {
-    string session_token = 1;       // Admin's session token
+    string session_token = 1;       // Ignored
     string target_user_uuid = 2;      // User to ban/unban
     bool banned = 3;                // true = ban, false = unban
-    string reason = 4;              // Reason for ban
+    string reason = 4;              // Reason for ban (logged by the server)
 }
 
-// Request to grant admin privileges (admin only)
+// Request to set a user's admin permissions (needs grant_admin). The
+// permissions replace whatever the user held; granting none revokes admin.
 message GrantAdminRequest {
-    string session_token = 1;       // Granting admin's session token
+    string session_token = 1;       // Ignored
     string target_user_uuid = 2;      // User to promote
     bool verify_users = 3;          // Permission to verify users
-    bool ban_users = 4;             // Permission to ban users
+    bool ban_users = 4;             // Permission to ban, unban and kick users
     bool grant_admin = 5;           // Permission to grant admin to others
+    bool manage_channels = 6;       // Permission to create, edit and delete channels
+}
+
+// Request to move a user out of the channel they are in (needs ban_users).
+// Each of the user's sessions in a channel other than the lobby is taken out
+// of it and told so with a ChannelDeleted notice (reason KICKED) naming the
+// lobby as the fallback. Unlike a ban, the user can come back.
+message KickUserRequest {
+    string target_user_uuid = 1;
+    string reason = 2;              // Shown to the kicked user
 }
 
 // Generic admin operation response
@@ -249,11 +267,11 @@ message AdminResponse {
     string error_message = 2;
 }
 
-// List users request (admin only)
+// List users request (any admin)
 message ListUsersRequest {
-    string session_token = 1;
+    string session_token = 1;       // Ignored
     uint32 offset = 2;
-    uint32 limit = 3;
+    uint32 limit = 3;               // 0 means the server default (100); capped at 500
 }
 
 // User info in list response
@@ -270,6 +288,8 @@ message UserInfo {
 message ListUsersResponse {
     repeated UserInfo users = 1;
     uint32 total_count = 2;
+    bool success = 3;               // false when the request was refused
+    string error_message = 4;
 }
 
 // ============================================================================
@@ -348,14 +368,34 @@ message DeleteChannelRequest {
     string channel_id = 1;
 }
 
-// Server → client notification that a channel the recipient was in has been
-// deleted. Sent only to that channel's occupants; everyone else learns about
-// the removal from the ServerState snapshot that follows.
+// Why the server took a client out of a channel (see ChannelDeleted).
+enum ChannelRemovalReason {
+    // The channel was deleted. Zero, so a notice from a server that predates
+    // this field reads as a deletion.
+    CHANNEL_REMOVAL_REASON_DELETED = 0;
+    // The client asked to join a channel that doesn't exist (deleted while it
+    // was away, say). The server took it out of its previous channel, as for
+    // any join, and it is now in no channel.
+    CHANNEL_REMOVAL_REASON_NOT_FOUND = 1;
+    // An admin kicked the client out of the channel. The channel still exists.
+    CHANNEL_REMOVAL_REASON_KICKED = 2;
+}
+
+// Server → client notification that the recipient is no longer in a channel
+// and should move to `fallback_channel_id`. Sent when the channel was deleted
+// (only to its occupants; everyone else learns about the removal from the
+// ServerState snapshot that follows), when the client tried to join a channel
+// that doesn't exist, and when an admin kicked the client. Clients that
+// predate `reason` treat every notice as a deletion, which still moves them
+// to the fallback.
 message ChannelDeleted {
     string channel_id = 1;
     // Channel the client should fall back to (the lobby, when one exists).
     // Empty if the server has no suggestion, in which case the client picks.
     string fallback_channel_id = 2;
+    ChannelRemovalReason reason = 3;
+    // The admin's reason, for a kick. Display text.
+    string detail = 4;
 }
 
 // Request to delete a user/profile

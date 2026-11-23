@@ -1,11 +1,18 @@
-//! Per-IP handshake rate limiter.
+//! Rate limiters.
 //!
-//! Sits in front of the QUIC accept loop so an attacker cannot burn Ed25519
-//! signature-verification CPU (or TLS handshake CPU) by replaying bogus
-//! `AuthRequest` packets from a single address. Loopback traffic is always
-//! allowed so local tests and same-host tooling are unaffected.
+//! [`HandshakeRateLimiter`] sits in front of the QUIC accept loop so an
+//! attacker cannot burn Ed25519 signature-verification CPU (or TLS handshake
+//! CPU) by replaying bogus `AuthRequest` packets from a single address.
+//! Loopback traffic is always allowed so local tests and same-host tooling
+//! are unaffected.
+//!
+//! [`PingRateLimiter`] caps how often one connection's control-stream pings
+//! are answered.
 
-use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
+use governor::{
+    clock::DefaultClock, state::keyed::DashMapStateStore, DefaultDirectRateLimiter, Quota,
+    RateLimiter,
+};
 use nonzero_ext::nonzero;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
@@ -76,10 +83,48 @@ impl HandshakeRateLimiter {
     }
 }
 
+/// Per-connection token bucket for control-stream pings (`MSG_PING`).
+///
+/// Clients probe every few seconds; a burst of 5 covers a client that probes
+/// a few times on connect, and 2 per second sustained is far above any real
+/// probe rate. Pings over the limit are read and dropped unanswered, which
+/// the client sees as a lost probe; the connection stays up.
+pub struct PingRateLimiter {
+    inner: DefaultDirectRateLimiter,
+}
+
+impl Default for PingRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PingRateLimiter {
+    pub fn new() -> Self {
+        let quota = Quota::per_second(nonzero!(2u32)).allow_burst(nonzero!(5u32));
+        Self {
+            inner: RateLimiter::direct(quota),
+        }
+    }
+
+    /// Whether this ping may be answered. Uses up a token if so.
+    pub fn check(&self) -> bool {
+        self.inner.check().is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn ping_limiter_allows_a_burst_then_refuses() {
+        let limiter = PingRateLimiter::new();
+        let answered = (0..20).filter(|_| limiter.check()).count();
+        // The burst, plus at most a token or two refilled while looping.
+        assert!((5..=7).contains(&answered), "answered {answered} of 20");
+    }
 
     #[tokio::test]
     async fn loopback_is_never_limited() {

@@ -2,14 +2,14 @@
 //!
 //! Extracts `ServerState` from main.rs and adds persistence layer.
 
-use crate::auth::AuthService;
+use crate::auth::{AuthError, AuthService};
 use crate::config::{Config, VerificationMode};
 use crate::db::Database;
 use anyhow::{anyhow, Result};
 use aura_protocol::{
     channel_icon, mls_envelope, ChannelIcon as ProtoChannelIcon, ChannelInfo as ProtoChannelInfo,
-    EncryptedTextPacket, FastAudioPacket, MlsEnvelope, MlsGroupType,
-    ServerState as ProtoServerState, UserProfile,
+    EncryptedTextPacket, FastAudioPacket, ListUsersResponse, MlsEnvelope, MlsGroupType,
+    ServerState as ProtoServerState, UserInfo, UserProfile,
 };
 use bytes::Bytes;
 use dashmap::{DashMap, DashSet};
@@ -132,6 +132,36 @@ pub enum ServiceMessage {
         is_voice: bool,
         member_uuids: Vec<String>,
     },
+    /// An admin kicked this session out of `channel_id`. The connection
+    /// leaves the channel, if it is still in it, and tells its client.
+    Kicked {
+        channel_id: String,
+        fallback_channel_id: String,
+        reason: String,
+    },
+    /// The account was banned: close the connection.
+    Banned,
+}
+
+/// Why a moderation request failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ModerationError {
+    #[error(transparent)]
+    Auth(#[from] AuthError),
+    #[error("User is not online")]
+    NotOnline,
+    #[error("User is not in a channel they can be kicked from")]
+    NotInChannel,
+}
+
+impl ModerationError {
+    /// The error as told to the client (see [`AuthError::client_message`]).
+    pub fn client_message(&self) -> String {
+        match self {
+            ModerationError::Auth(e) => e.client_message(),
+            other => other.to_string(),
+        }
+    }
 }
 
 /// Static metadata for a channel (persisted in DB)
@@ -712,6 +742,30 @@ impl ServerState {
                 }
             }
         }
+    }
+
+    /// Whether `channel_id` names a channel that exists.
+    pub fn channel_exists(&self, channel_id: &str) -> bool {
+        self.channel_metadata.contains_key(channel_id)
+    }
+
+    /// The lobby's channel id, if the server has a lobby. This is where
+    /// clients are sent when they lose their channel.
+    pub fn lobby_channel_id(&self) -> Option<String> {
+        self.channel_metadata
+            .iter()
+            .find(|entry| entry.channel_type == aura_protocol::ChannelType::Lobby as i32)
+            .map(|entry| entry.id.clone())
+    }
+
+    /// The channel a session is in, found from its voice group. `None` when
+    /// it isn't in a channel that exists.
+    fn session_channel_id(&self, session: &ClientSession) -> Option<String> {
+        let voice_group_id = session.voice_group_id.as_deref()?;
+        self.channel_metadata
+            .iter()
+            .find(|entry| aura_protocol::make_mls_group_id(&entry.id, true) == voice_group_id)
+            .map(|entry| entry.id.clone())
     }
 
     /// Create a channel with both voice and text groups.
@@ -1888,12 +1942,7 @@ impl ServerState {
         }
 
         // Suggest the lobby as a landing spot, if the server has one.
-        let fallback_channel_id = self
-            .channel_metadata
-            .iter()
-            .find(|entry| entry.channel_type == 1)
-            .map(|entry| entry.id.clone())
-            .unwrap_or_default();
+        let fallback_channel_id = self.lobby_channel_id().unwrap_or_default();
 
         // Tell the occupants themselves that their channel is gone.
         for session_id in &occupants {
@@ -1922,6 +1971,119 @@ impl ServerState {
         }
 
         Ok(())
+    }
+
+    // --- Moderation ---
+
+    /// List users for `actor_uuid` (any admin; see [`AuthService::list_users`]).
+    pub fn list_users(
+        &self,
+        actor_uuid: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<ListUsersResponse, AuthError> {
+        let users = self.auth.list_users(actor_uuid, offset, limit)?;
+        let admins = self.db.admin_user_uuids()?;
+        let total_count = self.db.user_count()?;
+
+        let users = users
+            .into_iter()
+            .map(|user| UserInfo {
+                is_admin: admins.contains(&user.user_uuid),
+                user_uuid: user.user_uuid,
+                display_name: user.display_name,
+                verified: user.verified,
+                banned: user.banned,
+                created_at: user.created_at,
+            })
+            .collect();
+
+        Ok(ListUsersResponse {
+            users,
+            total_count,
+            success: true,
+            error_message: String::new(),
+        })
+    }
+
+    /// Ban or unban `target_uuid` on behalf of `actor_uuid` (see
+    /// [`AuthService::ban_user`] for who may). A ban also closes every
+    /// connection the target has open: the database flag alone only refuses
+    /// their next login.
+    pub fn set_user_banned(
+        &self,
+        actor_uuid: &str,
+        target_uuid: &str,
+        banned: bool,
+    ) -> Result<(), AuthError> {
+        if !banned {
+            return self.auth.unban_user(actor_uuid, target_uuid);
+        }
+
+        self.auth.ban_user(actor_uuid, target_uuid)?;
+        let mut dropped = 0;
+        for session in self.sessions.iter() {
+            if session.user_uuid == target_uuid {
+                let _ = session.sender.send(ServiceMessage::Banned);
+                dropped += 1;
+            }
+        }
+        info!(
+            "User {} banned by {}; closing {} connection(s)",
+            target_uuid, actor_uuid, dropped
+        );
+        Ok(())
+    }
+
+    /// Kick `target_uuid` out of the channel they are in, on behalf of
+    /// `actor_uuid` (see [`AuthService::authorize_kick`] for who may).
+    ///
+    /// Each of the target's sessions that is in a channel other than the
+    /// lobby is told to leave it, with the lobby as the place to go. The
+    /// target's connection does the leaving (as for any channel switch) and
+    /// sends the client a `ChannelDeleted` notice with reason `KICKED`.
+    /// Returns how many sessions were kicked.
+    pub fn kick_user(
+        &self,
+        actor_uuid: &str,
+        target_uuid: &str,
+        reason: &str,
+    ) -> Result<usize, ModerationError> {
+        self.auth.authorize_kick(actor_uuid, target_uuid)?;
+
+        let lobby = self.lobby_channel_id();
+        let mut online = false;
+        let mut kicked = 0;
+        for session in self.sessions.iter() {
+            if session.user_uuid != target_uuid {
+                continue;
+            }
+            online = true;
+            let Some(channel_id) = self.session_channel_id(&session) else {
+                continue;
+            };
+            if lobby.as_deref() == Some(channel_id.as_str()) {
+                continue;
+            }
+            let _ = session.sender.send(ServiceMessage::Kicked {
+                channel_id,
+                fallback_channel_id: lobby.clone().unwrap_or_default(),
+                reason: reason.to_string(),
+            });
+            kicked += 1;
+        }
+
+        if !online {
+            return Err(ModerationError::NotOnline);
+        }
+        if kicked == 0 {
+            return Err(ModerationError::NotInChannel);
+        }
+        info!(
+            "User {} kicked by {} ({} session(s))",
+            target_uuid, actor_uuid, kicked
+        );
+        Ok(kicked)
     }
 
     /// Delete a user profile and all associated data persistently.

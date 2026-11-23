@@ -650,13 +650,30 @@ pub struct JoinChannelRequestRecord {
     pub channel_id: String,
 }
 
-/// Notification that a channel the client was in has been deleted.
+/// Why the server took the client out of a channel (`ChannelDeletedRecord`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ChannelRemovalReason {
+    /// The channel was deleted.
+    Deleted,
+    /// The client asked to join a channel that doesn't exist; it is now in
+    /// no channel.
+    NotFound,
+    /// An admin kicked the client out of the channel, which still exists.
+    Kicked,
+}
+
+/// Notification (MSG_CHANNEL_DELETED, 0x47) that the client is no longer in
+/// a channel and should move to `fallback_channel_id`: the channel was
+/// deleted, the channel it tried to join doesn't exist, or it was kicked.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ChannelDeletedRecord {
     pub channel_id: String,
     /// Channel to fall back to (the lobby, when the server has one). Empty
     /// when the server has no suggestion and the client should pick.
     pub fallback_channel_id: String,
+    pub reason: ChannelRemovalReason,
+    /// The admin's reason, for a kick. Display text; empty otherwise.
+    pub detail: String,
 }
 
 /// Server's reply to a `CreateChannelRequest` (MSG_CREATE_CHANNEL, 0x40).
@@ -674,11 +691,51 @@ pub struct MetadataUpdateResponseRecord {
     pub error_message: String,
 }
 
-/// Server's reply to `DeleteChannelRequest` (0x43) or `DeleteUserRequest` (0x44).
+/// Server's reply to `DeleteChannelRequest` (0x43), `DeleteUserRequest`
+/// (0x44) and the moderation requests: `VerifyUserRequest` (0x49),
+/// `BanUserRequest` (0x4A), `GrantAdminRequest` (0x4B) and
+/// `KickUserRequest` (0x4C).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AdminResponseRecord {
     pub success: bool,
     pub error_message: String,
+}
+
+/// Admin permissions, as set with [`encode_grant_admin_request`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AdminPermissionsRecord {
+    /// Verify users.
+    pub verify_users: bool,
+    /// Ban, unban and kick users, and delete their accounts.
+    pub ban_users: bool,
+    /// Set other users' admin permissions, and act on other admins.
+    pub grant_admin: bool,
+    /// Create, edit and delete channels.
+    pub manage_channels: bool,
+}
+
+/// One account in a [`ListUsersResponseRecord`].
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UserInfoRecord {
+    pub user_uuid: String,
+    pub display_name: String,
+    pub verified: bool,
+    pub banned: bool,
+    pub is_admin: bool,
+    /// Unix time (seconds) the account was created.
+    pub created_at: i64,
+}
+
+/// Server's reply to `ListUsersRequest` (MSG_LIST_USERS, 0x48).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ListUsersResponseRecord {
+    /// `false` when the request was refused (see `error_message`).
+    pub success: bool,
+    pub error_message: String,
+    /// This page of accounts, oldest first.
+    pub users: Vec<UserInfoRecord>,
+    /// Accounts on the server in all.
+    pub total_count: u32,
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
@@ -887,9 +944,16 @@ pub fn decode_channel_deleted(data: Vec<u8>) -> Result<ChannelDeletedRecord, Aud
     use prost::Message;
     let proto = aura_protocol::ChannelDeleted::decode(&data[..])
         .map_err(|_| AudioError::PacketParseError)?;
+    let reason = match proto.reason() {
+        aura_protocol::ChannelRemovalReason::Deleted => ChannelRemovalReason::Deleted,
+        aura_protocol::ChannelRemovalReason::NotFound => ChannelRemovalReason::NotFound,
+        aura_protocol::ChannelRemovalReason::Kicked => ChannelRemovalReason::Kicked,
+    };
     Ok(ChannelDeletedRecord {
         channel_id: proto.channel_id,
         fallback_channel_id: proto.fallback_channel_id,
+        reason,
+        detail: proto.detail,
     })
 }
 
@@ -1417,6 +1481,114 @@ mod tests {
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].session_id, session_id);
     }
+
+    #[test]
+    fn moderation_requests_encode_their_fields() {
+        let req = aura_protocol::ListUsersRequest::decode(&encode_list_users_request(20, 10)[..])
+            .unwrap();
+        assert_eq!((req.offset, req.limit), (20, 10));
+        assert!(req.session_token.is_empty());
+
+        let req =
+            aura_protocol::VerifyUserRequest::decode(&encode_verify_user_request("U_a".into())[..])
+                .unwrap();
+        assert_eq!(req.target_user_uuid, "U_a");
+
+        let req = aura_protocol::BanUserRequest::decode(
+            &encode_ban_user_request("U_b".into(), true, "spam".into())[..],
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                req.target_user_uuid.as_str(),
+                req.banned,
+                req.reason.as_str()
+            ),
+            ("U_b", true, "spam")
+        );
+
+        let req = aura_protocol::GrantAdminRequest::decode(
+            &encode_grant_admin_request(
+                "U_c".into(),
+                AdminPermissionsRecord {
+                    verify_users: true,
+                    ban_users: false,
+                    grant_admin: false,
+                    manage_channels: true,
+                },
+            )[..],
+        )
+        .unwrap();
+        assert_eq!(req.target_user_uuid, "U_c");
+        assert!(req.verify_users && req.manage_channels);
+        assert!(!req.ban_users && !req.grant_admin);
+
+        let req = aura_protocol::KickUserRequest::decode(
+            &encode_kick_user_request("U_d".into(), "be nice".into())[..],
+        )
+        .unwrap();
+        assert_eq!(
+            (req.target_user_uuid.as_str(), req.reason.as_str()),
+            ("U_d", "be nice")
+        );
+    }
+
+    #[test]
+    fn list_users_response_decodes() {
+        let bytes = aura_protocol::ListUsersResponse {
+            users: vec![aura_protocol::UserInfo {
+                user_uuid: "U_a".into(),
+                display_name: "Alice".into(),
+                verified: true,
+                banned: false,
+                is_admin: true,
+                created_at: 1_700_000_000,
+            }],
+            total_count: 7,
+            success: true,
+            error_message: String::new(),
+        }
+        .encode_to_vec();
+
+        let resp = decode_list_users_response(bytes).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.total_count, 7);
+        assert_eq!(resp.users.len(), 1);
+        let alice = &resp.users[0];
+        assert_eq!(
+            (alice.user_uuid.as_str(), alice.display_name.as_str()),
+            ("U_a", "Alice")
+        );
+        assert!(alice.verified && alice.is_admin && !alice.banned);
+        assert_eq!(alice.created_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn channel_deleted_carries_the_removal_reason() {
+        let kicked = aura_protocol::ChannelDeleted {
+            channel_id: "C_1".into(),
+            fallback_channel_id: "C_lobby".into(),
+            reason: aura_protocol::ChannelRemovalReason::Kicked as i32,
+            detail: "be nice".into(),
+        }
+        .encode_to_vec();
+        let notice = decode_channel_deleted(kicked).unwrap();
+        assert_eq!(notice.reason, ChannelRemovalReason::Kicked);
+        assert_eq!(notice.detail, "be nice");
+        assert_eq!(notice.fallback_channel_id, "C_lobby");
+
+        // A notice from a server that predates `reason` is a deletion.
+        let legacy = aura_protocol::ChannelDeleted {
+            channel_id: "C_1".into(),
+            fallback_channel_id: String::new(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            decode_channel_deleted(legacy).unwrap().reason,
+            ChannelRemovalReason::Deleted
+        );
+    }
 }
 #[uniffi::export]
 pub fn encode_create_channel(
@@ -1472,6 +1644,106 @@ pub fn encode_update_channel(
 #[uniffi::export]
 pub fn encode_delete_user_request(user_uuid: String) -> Vec<u8> {
     aura_protocol::DeleteUserRequest { user_uuid }.encode_to_vec()
+}
+
+// ============================================================================
+// Moderation (MSG 0x48-0x4C)
+//
+// The server authorises these with the account the connection logged in as;
+// the requests' legacy `session_token` fields stay empty. Every request but
+// ListUsers is answered with an `AdminResponse` (see
+// [`decode_admin_response`]) on the request's own message type.
+// ============================================================================
+
+/// Payload of `ListUsersRequest` (0x48), answered with a `ListUsersResponse`
+/// (see [`decode_list_users_response`]). Any admin may list users. A `limit`
+/// of 0 asks for the server's default page size (100); the server caps it
+/// at 500.
+#[uniffi::export]
+pub fn encode_list_users_request(offset: u32, limit: u32) -> Vec<u8> {
+    aura_protocol::ListUsersRequest {
+        session_token: String::new(),
+        offset,
+        limit,
+    }
+    .encode_to_vec()
+}
+
+/// Decode the server's reply to `ListUsersRequest` (0x48).
+#[uniffi::export]
+pub fn decode_list_users_response(data: Vec<u8>) -> Result<ListUsersResponseRecord, AudioError> {
+    let proto = aura_protocol::ListUsersResponse::decode(&data[..])
+        .map_err(|_| AudioError::PacketParseError)?;
+    Ok(ListUsersResponseRecord {
+        success: proto.success,
+        error_message: proto.error_message,
+        users: proto
+            .users
+            .into_iter()
+            .map(|u| UserInfoRecord {
+                user_uuid: u.user_uuid,
+                display_name: u.display_name,
+                verified: u.verified,
+                banned: u.banned,
+                is_admin: u.is_admin,
+                created_at: u.created_at,
+            })
+            .collect(),
+        total_count: proto.total_count,
+    })
+}
+
+/// Payload of `VerifyUserRequest` (0x49). Needs `verify_users`.
+#[uniffi::export]
+pub fn encode_verify_user_request(target_user_uuid: String) -> Vec<u8> {
+    aura_protocol::VerifyUserRequest {
+        session_token: String::new(),
+        target_user_uuid,
+    }
+    .encode_to_vec()
+}
+
+/// Payload of `BanUserRequest` (0x4A): `banned` true bans, false unbans.
+/// Needs `ban_users`. A ban closes the target's connections at once.
+#[uniffi::export]
+pub fn encode_ban_user_request(target_user_uuid: String, banned: bool, reason: String) -> Vec<u8> {
+    aura_protocol::BanUserRequest {
+        session_token: String::new(),
+        target_user_uuid,
+        banned,
+        reason,
+    }
+    .encode_to_vec()
+}
+
+/// Payload of `GrantAdminRequest` (0x4B). Needs `grant_admin`. The
+/// permissions replace the target's; granting none revokes admin status.
+#[uniffi::export]
+pub fn encode_grant_admin_request(
+    target_user_uuid: String,
+    permissions: AdminPermissionsRecord,
+) -> Vec<u8> {
+    aura_protocol::GrantAdminRequest {
+        session_token: String::new(),
+        target_user_uuid,
+        verify_users: permissions.verify_users,
+        ban_users: permissions.ban_users,
+        grant_admin: permissions.grant_admin,
+        manage_channels: permissions.manage_channels,
+    }
+    .encode_to_vec()
+}
+
+/// Payload of `KickUserRequest` (0x4C). Needs `ban_users`. The target is
+/// moved out of their channel and sent a `ChannelDeleted` notice with reason
+/// [`ChannelRemovalReason::Kicked`] and `reason` as its detail.
+#[uniffi::export]
+pub fn encode_kick_user_request(target_user_uuid: String, reason: String) -> Vec<u8> {
+    aura_protocol::KickUserRequest {
+        target_user_uuid,
+        reason,
+    }
+    .encode_to_vec()
 }
 
 // ============================================================================
