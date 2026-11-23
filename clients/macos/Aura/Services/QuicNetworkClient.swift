@@ -216,7 +216,8 @@ public class QuicNetworkClient {
     private static let MSG_MLS_COMMIT: UInt8 = 0x54         // Server broadcasts commit
     private static let MSG_MLS_WELCOME: UInt8 = 0x55        // Server broadcasts welcome
     private static let MSG_MLS_RATCHET_REQUEST: UInt8 = 0x56 // Server asks us (founder) to ratchet
-    private static let MSG_MLS_RATCHET_COMMIT: UInt8 = 0x57  // We return the empty commit
+    private static let MSG_MLS_RATCHET_COMMIT: UInt8 = 0x57  // We return a commit with no Welcome (ratchet or removals)
+    private static let MSG_MLS_SYNC_MEMBERS: UInt8 = 0x58    // Server tells us (founder) who should remain in a group
     
     // Security limits
     private static let MAX_AUDIO_PACKET_SIZE = 65536
@@ -1280,6 +1281,9 @@ public class QuicNetworkClient {
         case Self.MSG_MLS_WELCOME: // 0x55 - Welcome message from founder
             await handleMlsWelcome(stream: stream)
 
+        case Self.MSG_MLS_SYNC_MEMBERS: // 0x58 - Remove members who left the channel
+            await handleMlsSyncMembers(stream: stream)
+
         case Self.MSG_MLS_RATCHET_REQUEST: // 0x56 - Server asks us to advance the epoch
             await handleMlsRatchetRequest(stream: stream)
             
@@ -1308,8 +1312,11 @@ public class QuicNetworkClient {
             await handleDeleteUserResponse(stream: stream)
 
         default:
-            print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
-            break
+            // Every control frame is [type][u32 LE length][payload]. Consume
+            // the payload of a type we don't know, or its bytes would be read
+            // as the next frames and the stream would never recover.
+            print(String(format: "[QuicClient] Skipping unknown message type: 0x%02X", type))
+            _ = try? await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
         }
     }
     
@@ -1490,6 +1497,7 @@ public class QuicNetworkClient {
                 self.systemEvents.removeAll { $0.channelId == deletedId }
 
                 if wasCurrent {
+                    self.forgetChannelGroups(deletedId)
                     self.currentChannelId = nil
                     self.currentVoiceChannelId = nil
                     self.connectionStatus = "Connected"
@@ -1989,6 +1997,71 @@ public class QuicNetworkClient {
     ///
     /// This is the batched PFS ratchet: an empty commit rotates the group
     /// secret so keys from the previous epoch cannot decrypt future traffic.
+    /// Drop our state and keys for a channel's voice and text groups.
+    private func forgetChannelGroups(_ channelId: String) {
+        guard let mls = mlsWrapper else { return }
+        do {
+            try mls.forgetGroup(channelId: channelId, isVoice: true)
+            try mls.forgetGroup(channelId: channelId, isVoice: false)
+        } catch {
+            print("[QuicClient] Failed to forget groups for \(channelId): \(error)")
+        }
+    }
+
+    /// The server lists who should still be in a group we founded (someone
+    /// left the channel). Commit their removal and hand the commit back on
+    /// the ratchet-commit path; nothing is sent when nobody needs removing.
+    private func handleMlsSyncMembers(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let sync = try decodeMlsSyncMembers(data: payload)
+            let channelId = sync.channelId
+            let isVoice = sync.isVoice
+
+            guard let mls = mlsWrapper, let controlStream else { return }
+            guard mls.isMember(channelId: channelId, isVoice: isVoice) else {
+                print("[QuicClient] Member sync for a group we're not in: \(channelId)")
+                return
+            }
+
+            guard let commit = try mls.removeMembersExcept(
+                channelId: channelId,
+                isVoice: isVoice,
+                keepUserIds: sync.memberUuids
+            ) else { return }
+
+            let envelopeOut = MlsEnvelopeRecord(
+                senderId: sessionId ?? userId,
+                channelId: channelId,
+                groupType: isVoice ? .voice : .text,
+                targetSessionId: 0,
+                targetUuid: "",
+                epoch: 0,
+                keyPackage: nil,
+                commit: commit,
+                welcome: nil,
+                commitWelcome: nil
+            )
+
+            let responsePayload = encodeMlsEnvelope(envelope: envelopeOut)
+            var msg = Data([Self.MSG_MLS_RATCHET_COMMIT])
+            let len = UInt32(responsePayload.count).littleEndian
+            msg.append(withUnsafeBytes(of: len) { Data($0) })
+            msg.append(responsePayload)
+
+            try await send(data: msg, on: controlStream)
+            print("[QuicClient] Removed departed members from \(isVoice ? "voice" : "text") group \(channelId)")
+
+            if isVoice {
+                try updateAudioKeysFromMls(channelId: channelId)
+            } else {
+                await MainActor.run { self.refreshTextSenderKeys(channelId: channelId) }
+            }
+        } catch {
+            print("[QuicClient] Failed to handle MLS member sync: \(error)")
+        }
+    }
+
     private func handleMlsRatchetRequest(stream: NWConnection) async {
         do {
             let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
@@ -2364,6 +2437,12 @@ public class QuicNetworkClient {
         msg.append(payload)
         
         try await send(data: msg, on: stream)
+
+        // Leaving a channel leaves its groups: drop our copy of their state
+        // and keys now. The server has the remaining founder remove our leaf.
+        if let previous = currentChannelId, previous != channelId {
+            forgetChannelGroups(previous)
+        }
         currentChannelId = channelId
         currentVoiceChannelId = channelId
         let channelName = channels.first(where: { $0.id == channelId })?.name ?? "channel \(channelId)"

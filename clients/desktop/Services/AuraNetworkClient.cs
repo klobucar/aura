@@ -79,7 +79,8 @@ public class AuraNetworkClient : IAsyncDisposable
     private const byte MSG_UPDATE_STATUS = 0x45;
     private const byte MSG_CHANNEL_DELETED = 0x47;
     private const byte MSG_MLS_RATCHET_REQUEST = 0x56;
-    private const byte MSG_MLS_RATCHET_COMMIT = 0x57;
+    private const byte MSG_MLS_RATCHET_COMMIT = 0x57; // a commit with no Welcome: ratchet or removals
+    private const byte MSG_MLS_SYNC_MEMBERS = 0x58;   // server tells us (founder) who should remain
     private const byte MSG_MLS_JOIN = 0x50;           
     private const byte MSG_MLS_COMMIT_WELCOME = 0x51; 
     private const byte MSG_MLS_CREATE_GROUP = 0x52;   
@@ -519,6 +520,11 @@ public class AuraNetworkClient : IAsyncDisposable
         var req = new JoinChannelRequest { ChannelId = channelId };
         await SendProtoRequestAsync(MSG_JOIN_CHANNEL, req, ct);
 
+        // Leaving a channel leaves its groups: drop our copy of their state and
+        // keys now. The server has the remaining founder remove our leaf.
+        if (!string.IsNullOrEmpty(_currentChannelId))
+            ForgetChannelGroups(_currentChannelId);
+
         _currentChannelId = channelId;
         OnStatusChanged?.Invoke($"Joined channel {channelId}");
         
@@ -942,6 +948,10 @@ public class AuraNetworkClient : IAsyncDisposable
                         await HandleMlsRatchetRequestAsync(ct);
                         break;
 
+                    case MSG_MLS_SYNC_MEMBERS: // 0x58 - Remove members who left the channel
+                        await HandleMlsSyncMembersAsync(ct);
+                        break;
+
                     case MSG_PROFILE_UPDATED: // 0x46 - Someone (maybe us) edited their profile
                         await HandleProfileUpdatedAsync(ct);
                         break;
@@ -1136,6 +1146,7 @@ public class AuraNetworkClient : IAsyncDisposable
             _channelMembers.TryRemove(notice.ChannelId, out _);
             _textGroupReady.TryRemove(notice.ChannelId, out _);
             _voiceGroupReady.TryRemove(notice.ChannelId, out _);
+            ForgetChannelGroups(notice.ChannelId);
 
             OnChannelDeleted?.Invoke(notice.ChannelId, notice.FallbackChannelId);
         }
@@ -1543,6 +1554,65 @@ public class AuraNetworkClient : IAsyncDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[AuraClient] Failed to handle MLS ratchet request: {ex.Message}");
+        }
+    }
+
+    /// <summary>Drop our state and keys for a channel's voice and text groups.</summary>
+    private void ForgetChannelGroups(string channelId)
+    {
+        if (_mlsWrapper == null) return;
+        try
+        {
+            _mlsWrapper.ForgetGroup(channelId, true);
+            _mlsWrapper.ForgetGroup(channelId, false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to forget groups for {channelId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The server lists who should still be in a group we founded (someone left
+    /// the channel). Commit their removal and hand the commit back on the
+    /// ratchet-commit path; nothing is sent when nobody needs removing.
+    /// </summary>
+    private async Task HandleMlsSyncMembersAsync(CancellationToken ct)
+    {
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+
+        try
+        {
+            var sync = Aura.V1Alpha1.MlsSyncMembers.Parser.ParseFrom(packet);
+            string channelId = sync.ChannelId;
+            bool isVoice = sync.GroupType == Aura.V1Alpha1.MlsGroupType.Voice;
+
+            if (_mlsWrapper == null || _controlStream == null) return;
+            if (!_mlsWrapper.IsMember(channelId, isVoice))
+            {
+                Console.WriteLine($"[AuraClient] Member sync for a group we're not in: {channelId}");
+                return;
+            }
+
+            var commit = _mlsWrapper.RemoveMembersExcept(channelId, isVoice, sync.MemberUuids.ToArray());
+            if (commit == null) return;
+
+            var envelopeOut = new MlsEnvelope {
+                SenderId = _userId,
+                ChannelId = channelId,
+                GroupType = sync.GroupType,
+                Commit = ByteString.CopyFrom(commit)
+            };
+
+            await SendProtoRequestAsync(MSG_MLS_RATCHET_COMMIT, envelopeOut, ct);
+            Console.WriteLine($"[AuraClient] Removed departed members from {(isVoice ? "voice" : "text")} group {channelId}");
+
+            if (isVoice) UpdateAudioKeysFromMls(channelId);
+            else RefreshTextSenderKeys(channelId);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to handle MLS member sync: {ex.Message}");
         }
     }
 
