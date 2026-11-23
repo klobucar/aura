@@ -9,6 +9,7 @@
 pub mod audio_io;
 pub mod audio_pipeline;
 pub mod crypto;
+pub mod identity_backup;
 pub mod identity_ffi;
 pub mod jitter_buffer;
 pub mod mls;
