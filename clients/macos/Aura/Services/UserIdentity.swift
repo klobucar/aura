@@ -367,6 +367,22 @@ public class UserIdentity: ObservableObject {
         print("[Identity] Deleted \(deleted) keychain item(s) for profile \(id)")
     }
 
+    // MARK: - Backup
+
+    /// The identity secret, for `IdentityBackup.encrypt` and nothing else:
+    /// it must never be written anywhere unencrypted.
+    func secretForBackup() -> Data? {
+        secret
+    }
+
+    /// An identity restored from a backup, under a fresh profile id so that
+    /// restoring can never take over an existing profile's keychain item.
+    static func restored(secret: Data, displayName: String) -> UserIdentity? {
+        guard let identity = make(id: UUID(), secret: secret) else { return nil }
+        identity.displayName = displayName
+        return identity
+    }
+
     // MARK: - Import/Export
 
     /// Export profile as JSON bundle for cross-platform transfer.

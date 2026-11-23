@@ -13,7 +13,7 @@ struct ProfileView: View {
     init(client: QuicNetworkClient) {
         self.client = client
         let sessionId = client.sessionId ?? 0
-        if let myProfile = client.profiles[sessionId] {
+        if let myProfile = client.profile(forSession: sessionId) {
             _bio = State(initialValue: myProfile.bio)
             _avatarData = State(initialValue: Data(myProfile.avatarData))
         }
@@ -166,7 +166,7 @@ struct ProfileView: View {
             Circle()
                 .fill(AuraTheme.Gradients.primary)
                 .overlay(
-                    Text(client.profiles[client.sessionId ?? 0]?.displayName.prefix(1).uppercased() ?? "?")
+                    Text(client.profile(forSession: client.sessionId)?.displayName.prefix(1).uppercased() ?? "?")
                         .font(.system(size: 40, weight: .bold))
                         .foregroundStyle(.white)
                 )

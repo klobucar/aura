@@ -35,9 +35,17 @@ public class QuicNetworkClient {
     /// All channels on the server
     public var channels: [ChannelModel] = []
     
-    /// All user profiles by session ID
-    public var profiles: [UInt32: UserProfileRecord] = [:]
-    
+    /// User profiles by account id (`U_…`) — the key the server uses. Session
+    /// ids are ephemeral; go through `profile(forSession:)` to look one up.
+    public var profiles: [String: UserProfileRecord] = [:]
+
+    /// The profile of whoever holds `sessionId` right now, if known.
+    public func profile(forSession sessionId: UInt32?) -> UserProfileRecord? {
+        guard let sessionId else { return nil }
+        let uuid = sessionId == self.sessionId ? userUuid : uuidForSession(sessionId)
+        return uuid.flatMap { profiles[$0] }
+    }
+
     /// Received chat messages (populated by incoming text packets)
     public var receivedMessages: [ReceivedTextMessage] = []
     
@@ -131,6 +139,33 @@ public class QuicNetworkClient {
     /// Last detected untrusted certificate fingerprint for TOFU prompt
     public var lastUntrustedFingerprint: String?
 
+    /// Set before `connect` to accept the server only if its leaf
+    /// certificate's SHA-256 is this (an invite link's `fp`), in every build
+    /// configuration and whether or not the certificate is publicly valid.
+    /// Hex, either case.
+    public var expectedCertificateFingerprint: String?
+
+    /// Outcome of the pin check for the latest `connect`.
+    private var pinCheck: CertificatePinCheck?
+
+    /// True when the latest `connect` failed because the server's certificate
+    /// did not match `expectedCertificateFingerprint`.
+    public var certificateDidNotMatchPin: Bool { pinCheck?.mismatched ?? false }
+
+    /// Host and port of the server this client dialled, as dialled.
+    public var connectedHost: String? { savedHost }
+    public var connectedPort: UInt16? { savedPort }
+
+    /// The server password this connection logged in with, if any.
+    public var connectionPassword: String? {
+        savedPassword.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The pending `deleteOwnAccount()` call, resumed by the server's 0x44
+    /// reply, a timeout, or the connection dropping.
+    private var accountDeletion: CheckedContinuation<Void, Error>?
+    private var accountDeletionToken: UUID?
+
     /// Rolling round-trip latency to the server, in milliseconds.
     /// `nil` until the first datagram pong has been received (or after a
     /// reset). Driven by the datagram ping loop below.
@@ -168,6 +203,7 @@ public class QuicNetworkClient {
     private static let MSG_UPDATE_CHANNEL: UInt8 = 0x41
     private static let MSG_UPDATE_PROFILE: UInt8 = 0x42
     private static let MSG_DELETE_CHANNEL: UInt8 = 0x43
+    private static let MSG_DELETE_USER: UInt8 = 0x44
     private static let MSG_UPDATE_STATUS: UInt8 = 0x45
     private static let MSG_PROFILE_UPDATED: UInt8 = 0x46 // Server → clients broadcast
     private static let MSG_CHANNEL_DELETED: UInt8 = 0x47 // Server → occupants of a deleted channel
@@ -347,13 +383,31 @@ public class QuicNetworkClient {
         quicOptions.isDatagram = true
         quicOptions.maxDatagramFrameSize = 1200
         
+        // An invite's fingerprint, when there is one, decides alone.
+        let expectedFingerprint = expectedCertificateFingerprint?.lowercased()
+        let pinCheck = CertificatePinCheck()
+        self.pinCheck = pinCheck
+
         // Strict certificate verification in release, TOFU in dev
         sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { [weak self] _, trust, completeHandler in
             guard let self = self else {
                 completeHandler(false)
                 return
             }
-            
+
+            if let expectedFingerprint {
+                let presented = Self.leafCertificateFingerprint(sec_trust_copy_ref(trust).takeRetainedValue())
+                if presented == expectedFingerprint {
+                    print("[QuicClient] TLS verify - certificate matches the invite's fingerprint")
+                    completeHandler(true)
+                } else {
+                    print("[QuicClient] TLS verify - certificate does not match the invite's fingerprint")
+                    pinCheck.recordMismatch()
+                    completeHandler(false)
+                }
+                return
+            }
+
 #if DEBUG
             print("[QuicClient] DEBUG: TLS verify - accepting all certificates")
             completeHandler(true)
@@ -369,15 +423,11 @@ public class QuicNetworkClient {
             }
             
             // Standard trust failed - perform TOFU check
-            guard let cert = SecTrustGetCertificateAtIndex(trustRef, 0) else {
+            guard let fingerprint = Self.leafCertificateFingerprint(trustRef) else {
                 print("[QuicClient] TLS verify - no certificate found")
                 completeHandler(false)
                 return
             }
-            
-            let data = SecCertificateCopyData(cert) as Data
-            let hash = SHA256.hash(data: data)
-            let fingerprint = hash.compactMap { String(format: "%02x", $0) }.joined()
             
             print("[QuicClient] TLS verify failure - fingerprint: \(fingerprint)")
             
@@ -454,6 +504,16 @@ public class QuicNetworkClient {
         print("[QuicClient] QUIC tunnel ready, waiting for server stream...")
     }
     
+    /// Lowercase hex SHA-256 of the leaf certificate's DER: the value pinned
+    /// for trust-on-first-use and carried by invite links.
+    nonisolated static func leafCertificateFingerprint(_ trust: SecTrust) -> String? {
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let leaf = chain.first
+        else { return nil }
+        let der = SecCertificateCopyData(leaf) as Data
+        return SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func waitForGroupReady(_ group: NWConnectionGroup) async throws {
         return try await withCheckedThrowingContinuation { continuation in
             var resumed = false
@@ -893,11 +953,15 @@ public class QuicNetworkClient {
 
     /// Update user profile
     public func updateProfile(bio: String, avatarData: Data) async {
-        guard let sessionId = self.sessionId else { return }
-        
+        // The server only accepts a profile whose id is our account id.
+        guard self.sessionId != nil, let userUuid else { return }
+
         let record = UserProfileRecord(
-            userId: sessionId,
-            displayName: profiles[sessionId]?.displayName ?? "Unknown",
+            userId: userUuid,
+            displayName: profiles[userUuid]?.displayName
+                ?? savedIdentity?.displayName
+                ?? displayName(forUuid: userUuid)
+                ?? "Unknown",
             bio: bio,
             avatarData: avatarData,
             signature: Data(), // Server handles signature for now or we do it in Rust
@@ -1240,6 +1304,9 @@ public class QuicNetworkClient {
         case Self.MSG_DELETE_CHANNEL: // 0x43 - Reply to our DeleteChannelRequest
             await handleDeleteChannelResponse(stream: stream)
 
+        case Self.MSG_DELETE_USER: // 0x44 - Reply to our DeleteUserRequest
+            await handleDeleteUserResponse(stream: stream)
+
         default:
             print(String(format: "[QuicClient] Unknown message type: 0x%02X", type))
             break
@@ -1287,6 +1354,8 @@ public class QuicNetworkClient {
                     // Add system event
                     let event = SystemEvent(content: "\(displayName) joined", channelId: channelId)
                     systemEvents.append(event)
+                    MessageNotifier.shared.presenceChanged(
+                        "\(displayName) joined", identifier: "aura_user_joined_\(sessionId)")
                     
                     print("[QuicClient] User joined channel \(channelId): \(displayName) (session \(sessionId))")
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
@@ -1365,20 +1434,17 @@ public class QuicNetworkClient {
                 
                 // If not found in channels, try a profile cache lookup for the session ID
                 if foundUser == nil {
-                    if let profile = profiles[sessionId] {
+                    if let profile = profile(forSession: sessionId) {
                         name = profile.displayName
 //                    } else if sessionId == userId {
 //                        name = identity?.displayName ?? "You"
                     }
                 }
                 
-                // 1. Post macOS system notification
-                let content = UNMutableNotificationContent()
-                content.title = "Aura"
-                content.body = "\(name) disconnected"
-                content.sound = .default
-                let request = UNNotificationRequest(identifier: "aura_user_left_\(sessionId)", content: content, trigger: nil)
-                UNUserNotificationCenter.current().add(request)
+                // 1. Banner — only if the user asked for join and leave
+                //    banners, and only while Aura is in the background.
+                MessageNotifier.shared.presenceChanged(
+                    "\(name) disconnected", identifier: "aura_user_left_\(sessionId)")
                 
                 // 2. Add system event to chat
                 let event = SystemEvent(content: "\(name) disconnected", channelId: foundChannelId ?? channelId)
@@ -1532,6 +1598,29 @@ public class QuicNetworkClient {
         }
     }
 
+    /// Handle the server's reply to our DeleteUserRequest: an AdminResponse,
+    /// framed as 0x44 like the request.
+    private func handleDeleteUserResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeAdminResponse(data: payload)
+            guard accountDeletion != nil else {
+                print("[QuicClient] Unexpected DeleteUser response (success=\(response.success))")
+                return
+            }
+            if response.success {
+                print("[QuicClient] Account deleted by the server")
+                finishAccountDeletion(.success(()))
+            } else {
+                print("[QuicClient] Delete account failed: \(response.errorMessage)")
+                let message = response.errorMessage.isEmpty ? "The server refused." : response.errorMessage
+                finishAccountDeletion(.failure(QuicClientError.accountDeletionFailed(message)))
+            }
+        } catch {
+            print("[QuicClient] Failed to parse DeleteUser AdminResponse: \(error)")
+        }
+    }
+
     /// The server re-checks admin status on every request rather than
     /// trusting a cached flag, but our own `isAdmin` is only set once at
     /// login (see AuthResponse handling above) and never refreshed. If a
@@ -1560,7 +1649,7 @@ public class QuicNetworkClient {
             await MainActor.run {
                 self.channels = snapshot.channels.map { ChannelModel(record: $0) }
                 
-                var newProfiles: [UInt32: UserProfileRecord] = [:]
+                var newProfiles: [String: UserProfileRecord] = [:]
                 for p in snapshot.profiles {
                     newProfiles[p.userId] = p
                 }
@@ -1579,7 +1668,15 @@ public class QuicNetworkClient {
                         self.registerSessionIdentity(sessionId: sid, userUuid: userStatus.userUuid)
 
                         guard sid != self.sessionId else { continue }
-                        usersList.append(ChannelUser(sessionId: sid, displayName: userStatus.displayName))
+                        // Bio and avatar come from the snapshot's profiles,
+                        // which are keyed by account id, not session.
+                        let profile = newProfiles[userStatus.userUuid]
+                        usersList.append(ChannelUser(
+                            sessionId: sid,
+                            displayName: userStatus.displayName,
+                            bio: profile?.bio ?? "",
+                            avatarData: profile.flatMap { $0.avatarData.isEmpty ? nil : $0.avatarData }
+                        ))
                     }
                     newUserMapping[c.channelId] = usersList
 
@@ -1976,7 +2073,17 @@ public class QuicNetworkClient {
     /// Update audio sender/receiver keys from MLS
     private func updateAudioKeysFromMls(channelId: String) throws {
         guard let mls = mlsWrapper, let session = sessionId else { return }
-        
+
+        // Only the channel we are in may set our sending key. MLS state for a
+        // channel we left lingers, and the server still routes that group's
+        // commits to us (e.g. as its founder adding a newcomer) — without
+        // this, our audio in the new room would go out under the old room's
+        // key, where nobody can decrypt it.
+        guard channelId == currentVoiceChannelId else {
+            print("[QuicClient] Ignoring voice key update for \(channelId); we are in \(currentVoiceChannelId ?? "no channel")")
+            return
+        }
+
         // Get our own key for sending
         let myKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: session)
         let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
@@ -2315,7 +2422,7 @@ public class QuicNetworkClient {
                 // user lists so speaker labels and avatar thumbnails update
                 // without waiting for a full ServerSnapshot round-trip.
                 for channelId in self.usersByChannel.keys {
-                    if let idx = self.usersByChannel[channelId]?.firstIndex(where: { $0.id == profile.userId }),
+                    if let idx = self.usersByChannel[channelId]?.firstIndex(where: { self.uuidForSession($0.id) == profile.userId }),
                        let existing = self.usersByChannel[channelId]?[idx] {
                         self.usersByChannel[channelId]?[idx] = ChannelUser(
                             sessionId: existing.id,
@@ -2351,11 +2458,6 @@ public class QuicNetworkClient {
             
             // Update profile state
             await MainActor.run {
-                if var profile = profiles[update.sessionId] {
-                    // Update profile record (if we want to store it there)
-                    // profiles[update.sessionId] = profile
-                }
-                
                 // Update usersByChannel mapping
                 for channelId in usersByChannel.keys {
                     if let index = usersByChannel[channelId]?.firstIndex(where: { $0.id == update.sessionId }) {
@@ -2460,8 +2562,64 @@ public class QuicNetworkClient {
         print("[QuicClient] Sent encrypted text message (\(msg.count) bytes)")
     }
     
+    // MARK: - Account
+
+    /// Delete this account on the server (MSG_DELETE_USER, 0x44): the server
+    /// releases the name, removes the profile and drops our session. Throws
+    /// the server's error message on refusal.
+    ///
+    /// On success this client stops reconnecting — the session is gone, and
+    /// logging in again would create a new account — so call `disconnect()`
+    /// next.
+    public func deleteOwnAccount() async throws {
+        guard let stream = controlStream, isAuthenticated, let uuid = userUuid else {
+            throw QuicClientError.notConnected
+        }
+        guard accountDeletion == nil else {
+            throw QuicClientError.protocolError("Account deletion already in progress")
+        }
+
+        let payload = encodeDeleteUserRequest(userUuid: uuid)
+        var msg = Data([Self.MSG_DELETE_USER])
+        let len = UInt32(payload.count).littleEndian
+        msg.append(withUnsafeBytes(of: len) { Data($0) })
+        msg.append(payload)
+
+        let token = UUID()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            accountDeletion = continuation
+            accountDeletionToken = token
+            Task {
+                do {
+                    try await self.send(data: msg, on: stream)
+                    print("[QuicClient] Delete account request sent")
+                } catch {
+                    self.finishAccountDeletion(.failure(error))
+                }
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(15))
+                guard self.accountDeletionToken == token else { return }
+                self.finishAccountDeletion(.failure(QuicClientError.accountDeletionUnconfirmed))
+            }
+        }
+    }
+
+    private func finishAccountDeletion(_ result: Result<Void, Error>) {
+        guard let continuation = accountDeletion else { return }
+        accountDeletion = nil
+        accountDeletionToken = nil
+        if case .success = result {
+            // The server has dropped our session; nothing may reconnect.
+            isIntentionalDisconnect = true
+            reconnectTask?.cancel()
+            reconnectTask = nil
+        }
+        continuation.resume(with: result)
+    }
+
     // MARK: - Disconnect
-    
+
     public func disconnect() {
         // Set intentional flag BEFORE cancelling anything to prevent
         // stale state handler callbacks from triggering reconnection
@@ -2531,6 +2689,20 @@ public class QuicNetworkClient {
         }
     }
     
+    /// User-initiated retry from the connection banner: skip the remaining
+    /// backoff, or start over after automatic retries gave up.
+    public func retryConnectionNow() {
+        guard !isConnected, !isIntentionalDisconnect, savedHost != nil else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        retryCount = 0
+        isRetrying = true
+        connectionStatus = "Reconnecting…"
+        reconnectTask = Task { [weak self] in
+            await self?.attemptReconnect()
+        }
+    }
+
     /// Attempt to reconnect using saved parameters
     private func attemptReconnect() async {
         guard let host = savedHost, let port = savedPort else {
@@ -2554,7 +2726,22 @@ public class QuicNetworkClient {
                 isRetrying = false
                 connectionStatus = "Connected (reconnected)"
                 print("[QuicClient] ✓ Reconnection successful!")
-                
+
+                // The new session starts in no channel, but currentChannelId
+                // still names the one we dropped out of, so the UI would show
+                // us in a room the server has us out of and every send would
+                // fail. Rejoin it. authenticate() built a fresh MLS client, so
+                // this negotiates new groups rather than reusing stale ones. If
+                // the channel was deleted meanwhile, ContentView's auto-join
+                // moves us to the lobby once the new channel list lands.
+                if let channelId = currentChannelId {
+                    do {
+                        try await joinChannel(channelId)
+                    } catch {
+                        print("[QuicClient] Rejoin of \(channelId) after reconnect failed: \(error)")
+                    }
+                }
+
                 // Post notification for UI
                 NotificationCenter.default.post(name: .connectionRestored, object: nil)
             } else {
@@ -2582,7 +2769,11 @@ public class QuicNetworkClient {
         }
         
         print("[QuicClient] Connection lost, cleaning up...")
-        
+
+        // Mid-deletion, a reconnect would sign this key up again as a fresh
+        // account. Stop here and let the user decide.
+        let wasDeletingAccount = accountDeletion != nil
+
         // Clean up connection state
         stopKeepalive()
         stopListening()
@@ -2594,7 +2785,12 @@ public class QuicNetworkClient {
         isAuthenticated = false
         
         connectionStatus = "Disconnected"
-        
+
+        if wasDeletingAccount {
+            finishAccountDeletion(.failure(QuicClientError.accountDeletionUnconfirmed))
+            return
+        }
+
         // Trigger reconnection
         scheduleReconnect()
     }
@@ -2683,7 +2879,12 @@ public enum QuicClientError: Error, LocalizedError {
     case authenticationFailed(String)
     case connectionClosed
     case untrustedCertificate(host: String, fingerprint: String)
-    
+    /// The server refused to delete the account; its message.
+    case accountDeletionFailed(String)
+    /// No answer to a delete-account request before the connection closed
+    /// or the wait ran out.
+    case accountDeletionUnconfirmed
+
     public var errorDescription: String? {
         switch self {
         case .notConnected: return "Not connected to server"
@@ -2694,6 +2895,10 @@ public enum QuicClientError: Error, LocalizedError {
         case .connectionClosed: return "Connection closed"
         case .untrustedCertificate(let host, let fingerprint):
             return "Untrusted certificate from \(host)\n\nSHA256: \(fingerprint)"
+        case .accountDeletionFailed(let message):
+            return message
+        case .accountDeletionUnconfirmed:
+            return "The server didn't confirm the deletion. Your account may still exist."
         }
     }
 }
@@ -2785,5 +2990,26 @@ public struct SystemEvent: Identifiable, Equatable {
     public init(content: String, channelId: String = "0") {
         self.content = content
         self.channelId = channelId
+    }
+}
+
+// MARK: - Certificate pin
+
+/// Records, from the TLS verify block's queue, whether the server's
+/// certificate failed an invite's fingerprint pin.
+nonisolated final class CertificatePinCheck: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didMismatch = false
+
+    var mismatched: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return didMismatch
+    }
+
+    func recordMismatch() {
+        lock.lock()
+        didMismatch = true
+        lock.unlock()
     }
 }

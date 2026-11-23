@@ -97,4 +97,10 @@ class AppSettings: ObservableObject {
     func isFingerprintTrusted(host: String, fingerprint: String) -> Bool {
         return trustedFingerprints[host.lowercased()] == fingerprint
     }
+
+    /// The certificate fingerprint pinned for `host`, if trust in it came
+    /// from a pin rather than from a publicly valid certificate.
+    func pinnedFingerprint(forHost host: String) -> String? {
+        trustedFingerprints[host.lowercased()]
+    }
 }

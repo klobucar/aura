@@ -28,7 +28,27 @@ struct LoginView: View {
     @State private var showingProfileManagement = false
     @StateObject private var serverManager = ServerManager()
     @StateObject private var profileManager = ProfileManager()
-    
+    /// Saved profile to log in with; empty means the default login identity.
+    @AppStorage("AuraLoginProfileId") private var loginProfileId: String = ""
+
+    private var selectedProfile: UserProfileModel? {
+        UUID(uuidString: loginProfileId).flatMap { id in
+            profileManager.profiles.first { $0.id == id }
+        }
+    }
+
+    private var identityLabel: String {
+        if let profile = selectedProfile {
+            return "\(profile.displayName) · \(profile.publicKeyHex.prefix(12))…"
+        }
+        return identity.publicKeyHex.isEmpty ? "Generating..." : "\(identity.publicKeyHex.prefix(16))..."
+    }
+
+    /// An invite being followed: prefills the form, and when it carries a
+    /// certificate fingerprint, the connection is pinned to it.
+    var invite: AuraInviteLink? = nil
+    /// Stop following the invite and show the plain login form.
+    var onDismissInvite: (() -> Void)? = nil
     var onConnected: ((QuicNetworkClient, UserIdentity) -> Void)?
 
     /// True when XCTest launched the app as the host of a unit test bundle.
@@ -38,52 +58,68 @@ struct LoginView: View {
 
     var body: some View {
         VStack(spacing: 32) {
-            // Logo / Header
-            VStack(spacing: 12) {
-                ZStack {
-                    // Animated ring
-                    Circle()
-                        .stroke(AuraTheme.Gradients.primary, lineWidth: 2)
-                        .frame(width: 100, height: 100)
-                        .opacity(0.3)
-                        .scaleEffect(logoRingScale)
-                        .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true), value: logoRingScale)
-                    
-                    Image(systemName: "wave.3.right.circle.fill")
-                        .font(.system(size: 70))
-                        .foregroundStyle(AuraTheme.Gradients.lushIndigo)
-                        .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
-                }
-                
-                VStack(spacing: 4) {
-                    Text("Aura")
-                        .font(.system(size: 32, weight: .bold))
-                    Text("Zero-Trust Voice")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
+            if let invite {
+                inviteHeader(invite)
+            } else {
+                logoHeader
             }
-            .padding(.top, 48)
-            .onAppear { logoRingScale = 1.12 }
-            
+
             VStack(alignment: .leading, spacing: 8) {
                 Text("YOUR IDENTITY")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
                     .kerning(1)
                 
-                HStack(spacing: 10) {
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(AuraTheme.Colors.primary)
-                    
-                    Text(identity.publicKeyHex.isEmpty ? "Generating..." : "\(identity.publicKeyHex.prefix(16))...")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.primary)
+                // Which identity to log in with: the default one, or any saved
+                // profile — including one restored from a backup, which is
+                // only usable if it can be picked here.
+                Menu {
+                    Button {
+                        loginProfileId = ""
+                    } label: {
+                        Label("Default identity", systemImage: selectedProfile == nil ? "checkmark" : "key")
+                    }
+                    if !profileManager.profiles.isEmpty {
+                        Divider()
+                        ForEach(profileManager.profiles) { profile in
+                            Button {
+                                loginProfileId = profile.id.uuidString
+                                displayName = profile.displayName
+                            } label: {
+                                Label(
+                                    "\(profile.displayName) · \(profile.publicKeyHex.prefix(8))…",
+                                    systemImage: selectedProfile?.id == profile.id ? "checkmark" : "person.crop.circle"
+                                )
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Manage Identities…") { showingProfileManagement = true }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(AuraTheme.Colors.primary)
+
+                        Text(identityLabel)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                    .auraGlass(cornerRadius: 10, material: .sidebar)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .auraGlass(cornerRadius: 10, material: .sidebar)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .help("Choose which identity to log in with")
             }
             .padding(.horizontal, 32)
             
@@ -208,7 +244,7 @@ struct LoginView: View {
         .sheet(isPresented: $showingServerManagement) {
             ServerListView()
         }
-        .sheet(isPresented: $showingProfileManagement) {
+        .sheet(isPresented: $showingProfileManagement, onDismiss: { profileManager.reload() }) {
             ProfileListView()
         }
         .alert("Untrusted Certificate", isPresented: $showingCertAlert, actions: {
@@ -227,6 +263,12 @@ struct LoginView: View {
             }
         })
         .onAppear {
+            applyInvite(invite)
+        }
+        .onChange(of: invite) { _, newInvite in
+            applyInvite(newInvite)
+        }
+        .onAppear {
             // Hosting unit tests, the app never logs in. Leaving the keychain
             // alone there keeps an unattended test run from stopping at a
             // keychain prompt (macOS asks before an app reads an item that a
@@ -234,6 +276,82 @@ struct LoginView: View {
             guard !Self.isHostingUnitTests else { return }
             identity.loadOrGenerate()
         }
+    }
+
+    // MARK: - Headers
+
+    private var logoHeader: some View {
+        VStack(spacing: 12) {
+            ZStack {
+                // Animated ring
+                Circle()
+                    .stroke(AuraTheme.Gradients.primary, lineWidth: 2)
+                    .frame(width: 100, height: 100)
+                    .opacity(0.3)
+                    .scaleEffect(logoRingScale)
+                    .animation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true), value: logoRingScale)
+                
+                Image(systemName: "wave.3.right.circle.fill")
+                    .font(.system(size: 70))
+                    .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                    .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+            }
+            
+            VStack(spacing: 4) {
+                Text("Aura")
+                    .font(.system(size: 32, weight: .bold))
+                Text("Zero-Trust Voice")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 48)
+        .onAppear { logoRingScale = 1.12 }
+    }
+
+    /// Replaces the logo while following an invite. The channel's name isn't
+    /// known until connected (the link carries its id), so this names the host.
+    private func inviteHeader(_ invite: AuraInviteLink) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "envelope.open.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(AuraTheme.Gradients.lushIndigo)
+                .modifier(AuraTheme.Shadows.glow(color: AuraTheme.Colors.primary))
+
+            Text(ChatFormatting.inviteHeader(destination: invite.host))
+                .font(AuraTheme.Typography.ui(AuraTheme.Typography.t15, weight: .semibold))
+                .foregroundStyle(AuraTheme.Colors.text)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Not now") { onDismissInvite?() }
+                .buttonStyle(.plain)
+                .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12))
+                .foregroundStyle(AuraTheme.Colors.textDim)
+                .help("Use the login form without the invite")
+        }
+        .padding(.horizontal, 32)
+        .padding(.top, 48)
+    }
+
+    // MARK: - Connecting
+
+    /// Fill the form from an invite.
+    private func applyInvite(_ invite: AuraInviteLink?) {
+        guard let invite else { return }
+        serverAddress = invite.host
+        serverPort = String(invite.port)
+        if let password = invite.password {
+            serverPassword = password
+        }
+        errorMessage = nil
+    }
+
+    /// The invite's certificate fingerprint, if the form still points at the
+    /// invite's server.
+    private func invitePin(host: String, port: UInt16) -> String? {
+        guard let invite, invite.matches(host: host, port: port) else { return nil }
+        return invite.fingerprint
     }
     
     private func connect() {
@@ -243,23 +361,64 @@ struct LoginView: View {
         // Save settings
         UserDefaults.standard.set(serverAddress, forKey: "AuraServerAddress")
         UserDefaults.standard.set(serverPort, forKey: "AuraServerPort")
-        identity.saveDisplayName(displayName)
+
+        // A saved profile's key is read only now, at connect time, so a
+        // biometric-protected one prompts when it is used rather than at launch.
+        let loginIdentity: UserIdentity
+        if let profile = selectedProfile {
+            guard let loaded = UserIdentity.loadFromKeychain(
+                id: profile.id,
+                requiresBiometric: profile.requiresBiometric
+            ) else {
+                errorMessage = "Couldn't unlock the identity “\(profile.displayName)”."
+                isConnecting = false
+                return
+            }
+            loaded.displayName = displayName
+            profileManager.markAsUsed(id: profile.id)
+            loginIdentity = loaded
+        } else {
+            identity.saveDisplayName(displayName)
+            loginIdentity = identity
+        }
+
+        let port = UInt16(serverPort) ?? 8443
+        let pin = invitePin(host: serverAddress, port: port)
+
+        // An invite's fingerprint has to agree with any pin already held for
+        // the host. No "trust anyway" here: a mismatch is the attack a pinned
+        // invite exists to catch.
+        if let pin, let existing = AppSettings.shared.pinnedFingerprint(forHost: serverAddress),
+           existing.lowercased() != pin {
+            errorMessage = ChatFormatting.inviteCertificateMismatch
+            isConnecting = false
+            return
+        }
+        client.expectedCertificateFingerprint = pin
         
         Task {
             do {
-                let port = UInt16(serverPort) ?? 8443
-                
                 // Connect
                 try await client.connect(host: serverAddress, port: port)
                 
                 // Authenticate
-                try await client.authenticate(identity: identity, serverPassword: serverPassword.isEmpty ? nil : serverPassword)
+                try await client.authenticate(identity: loginIdentity, serverPassword: serverPassword.isEmpty ? nil : serverPassword)
+
+                // The server proved it holds the invite's certificate; keep
+                // the pin only now that the connection worked.
+                if let pin {
+                    AppSettings.shared.trustFingerprint(host: serverAddress, fingerprint: pin)
+                }
                 
                 // Success - notify parent
-                onConnected?(client, identity)
+                onConnected?(client, loginIdentity)
                 
             } catch {
-                if let fingerprint = client.lastUntrustedFingerprint {
+                if pin != nil {
+                    errorMessage = client.certificateDidNotMatchPin
+                        ? ChatFormatting.inviteCertificateMismatch
+                        : error.localizedDescription
+                } else if let fingerprint = client.lastUntrustedFingerprint {
                     pendingFingerprint = fingerprint
                     showingCertAlert = true
                 } else {
