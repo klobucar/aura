@@ -40,12 +40,37 @@ public class UntrustedCertificateException : Exception
 }
 
 /// <summary>
+/// The server's certificate is not the one an invite link pinned. Never
+/// offered as trust-and-connect: the link is the out-of-band check.
+/// </summary>
+public class CertificateMismatchException : Exception
+{
+    public string Host { get; }
+    public string Fingerprint { get; }
+
+    public CertificateMismatchException(string host, string fingerprint)
+        : base("Server certificate doesn't match the invite")
+    {
+        Host = host;
+        Fingerprint = fingerprint;
+    }
+}
+
+/// <summary>
 /// QUIC-based client for Aura server communication.
 /// </summary>
 public class AuraNetworkClient : IAsyncDisposable
 {
     // Protocol message types
+    private const byte MSG_KEEPALIVE = 0x00;
     private const byte MSG_AUTH_RESPONSE = 0x04;
+    private const byte MSG_AUDIO = 0x20;
+    private const byte MSG_CREATE_CHANNEL = 0x40;
+    private const byte MSG_UPDATE_CHANNEL = 0x41;
+    private const byte MSG_UPDATE_PROFILE = 0x42;
+    private const byte MSG_DELETE_CHANNEL = 0x43;
+    private const byte MSG_DELETE_USER = 0x44;
+    private const byte MSG_PROFILE_UPDATED = 0x46;
     private const byte MSG_JOIN_CHANNEL = 0x10;
     private const byte MSG_USER_JOINED = 0x11;
     private const byte MSG_USER_LEFT = 0x12;
@@ -73,13 +98,54 @@ public class AuraNetworkClient : IAsyncDisposable
     private AudioManager? _audioManager;
     private MlsWrapper? _mlsWrapper;
     private string _currentChannelId = "";
-    
+
+    /// <summary>
+    /// One writer at a time on the control stream. Audio frames are sent from
+    /// the capture thread ~50×/s while signalling, chat and keepalives go out
+    /// from elsewhere; QuicStream does not allow overlapping writes, and two
+    /// frames interleaving would corrupt the stream for the server.
+    /// </summary>
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+    private CancellationTokenSource? _keepaliveCts;
+
+    /// <summary>Set once we tear down on purpose, so the loss handler stays quiet.</summary>
+    private volatile bool _disposed;
+
+    /// <summary>
+    /// The server drops a session after 30s with no application-level traffic
+    /// (crates/aura-server/src/connection.rs, keepalive_timeout). An idle user —
+    /// in a channel, not talking, not typing — would otherwise be disconnected
+    /// every half minute.
+    /// </summary>
+    private static readonly TimeSpan KeepaliveInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Constructor key for the audio sender before any group exists. It is a
+    /// public constant, which is exactly why <see cref="AudioManager"/> refuses
+    /// to send until an MLS-exported key replaces it.
+    /// </summary>
+    private static readonly byte[] BootstrapAudioKey = Enumerable.Repeat((byte)0x42, 32).ToArray();
+
     public void SetAudioEngine(RustAudioEngine engine) => _audioEngine = engine;
     public void SetAudioManager(AudioManager manager) => _audioManager = manager;
-    
+
+    /// <summary>
+    /// SHA-256 (hex) of the leaf certificate an invite link pinned. When set,
+    /// the server is accepted only if its certificate matches — in every build,
+    /// including Debug, and whether or not a CA vouches for it.
+    /// </summary>
+    public string? ExpectedCertificateFingerprint { get; set; }
+
+    /// <summary>The certificate SHA-256 the server presented on this connection.</summary>
+    public string? ServerCertificateFingerprint { get; private set; }
+
     public uint UserId => _userId;
     public string? SessionToken => _sessionToken;
     public bool IsConnected => _connection != null;
+
+    /// <summary>Whether the login response granted admin (channel management).</summary>
+    public bool IsAdmin { get; private set; }
 
     /// <summary>
     /// Our own stable user id — the same value our MLS credential carries, so
@@ -115,6 +181,21 @@ public class AuraNetworkClient : IAsyncDisposable
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
     public event Action<uint, bool, bool>? OnUserStatusUpdated; // sessionId, isMuted, isDeafened
+
+    /// <summary>
+    /// The control stream ended or failed while we still meant to be connected.
+    /// Never raised for a disconnect we asked for. Carries a short reason.
+    /// </summary>
+    public event Action<string>? OnConnectionLost;
+
+    /// <summary>Someone (possibly us) changed their profile.</summary>
+    public event Action<Aura.V1Alpha1.UserProfile>? OnProfileUpdated;
+
+    /// <summary>
+    /// Result of an admin/profile request: action ("create channel", …),
+    /// success, and the server's error text on failure.
+    /// </summary>
+    public event Action<string, bool, string>? OnRequestResult;
     
     /// <summary>
     /// Run an app-level operation inside an opt-in telemetry span (aura-core
@@ -179,6 +260,24 @@ public class AuraNetworkClient : IAsyncDisposable
                 TargetHost = host,
                 RemoteCertificateValidationCallback = (sender, cert, chain, errors) => 
                 {
+                    if (cert != null)
+                    {
+                        using var leaf = new X509Certificate2(cert);
+                        ServerCertificateFingerprint = Convert.ToHexString(
+                            System.Security.Cryptography.SHA256.HashData(leaf.RawData)).ToLowerInvariant();
+                    }
+
+                    // An invite's pin is checked before anything else and in
+                    // every build: it is the whole point of carrying one.
+                    if (ExpectedCertificateFingerprint is { } expected)
+                    {
+                        if (ServerCertificateFingerprint != null &&
+                            ServerCertificateFingerprint.Equals(expected, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                        throw new CertificateMismatchException(host, ServerCertificateFingerprint ?? "");
+                    }
 #if DEBUG
                     Console.WriteLine($"[AuraClient] DEBUG: TLS cert validation: errors={errors} (Accepting all)");
                     return true;
@@ -252,7 +351,9 @@ public class AuraNetworkClient : IAsyncDisposable
         var request = identity.BuildAuthRequest(
             challenge, string.IsNullOrEmpty(serverPassword) ? null : serverPassword);
         Console.WriteLine($"[AuraClient] Sending auth request ({request.Length} bytes)...");
-        await _controlStream.WriteAsync(request, ct);
+        // Never cancel a QUIC write: a cancelled pending write aborts the
+        // stream's write side for good.
+        await _controlStream.WriteAsync(request, CancellationToken.None);
         
         // 3. Receive auth response
         Console.WriteLine("[AuraClient] Waiting for auth response...");
@@ -272,6 +373,7 @@ public class AuraNetworkClient : IAsyncDisposable
         
         _userId = response.SessionId;
         _sessionToken = response.SessionToken;
+        IsAdmin = response.IsAdmin;
         // The server-assigned account id (U_…). It is also our MLS credential
         // identity, so it matches what Mls reports for our own leaf.
         _userUuid = response.UserUuid;
@@ -288,39 +390,91 @@ public class AuraNetworkClient : IAsyncDisposable
         }
         
         OnStatusChanged?.Invoke($"Authenticated as user {response.SessionId}" + (response.Verified ? " (verified)" : ""));
-        
+
+        // Create the audio sender/receiver now that we have a session id. The
+        // sender stays silent until joining a channel installs a key exported
+        // from that channel's MLS voice group (UpdateAudioKeysFromMls).
+        try
+        {
+            _audioManager?.Initialize(_userId, BootstrapAudioKey);
+        }
+        catch (Exception ex)
+        {
+            OnError?.Invoke($"Audio unavailable: {ex.Message}");
+        }
+
         // Start listening for server messages (presence, chat, etc.)
         StartListening();
+        StartKeepalive();
     }
-    
 
+    /// <summary>
+    /// Send a bare <c>0x00</c> on the control stream every
+    /// <see cref="KeepaliveInterval"/>. The server reads it as a keepalive with
+    /// no payload; it exists only to reset the server's idle timer.
+    /// </summary>
+    private void StartKeepalive()
+    {
+        _keepaliveCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _keepaliveCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    await Task.Delay(KeepaliveInterval, cts.Token);
+                    await WriteControlAsync(new[] { MSG_KEEPALIVE }, cts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                // A failed write means the stream is gone; the receive loop
+                // notices the same thing and owns raising OnConnectionLost.
+                Console.WriteLine($"[AuraClient] Keepalive stopped: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>Serialised write of one complete frame to the control stream.</summary>
+    private async Task WriteControlAsync(byte[] frame, CancellationToken ct)
+    {
+        var stream = _controlStream ?? throw new InvalidOperationException("Not connected");
+        // The token only bounds the wait for our turn. The write itself is
+        // never cancelled: cancelling a pending QuicStream write aborts the
+        // stream's write side permanently, which would kill the session (e.g.
+        // releasing push-to-talk mid-frame).
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            await stream.WriteAsync(frame, CancellationToken.None);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
 
     public async Task SendAudioFrameAsync(short[] pcmData, CancellationToken ct = default)
     {
-        if (_controlStream == null) return;
-        
-        // Use AudioManager for Opus encoding + encryption (Opus 1.6 + DRED + DAVE)
-        byte[]? encodedPacket = null;
-        if (_audioManager != null)
-        {
-            encodedPacket = _audioManager.ProcessCapture(pcmData);
-        }
-        
-        // No packet means no encryption: the sender isn't set up, it has no
-        // key, or encoding failed. Send nothing. Falling back to the raw PCM
-        // put plaintext voice on the wire, and the server relayed it.
+        if (_controlStream == null || _audioManager == null) return;
+
+        // Opus encode + DAVE encrypt. Null means "send nothing": no group key
+        // yet, or the VAD gate held a silent frame. There is deliberately no
+        // fallback — sending the raw PCM would put plaintext audio on the wire.
+        var encodedPacket = _audioManager.ProcessCapture(pcmData);
         if (encodedPacket == null) return;
 
-        // Send as 0x20 Audio Message
-        // [type 0x20][len 4][packet]
-        var frame = new byte[1 + 4 + encodedPacket.Length];
-        frame[0] = 0x20;
-        BinaryPrimitives.WriteInt32LittleEndian(frame.AsSpan(1, 4), encodedPacket.Length);
-        encodedPacket.CopyTo(frame, 5);
-        
-        try 
+        try
         {
-            await _controlStream.WriteAsync(frame, ct);
+            await WriteControlAsync(ControlFrames.Frame(MSG_AUDIO, encodedPacket), ct);
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception ex)
         {
@@ -358,9 +512,13 @@ public class AuraNetworkClient : IAsyncDisposable
 
         Console.WriteLine($"[AuraClient] Joining channel {channelId}...");
         
+        // Nothing goes to the new room under the old room's key; sending resumes
+        // once this channel's voice group hands us a key.
+        _audioManager?.ClearGroupKey();
+
         var req = new JoinChannelRequest { ChannelId = channelId };
         await SendProtoRequestAsync(MSG_JOIN_CHANNEL, req, ct);
-        
+
         _currentChannelId = channelId;
         OnStatusChanged?.Invoke($"Joined channel {channelId}");
         
@@ -428,7 +586,63 @@ public class AuraNetworkClient : IAsyncDisposable
             OnError?.Invoke($"Status update send error: {ex.Message}");
         }
     }
-    
+
+    // ========================================================================
+    // Admin + profile requests. The server answers each with a response frame
+    // (0x40–0x43, see the receive loop) and, on success, a fresh snapshot or a
+    // ProfileUpdated broadcast — so callers don't patch local state themselves.
+    // ========================================================================
+
+    private static ChannelIcon? IconFor(string? emoji) =>
+        string.IsNullOrWhiteSpace(emoji) ? null : new ChannelIcon { Emoji = emoji.Trim() };
+
+    /// <summary>Create a channel (admin only). Mirrors macOS createChannel.</summary>
+    public Task CreateChannelAsync(string name, string comment, string? emoji, CancellationToken ct = default)
+    {
+        var req = new CreateChannelRequest { Name = name, Comment = comment };
+        if (IconFor(emoji) is { } icon) req.Icon = icon;
+        return SendProtoRequestAsync(MSG_CREATE_CHANNEL, req, ct);
+    }
+
+    /// <summary>Rename / re-describe a channel (admin only). Mirrors macOS updateChannel.</summary>
+    public Task UpdateChannelAsync(string channelId, string name, string comment, string? emoji, CancellationToken ct = default)
+    {
+        var req = new UpdateChannelRequest { ChannelId = channelId, Name = name, Comment = comment };
+        if (IconFor(emoji) is { } icon) req.Icon = icon;
+        return SendProtoRequestAsync(MSG_UPDATE_CHANNEL, req, ct);
+    }
+
+    /// <summary>Delete a channel (admin only). Occupants are moved by the server.</summary>
+    public Task DeleteChannelAsync(string channelId, CancellationToken ct = default) =>
+        SendProtoRequestAsync(MSG_DELETE_CHANNEL, new DeleteChannelRequest { ChannelId = channelId }, ct);
+
+    /// <summary>
+    /// Delete our own account on this server ("Leave server"). The server
+    /// answers with an AdminResponse framed as 0x44 and drops our session.
+    /// </summary>
+    public Task DeleteOwnAccountAsync(CancellationToken ct = default)
+    {
+        var uuid = _userUuid ?? throw new InvalidOperationException("Not authenticated");
+        return WriteControlAsync(ControlFrames.Frame(MSG_DELETE_USER, AuraCoreMethods.EncodeDeleteUserRequest(uuid)), ct);
+    }
+
+    /// <summary>
+    /// Update our own profile comment. The server only accepts a profile whose
+    /// <c>user_id</c> is our account UUID, and broadcasts it back to everyone
+    /// (us included) as ProfileUpdated. Unsigned, like the macOS client today.
+    /// </summary>
+    public Task UpdateProfileAsync(string displayName, string bio, byte[]? avatar, CancellationToken ct = default)
+    {
+        var profile = new Aura.V1Alpha1.UserProfile
+        {
+            UserId = _userUuid ?? throw new InvalidOperationException("Not authenticated"),
+            DisplayName = displayName,
+            Bio = bio,
+            AvatarData = ByteString.CopyFrom(avatar ?? Array.Empty<byte>()),
+        };
+        return SendProtoRequestAsync(MSG_UPDATE_PROFILE, new UpdateProfile { Profile = profile }, ct);
+    }
+
     // ========================================================================
     // Login framing
     // ========================================================================
@@ -465,17 +679,36 @@ public class AuraNetworkClient : IAsyncDisposable
         var payload = await ReadHardenedPayloadAsync(MaxAuthResponseSize, ct);
         return AuraCoreMethods.DecodeAuthResponse(payload);
     }
-    
+
     public async ValueTask DisposeAsync()
     {
-        if (_controlStream != null)
+        // Mark first: tearing the stream down makes the receive loop fail, and
+        // that failure must not be reported as an unexpected connection loss.
+        _disposed = true;
+        _keepaliveCts?.Cancel();
+        _listenCts?.Cancel();
+
+        try
         {
-            await _controlStream.DisposeAsync();
+            if (_controlStream != null)
+            {
+                await _controlStream.DisposeAsync();
+            }
+
+            if (_connection != null)
+            {
+                await _connection.DisposeAsync();
+            }
         }
-        
-        if (_connection != null)
+        catch (Exception ex)
         {
-            await _connection.DisposeAsync();
+            Console.WriteLine($"[AuraClient] Error during disconnect: {ex.Message}");
+        }
+        finally
+        {
+            _controlStream = null;
+            _connection = null;
+            _audioManager?.ClearGroupKey();
         }
     }
     // ========================================================================
@@ -709,16 +942,82 @@ public class AuraNetworkClient : IAsyncDisposable
                         await HandleMlsRatchetRequestAsync(ct);
                         break;
 
+                    case MSG_PROFILE_UPDATED: // 0x46 - Someone (maybe us) edited their profile
+                        await HandleProfileUpdatedAsync(ct);
+                        break;
+
+                    case MSG_CREATE_CHANNEL: // 0x40 - CreateChannelResponse
+                    case MSG_UPDATE_CHANNEL: // 0x41 - MetadataUpdateResponse
+                    case MSG_UPDATE_PROFILE: // 0x42 - MetadataUpdateResponse
+                    case MSG_DELETE_CHANNEL: // 0x43 - AdminResponse
+                    case MSG_DELETE_USER:    // 0x44 - AdminResponse
+                        await HandleRequestResultAsync(msgType, ct);
+                        break;
+
                     default:
-                        Console.WriteLine($"[AuraClient] Unknown message type: 0x{msgType:X2}");
+                        // Every server frame is length-prefixed, so an unknown
+                        // type is skipped whole. Reading on from the length
+                        // bytes would desync the stream for the whole session.
+                        var skipped = await ControlFrames.DiscardPayloadAsync(_controlStream, MaxControlPacketSize, ct);
+                        Console.WriteLine($"[AuraClient] Skipped unknown message type 0x{msgType:X2} ({skipped} bytes)");
                         break;
                 }
+            }
+
+            if (!ct.IsCancellationRequested && !_disposed)
+            {
+                OnConnectionLost?.Invoke("The server closed the connection");
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            OnError?.Invoke($"Receive loop error: {ex.Message}");
+            if (!_disposed)
+            {
+                OnConnectionLost?.Invoke(ex is EndOfStreamException ? "The server closed the connection" : ex.Message);
+            }
         }
+    }
+
+    private async Task HandleProfileUpdatedAsync(CancellationToken ct)
+    {
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+        try
+        {
+            OnProfileUpdated?.Invoke(Aura.V1Alpha1.UserProfile.Parser.ParseFrom(packet));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to parse ProfileUpdated: {ex.Message}");
+        }
+    }
+
+    private async Task HandleRequestResultAsync(byte msgType, CancellationToken ct)
+    {
+        var packet = await ReadHardenedPayloadAsync(MaxControlPacketSize, ct);
+        try
+        {
+            var (action, success, error) = msgType switch
+            {
+                MSG_CREATE_CHANNEL => Result("create channel", CreateChannelResponse.Parser.ParseFrom(packet)),
+                MSG_UPDATE_CHANNEL => Result("update channel", MetadataUpdateResponse.Parser.ParseFrom(packet)),
+                MSG_UPDATE_PROFILE => Result("update profile", MetadataUpdateResponse.Parser.ParseFrom(packet)),
+                MSG_DELETE_USER => Result("delete user", AdminResponse.Parser.ParseFrom(packet)),
+                _ => Result("delete channel", AdminResponse.Parser.ParseFrom(packet)),
+            };
+            OnRequestResult?.Invoke(action, success, error);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[AuraClient] Failed to parse response 0x{msgType:X2}: {ex.Message}");
+        }
+
+        static (string, bool, string) Result(string action, IMessage message) => message switch
+        {
+            CreateChannelResponse r => (action, r.Success, r.ErrorMessage),
+            MetadataUpdateResponse r => (action, r.Success, r.ErrorMessage),
+            AdminResponse r => (action, r.Success, r.ErrorMessage),
+            _ => (action, false, "unexpected response"),
+        };
     }
 
     private async Task HandleAudioPacketAsync(CancellationToken ct)
@@ -948,11 +1247,11 @@ public class AuraNetworkClient : IAsyncDisposable
             };
             
             await SendProtoRequestAsync(MSG_TEXT_PACKET, packet, ct);
-            Console.WriteLine($"[AuraClient] Sent encrypted text message to channel {channelId}: {content.Substring(0, Math.Min(content.Length, 10))}...");
         }
-        catch (Exception ex)
+        catch (TimeoutException)
         {
-            Console.WriteLine($"[AuraClient] Failed to send text message: {ex.Message}");
+            // The caller shows this next to the message, so say what it means.
+            throw new InvalidOperationException("the channel's encryption isn't ready yet");
         }
     }
 
@@ -1002,8 +1301,12 @@ public class AuraNetworkClient : IAsyncDisposable
                 using var transientCrypto = new uniffi.aura_core.TextCryptoWrapper(senderKey);
                 var decryptedMessage = transientCrypto.Decrypt(nativePacket);
                 
-                Console.WriteLine($"[AuraClient] Decrypted text: {decryptedMessage.Content} from {packet.SenderSessionId}");
-                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content, packet.ReplyToId);
+                // Only the reply reference inside the ciphertext counts. The
+                // packet's plaintext copy is server-controlled, so falling back
+                // to it would let a server forge reply quotes.
+                var replyTo = decryptedMessage.ReplyToId;
+                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content,
+                    string.IsNullOrEmpty(replyTo) ? null : replyTo);
             }
         }
         catch (Exception ex)
@@ -1012,34 +1315,11 @@ public class AuraNetworkClient : IAsyncDisposable
         }
     }
 
-    private async Task<byte[]> ReadHardenedPayloadAsync(int maxLen, CancellationToken ct)
-    {
-        // 1. Read Length (4 bytes)
-        var lenBuf = new byte[4];
-        await ReadExactAsync(lenBuf, ct);
-        int len = BinaryPrimitives.ReadInt32LittleEndian(lenBuf);
-        
-        if (len < 0 || len > maxLen)
-        {
-            throw new Exception($"Incoming frame too large: {len} bytes (max {maxLen})");
-        }
-        
-        // 2. Read Packet
-        var packet = new byte[len];
-        await ReadExactAsync(packet, ct);
-        return packet;
-    }
+    private Task<byte[]> ReadHardenedPayloadAsync(int maxLen, CancellationToken ct) =>
+        ControlFrames.ReadPayloadAsync(_controlStream ?? throw new EndOfStreamException(), maxLen, ct);
 
-    private async Task ReadExactAsync(byte[] buf, CancellationToken ct)
-    {
-        int offset = 0;
-        while (offset < buf.Length)
-        {
-            int read = await _controlStream!.ReadAsync(buf.AsMemory(offset), ct);
-            if (read == 0) throw new EndOfStreamException();
-            offset += read;
-        }
-    }
+    private Task ReadExactAsync(byte[] buf, CancellationToken ct) =>
+        ControlFrames.ReadExactAsync(_controlStream ?? throw new EndOfStreamException(), buf, ct);
     
     // ========================================================================
     // MLS Protocol Handlers
@@ -1266,12 +1546,25 @@ public class AuraNetworkClient : IAsyncDisposable
         }
     }
 
+    /// <summary>Voice keys apply only to the channel we're currently in.</summary>
+    public static bool ShouldApplyVoiceKeys(string currentChannelId, string channelId) =>
+        !string.IsNullOrEmpty(channelId) && channelId == currentChannelId;
+
     /// <summary>
     /// Update audio sender/receiver keys from MLS.
     /// </summary>
     private void UpdateAudioKeysFromMls(string channelId)
     {
         if (_mlsWrapper == null) return;
+
+        // MLS state for a channel we've left lingers (we can stay its voice
+        // founder server-side and keep processing its commits). Its key must
+        // never become our sending key while we're in another room.
+        if (!ShouldApplyVoiceKeys(_currentChannelId, channelId))
+        {
+            Console.WriteLine($"[AuraClient] Ignoring voice key update for {channelId}; we're in {_currentChannelId}");
+            return;
+        }
         
         try
         {
@@ -1281,8 +1574,30 @@ public class AuraNetworkClient : IAsyncDisposable
             _audioManager?.UpdateSenderKey(myKey, epoch);
             Console.WriteLine($"[AuraClient] Rotated audio sender key from MLS, epoch={epoch}");
 
-            // 2. Note: Remote keys are handled dynamically via MSG_USER_JOINED and commit handlers
-            // If we are joining an existing group, we derive keys for everyone in the snapshot shortly after.
+            // 2. Every other member's key rotates with the epoch too. Members who
+            // were in the room before we joined have never been added at all —
+            // UserJoined only covers people who arrive after us — so add any the
+            // receiver doesn't know yet (mirrors the macOS client).
+            if (_audioManager == null || !_channelMembers.TryGetValue(channelId, out var members)) return;
+            var epochHint = (ushort)(epoch & 0xFFFF);
+            foreach (var sessionId in members.Keys)
+            {
+                if (sessionId == _userId) continue;
+                try
+                {
+                    var key = _mlsWrapper.ExportAudioKey(channelId, sessionId);
+                    if (!_audioManager.UpdateRemoteSenderKey(sessionId, key, epochHint))
+                    {
+                        _audioManager.AddRemoteSender(sessionId, key, epochHint);
+                        // AddSender rebuilds the sender's state; re-push local prefs.
+                        ApplyLocalMixerPrefs(sessionId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[AuraClient] Failed to refresh audio key for {sessionId}: {ex.Message}");
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -1295,17 +1610,7 @@ public class AuraNetworkClient : IAsyncDisposable
     /// </summary>
     private async Task SendProtoRequestAsync<T>(byte msgType, T message, CancellationToken ct) where T : IMessage<T>
     {
-        if (_controlStream == null) return;
-
-        using var ms = new MemoryStream();
-        ms.WriteByte(msgType);
-        
-        var payload = message.ToByteArray();
-        var lenBuf = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(lenBuf, (uint)payload.Length);
-        ms.Write(lenBuf);
-        ms.Write(payload);
-        
-        await _controlStream.WriteAsync(ms.ToArray(), ct);
+        if (_controlStream == null) throw new InvalidOperationException("Not connected");
+        await WriteControlAsync(ControlFrames.Frame(msgType, message.ToByteArray()), ct);
     }
 }

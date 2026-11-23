@@ -5,7 +5,7 @@
         xmlns:controls="using:Aura.Desktop.Controls"
         x:Class="Aura.Desktop.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
-        Title="Aura"
+        Title="{Binding WindowTitle}"
         Width="1200" Height="760"
         MinWidth="960" MinHeight="600"
         WindowStartupLocation="CenterScreen"
@@ -94,10 +94,15 @@
 
                             <Button Grid.Column="2"
                                     Classes="icon"
-                                    Command="{Binding DisconnectCommand}"
                                     IsVisible="{Binding IsConnected}"
-                                    ToolTip.Tip="Disconnect">
-                                <TextBlock Text="⏏" FontSize="{StaticResource AuraFont13}"/>
+                                    ToolTip.Tip="Connection">
+                                <Button.Flyout>
+                                    <MenuFlyout>
+                                        <MenuItem Header="Disconnect" Command="{Binding DisconnectCommand}"/>
+                                        <MenuItem Header="Leave server…" Command="{Binding AskLeaveServerCommand}"/>
+                                    </MenuFlyout>
+                                </Button.Flyout>
+                                <TextBlock Text="⋯" FontSize="{StaticResource AuraFont13}"/>
                             </Button>
                         </Grid>
                     </Border>
@@ -224,13 +229,30 @@
                                         HorizontalAlignment="Stretch"
                                         HorizontalContentAlignment="Center"
                                         Content="Connect"/>
+
+                                <Button Classes="row"
+                                        Command="{Binding PasteInviteCommand}"
+                                        HorizontalContentAlignment="Center"
+                                        ToolTip.Tip="Fill this in from an aura:// invite link on the clipboard">
+                                    <TextBlock Text="Paste invite link"
+                                               FontSize="{StaticResource AuraFont12}"
+                                               Foreground="{DynamicResource AuraLinkBrush}"/>
+                                </Button>
                             </StackPanel>
 
-                            <!-- `ROSTER · 7 ONLINE` -->
-                            <TextBlock Classes="monoLabel"
-                                       Text="{Binding RosterLabel}"
-                                       Margin="8,6,0,2"
-                                       IsVisible="{Binding IsConnected}"/>
+                            <!-- `ROSTER · 7 ONLINE`, + for admins -->
+                            <Grid ColumnDefinitions="*,Auto" Margin="8,6,0,2" IsVisible="{Binding IsConnected}">
+                                <TextBlock Grid.Column="0" Classes="monoLabel"
+                                           Text="{Binding RosterLabel}"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Classes="icon"
+                                        Padding="6,0"
+                                        Command="{Binding NewChannelCommand}"
+                                        IsVisible="{Binding IsAdmin}"
+                                        ToolTip.Tip="Create channel">
+                                    <TextBlock Text="+" FontSize="{StaticResource AuraFont14}"/>
+                                </Button>
+                            </Grid>
 
                             <ItemsControl ItemsSource="{Binding Channels}">
                                 <ItemsControl.ItemTemplate>
@@ -244,6 +266,12 @@
                                                     Padding="0"
                                                     Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).JoinChannelCommand}"
                                                     CommandParameter="{Binding}">
+                                                <Button.ContextMenu>
+                                                    <ContextMenu IsVisible="{Binding CanManage}">
+                                                        <MenuItem Header="Edit channel…" Command="{Binding EditCommand}"/>
+                                                        <MenuItem Header="Delete channel…" Command="{Binding DeleteCommand}"/>
+                                                    </ContextMenu>
+                                                </Button.ContextMenu>
                                                 <Grid ColumnDefinitions="3,Auto,*,Auto">
                                                     <Border Grid.Column="0" Width="3"
                                                             CornerRadius="{StaticResource AuraRadiusBadge}"
@@ -251,9 +279,8 @@
                                                             Margin="0,2"
                                                             IsVisible="{Binding IsCurrent}"/>
 
-                                                    <TextBlock Grid.Column="1" Text="🔊"
+                                                    <TextBlock Grid.Column="1" Text="{Binding Icon}"
                                                                FontSize="{StaticResource AuraFont13}"
-                                                               Opacity="0.7"
                                                                VerticalAlignment="Center"
                                                                Margin="8,0,8,0"/>
 
@@ -261,11 +288,12 @@
                                                         <TextBlock Text="{Binding Name}"
                                                                    FontSize="{StaticResource AuraFont13}"
                                                                    FontWeight="{Binding IsCurrent, Converter={x:Static converters:CurrentChannelWeightConverter.Instance}}"
-                                                                   Foreground="{DynamicResource AuraTextBrush}"/>
-                                                        <TextBlock Text="{Binding Comment}"
+                                                                   Foreground="{DynamicResource AuraTextBrush}"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                        <TextBlock Text="{Binding CommentPreview}"
                                                                    FontSize="{StaticResource AuraFont11}"
                                                                    Foreground="{DynamicResource AuraTextFaintBrush}"
-                                                                   IsVisible="{Binding Comment, Converter={StaticResource StringToBoolConverter}}"
+                                                                   IsVisible="{Binding HasComment}"
                                                                    TextTrimming="CharacterEllipsis"/>
                                                     </StackPanel>
 
@@ -288,8 +316,29 @@
                                             <ItemsControl ItemsSource="{Binding Users}" Margin="0,0,0,4">
                                                 <ItemsControl.ItemTemplate>
                                                     <DataTemplate x:DataType="vm:User">
-                                                        <Border CornerRadius="{StaticResource AuraRadiusControl}"
+                                                        <Button Classes="row"
                                                                 Margin="12,1,0,1"
+                                                                Padding="0"
+                                                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                                                Command="{Binding OpenProfileCommand}"
+                                                                ToolTip.Tip="{Binding Name}">
+                                                        <Button.ContextMenu>
+                                                            <ContextMenu IsVisible="{Binding CanAdjust}">
+                                                                <MenuItem Header="{Binding LocalMuteLabel}" Command="{Binding ToggleLocalMuteCommand}"/>
+                                                                <MenuItem Header="Volume">
+                                                                    <MenuItem Header="0%" Command="{Binding SetVolumeCommand}" CommandParameter="0"/>
+                                                                    <MenuItem Header="25%" Command="{Binding SetVolumeCommand}" CommandParameter="25"/>
+                                                                    <MenuItem Header="50%" Command="{Binding SetVolumeCommand}" CommandParameter="50"/>
+                                                                    <MenuItem Header="75%" Command="{Binding SetVolumeCommand}" CommandParameter="75"/>
+                                                                    <MenuItem Header="100%" Command="{Binding SetVolumeCommand}" CommandParameter="100"/>
+                                                                    <MenuItem Header="125%" Command="{Binding SetVolumeCommand}" CommandParameter="125"/>
+                                                                    <MenuItem Header="150%" Command="{Binding SetVolumeCommand}" CommandParameter="150"/>
+                                                                    <MenuItem Header="200%" Command="{Binding SetVolumeCommand}" CommandParameter="200"/>
+                                                                </MenuItem>
+                                                                <MenuItem Header="Profile…" Command="{Binding OpenProfileCommand}"/>
+                                                            </ContextMenu>
+                                                        </Button.ContextMenu>
+                                                        <Border CornerRadius="{StaticResource AuraRadiusControl}"
                                                                 Padding="8,3"
                                                                 Background="{Binding IsSpeaking, Converter={x:Static converters:SpeakingRowBrushConverter.Instance}}">
                                                             <Grid ColumnDefinitions="Auto,*,Auto">
@@ -297,7 +346,7 @@
                                                                 <Border Grid.Column="0" Width="20" Height="20" Margin="0,0,8,0"
                                                                         CornerRadius="{StaticResource AuraRadiusAvatarSmall}"
                                                                         Background="{Binding IsSpeaking, Converter={x:Static converters:AvatarBrushConverter.Instance}}">
-                                                                    <TextBlock Text="{Binding Name[0], FallbackValue='?'}"
+                                                                    <TextBlock Text="{Binding Initial}"
                                                                                FontSize="{StaticResource AuraMono9}"
                                                                                FontWeight="Bold"
                                                                                Foreground="White"
@@ -318,19 +367,27 @@
                                                                     <Ellipse Width="6" Height="6"
                                                                              Fill="{DynamicResource AuraAccentBrush}"
                                                                              IsVisible="{Binding IsSpeaking}"/>
-                                                                    <!-- mic.slash.fill in warn -->
+                                                                    <!-- muted for me only -->
+                                                                    <TextBlock Text="🔇"
+                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                               Foreground="{DynamicResource AuraWarnBrush}"
+                                                                               IsVisible="{Binding IsLocallyMuted}"
+                                                                               ToolTip.Tip="Muted locally"/>
+                                                                    <!-- mic.slash.fill in warn (deafened implies muted) -->
                                                                     <TextBlock Text="🎙"
                                                                                FontSize="{StaticResource AuraMono9}"
                                                                                Foreground="{DynamicResource AuraWarnBrush}"
-                                                                               IsVisible="{Binding IsMuted}"/>
-                                                                    <!-- key.fill in caution -->
+                                                                               IsVisible="{Binding ShowMuted}"/>
+                                                                    <!-- key.fill in caution: key changed since first seen -->
                                                                     <TextBlock Text="🔑"
                                                                                FontSize="{StaticResource AuraMono9}"
                                                                                Foreground="{DynamicResource AuraCautionBrush}"
-                                                                               IsVisible="{Binding NeedsKeyCheck}"/>
+                                                                               IsVisible="{Binding NeedsKeyCheck}"
+                                                                               ToolTip.Tip="Key changed — verify"/>
                                                                 </StackPanel>
                                                             </Grid>
                                                         </Border>
+                                                        </Button>
                                                     </DataTemplate>
                                                 </ItemsControl.ItemTemplate>
                                             </ItemsControl>
@@ -340,54 +397,6 @@
                             </ItemsControl>
                         </StackPanel>
                     </ScrollViewer>
-
-                    <!-- ── Audio settings, behind the Settings button ── -->
-                    <Border Grid.Row="4" Classes="panel"
-                            Padding="12,10"
-                            Margin="0,8,0,8"
-                            IsVisible="{Binding ShowAudioSettings}">
-                        <StackPanel Spacing="{StaticResource AuraSpace9}">
-                            <TextBlock Classes="monoLabel" Text="PROCESSING"/>
-                            <CheckBox IsChecked="{Binding RnnoiseEnabled}" Content="RNNoise suppression"
-                                      Foreground="{DynamicResource AuraTextBrush}" FontSize="{StaticResource AuraFont12}"/>
-                            <CheckBox IsChecked="{Binding AecEnabled}" Content="Echo cancellation"
-                                      Foreground="{DynamicResource AuraTextBrush}" FontSize="{StaticResource AuraFont12}"/>
-                            <CheckBox IsChecked="{Binding WebrtcNsEnabled}" Content="WebRTC noise suppression"
-                                      Foreground="{DynamicResource AuraTextBrush}" FontSize="{StaticResource AuraFont12}"/>
-                            <CheckBox IsChecked="{Binding AgcEnabled}" Content="Auto gain control"
-                                      Foreground="{DynamicResource AuraTextBrush}" FontSize="{StaticResource AuraFont12}"/>
-
-                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1" Margin="0,4"/>
-                            <TextBlock Classes="monoLabel" Text="OUTPUT"/>
-                            <StackPanel Spacing="{StaticResource AuraSpace3}">
-                                <TextBlock Classes="mono"
-                                           Text="{Binding MasterVolume, StringFormat='master {0}%'}"
-                                           FontSize="{StaticResource AuraMono10}"
-                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                <Slider Minimum="0" Maximum="100" Value="{Binding MasterVolume}"
-                                        IsSnapToTickEnabled="True" TickFrequency="5"/>
-                            </StackPanel>
-
-                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1" Margin="0,4"/>
-                            <TextBlock Classes="monoLabel" Text="LATENCY"/>
-                            <StackPanel Spacing="{StaticResource AuraSpace3}">
-                                <TextBlock Classes="mono"
-                                           Text="{Binding DredDuration, StringFormat='DRED {0}0 ms'}"
-                                           FontSize="{StaticResource AuraMono10}"
-                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                <Slider Minimum="0" Maximum="10" Value="{Binding DredDuration}"
-                                        IsSnapToTickEnabled="True" TickFrequency="1"/>
-                            </StackPanel>
-                            <StackPanel Spacing="{StaticResource AuraSpace3}">
-                                <TextBlock Classes="mono"
-                                           Text="{Binding JitterBufferMs, StringFormat='jitter {0} ms'}"
-                                           FontSize="{StaticResource AuraMono10}"
-                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                <Slider Minimum="0" Maximum="100" Value="{Binding JitterBufferMs}"
-                                        IsSnapToTickEnabled="True" TickFrequency="10"/>
-                            </StackPanel>
-                        </StackPanel>
-                    </Border>
 
                     <!-- ── Connection status + Settings, bottom-pinned ── -->
                     <StackPanel Grid.Row="5" Spacing="{StaticResource AuraSpace5}">
@@ -404,7 +413,7 @@
                         </StackPanel>
 
                         <Button Classes="row"
-                                Command="{Binding ToggleAudioSettingsCommand}"
+                                Command="{Binding ToggleSettingsCommand}"
                                 HorizontalContentAlignment="Center">
                             <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
                                 <TextBlock Text="⚙" FontSize="{StaticResource AuraFont12}"
@@ -421,7 +430,7 @@
             <!-- ========================================================
                  CHAT — the work surface in chat-first mode.
                  ======================================================== -->
-            <Grid Grid.Column="1" RowDefinitions="Auto,*,Auto">
+            <Grid Grid.Column="1" RowDefinitions="Auto,Auto,Auto,*,Auto,Auto">
 
                 <!-- ── Channel header ── -->
                 <Border Grid.Row="0" Height="46"
@@ -430,7 +439,7 @@
                         BorderThickness="0,0,0,1"
                         Padding="16,0">
                     <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
-                        <TextBlock Grid.Column="0" Text="🔊"
+                        <TextBlock Grid.Column="0" Text="{Binding SelectedChannel.Icon, FallbackValue='🔊'}"
                                    FontSize="{StaticResource AuraFont14}"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"/>
@@ -440,27 +449,87 @@
                                    Text="{Binding SelectedChannel.Name, FallbackValue='No channel'}"
                                    VerticalAlignment="Center"/>
 
-                        <!-- `E2EE · epoch 14` -->
-                        <Border Grid.Column="2" Classes="badge"
+                        <!-- `E2EE · epoch 14`. The badge that claims the channel
+                             is encrypted is also the way to check the claim. -->
+                        <Button Grid.Column="2" Classes="icon"
+                                Padding="0"
                                 Margin="10,0,0,0"
                                 VerticalAlignment="Center"
-                                Background="{DynamicResource AuraAccentPillFillBrush}"
-                                BorderBrush="{DynamicResource AuraAccentPillBorderBrush}"
-                                BorderThickness="1"
+                                Command="{Binding OpenTrustSheetCommand}"
+                                ToolTip.Tip="Verify who you are talking to"
                                 IsVisible="{Binding HasEpoch}">
-                            <TextBlock Classes="mono"
-                                       Text="{Binding EpochLabel}"
-                                       FontSize="{StaticResource AuraMono10}"
-                                       Foreground="{DynamicResource AuraAccentBrush}"/>
-                        </Border>
+                            <Border Classes="badge"
+                                    Background="{DynamicResource AuraAccentPillFillBrush}"
+                                    BorderBrush="{DynamicResource AuraAccentPillBorderBrush}"
+                                    BorderThickness="1">
+                                <TextBlock Classes="mono"
+                                           Text="{Binding EpochLabel}"
+                                           FontSize="{StaticResource AuraMono10}"
+                                           Foreground="{DynamicResource AuraAccentBrush}"/>
+                            </Border>
+                        </Button>
 
                         <!-- `12 messages today` -->
-                        <TextBlock Grid.Column="4" Classes="mono"
-                                   Text="{Binding MessagesTodayLabel}"
-                                   FontSize="{StaticResource AuraMono10}"
-                                   Foreground="{DynamicResource AuraTextDimBrush}"
-                                   VerticalAlignment="Center"
-                                   Margin="0,0,8,0"/>
+                        <StackPanel Grid.Column="4" Orientation="Horizontal"
+                                    Spacing="{StaticResource AuraSpace8}"
+                                    VerticalAlignment="Center"
+                                    Margin="0,0,8,0">
+                            <TextBlock Classes="mono"
+                                       Text="{Binding MessagesTodayLabel}"
+                                       FontSize="{StaticResource AuraMono10}"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                       VerticalAlignment="Center"/>
+
+                            <!-- Invite: a link that opens this server (and channel) -->
+                            <Button Classes="icon"
+                                    Command="{Binding OpenInviteCommand}"
+                                    IsVisible="{Binding IsAuthenticated}"
+                                    ToolTip.Tip="Invite someone">
+                                <TextBlock Text="Invite" FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraLinkBrush}"/>
+                                <Button.Flyout>
+                                    <Flyout Placement="BottomEdgeAlignedRight">
+                                        <StackPanel Width="380" Spacing="{StaticResource AuraSpace9}">
+                                            <TextBlock Classes="monoLabel" Text="INVITE LINK"/>
+                                            <TextBox Classes="aura" IsReadOnly="True" TextWrapping="Wrap"
+                                                     FontFamily="{StaticResource AuraMonoFontFamily}"
+                                                     FontSize="{StaticResource AuraMono11}"
+                                                     Text="{Binding InviteLink, Mode=OneWay}"/>
+                                            <Grid ColumnDefinitions="*,Auto">
+                                                <TextBlock Grid.Column="0" Classes="mono" Text="{Binding InviteStatus}"
+                                                           FontSize="{StaticResource AuraMono10}"
+                                                           Foreground="{DynamicResource AuraAccentBrush}"
+                                                           VerticalAlignment="Center"/>
+                                                <Button Grid.Column="1" Content="Copy"
+                                                        Command="{Binding CopyInviteCommand}"
+                                                        Background="{DynamicResource AuraBrandGradientBrush}"
+                                                        Foreground="White"
+                                                        CornerRadius="{StaticResource AuraRadiusControl}"
+                                                        Padding="14,6"/>
+                                            </Grid>
+                                            <ToggleSwitch IsChecked="{Binding InviteIncludeChannel}"
+                                                          Content="{Binding InviteChannelLabel}"
+                                                          OnContent="" OffContent=""/>
+                                            <StackPanel Spacing="{StaticResource AuraSpace3}">
+                                                <ToggleSwitch IsChecked="{Binding InviteIncludePassword}"
+                                                              IsEnabled="{Binding CanIncludeInvitePassword}"
+                                                              Content="Include the server password"
+                                                              OnContent="" OffContent=""/>
+                                                <TextBlock Text="Anyone holding the link can then get in"
+                                                           FontSize="{StaticResource AuraFont11}"
+                                                           Foreground="{DynamicResource AuraCautionTextBrush}"
+                                                           TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <TextBlock IsVisible="{Binding InviteHasFingerprint}"
+                                                       Text="The link carries the server's certificate fingerprint, so a friend's first connection is checked against it instead of trusted on sight."
+                                                       FontSize="{StaticResource AuraFont11}"
+                                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                                       TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Flyout>
+                                </Button.Flyout>
+                            </Button>
+                        </StackPanel>
 
                         <!-- Mode toggle -->
                         <Button Grid.Column="5" Classes="icon"
@@ -473,8 +542,72 @@
                     </Grid>
                 </Border>
 
+                <!-- ── Banner: connection loss / failures, where people look ── -->
+                <Border Grid.Row="1"
+                        Margin="20,12,20,0"
+                        Padding="12,9"
+                        CornerRadius="{StaticResource AuraRadiusTile}"
+                        BorderThickness="1"
+                        Background="{Binding BannerIsError, Converter={x:Static converters:BannerBrushConverter.Fill}}"
+                        BorderBrush="{Binding BannerIsError, Converter={x:Static converters:BannerBrushConverter.Border}}"
+                        IsVisible="{Binding HasBanner}">
+                    <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+                        <SelectableTextBlock Grid.Column="0"
+                                             Text="{Binding BannerText}"
+                                             FontSize="{StaticResource AuraFont12}"
+                                             Foreground="{Binding BannerIsError, Converter={x:Static converters:BannerBrushConverter.Text}}"
+                                             TextWrapping="Wrap"
+                                             VerticalAlignment="Center"/>
+                        <Button Grid.Column="1" Classes="icon" Margin="8,0,0,0"
+                                Content="Retry now"
+                                FontSize="{StaticResource AuraFont12}"
+                                Command="{Binding RetryNowCommand}"
+                                IsVisible="{Binding IsReconnecting}"/>
+                        <Button Grid.Column="2" Classes="icon"
+                                Content="Cancel"
+                                FontSize="{StaticResource AuraFont12}"
+                                Command="{Binding CancelReconnectCommand}"
+                                IsVisible="{Binding IsReconnecting}"/>
+                        <Button Grid.Column="3" Classes="icon"
+                                Content="✕"
+                                FontSize="{StaticResource AuraFont12}"
+                                Command="{Binding DismissBannerCommand}"
+                                IsVisible="{Binding !IsReconnecting}"
+                                ToolTip.Tip="Dismiss"/>
+                    </Grid>
+                </Border>
+
+                <!-- ── Channel comment / MOTD card (§6), pinned above chat ── -->
+                <Border Grid.Row="2"
+                        Classes="panel"
+                        Margin="20,12,20,0"
+                        Padding="0"
+                        MaxHeight="150"
+                        IsVisible="{Binding HasChannelMotd}">
+                    <Grid ColumnDefinitions="3,*">
+                        <Border Grid.Column="0"
+                                CornerRadius="8,0,0,8"
+                                Background="{DynamicResource AuraAccentBrush}"/>
+                        <ScrollViewer Grid.Column="1" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="14,10" Spacing="{StaticResource AuraSpace5}">
+                                <TextBlock Text="{Binding ChannelMotdTitle}"
+                                           FontSize="{StaticResource AuraFont13}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource AuraTextBrush}"/>
+                                <controls:MarkdownView Markdown="{Binding ChannelMotd}"
+                                                       TextSize="{StaticResource AuraFont12}"
+                                                       TextBrush="{DynamicResource AuraTextMidBrush}"
+                                                       LinkBrush="{DynamicResource AuraLinkBrush}"
+                                                       AccentBrush="{DynamicResource AuraAccentBrush}"
+                                                       CodeBackground="{DynamicResource AuraWellBrush}"
+                                                       CodeFontFamily="{StaticResource AuraMonoFontFamily}"/>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
+
                 <!-- ── Messages ── -->
-                <Panel Grid.Row="1">
+                <Panel Grid.Row="3">
 
                 <!-- Empty state. The column is otherwise a full-height void with
                      the composer stranded at the bottom, and it is the first
@@ -499,24 +632,23 @@
                     </StackPanel>
                 </Border>
 
-                <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                <ScrollViewer x:Name="ChatScroll"
+                              HorizontalScrollBarVisibility="Disabled"
                               VerticalScrollBarVisibility="Auto"
                               Padding="20,20,20,8">
                     <ItemsControl ItemsSource="{Binding Messages}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="vm:ChatMessage">
-                                <Grid ColumnDefinitions="Auto,*" Margin="0,0,0,16">
+                                <!-- Incoming: avatar left. Outgoing: row-reverse, avatar right. -->
+                                <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,16">
 
-                                    <!-- Avatar beside the message. Collapses to 0 in
-                                         voice-focus, where the narrow column drops
-                                         avatars and indents the sender name instead. -->
                                     <Border Grid.Column="0" Height="34"
                                             Width="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).MessageAvatarWidth}"
                                             Margin="0,0,11,0"
                                             VerticalAlignment="Top"
                                             CornerRadius="{StaticResource AuraRadiusAvatar}"
                                             Background="{DynamicResource AuraBrandGradientBrush}"
-                                            IsVisible="{Binding System, Converter={StaticResource InverseBoolConverter}}">
+                                            IsVisible="{Binding IsIncoming}">
                                         <TextBlock Text="{Binding Initial}"
                                                    FontSize="{StaticResource AuraFont13}"
                                                    FontWeight="Bold"
@@ -525,13 +657,28 @@
                                                    VerticalAlignment="Center"/>
                                     </Border>
 
-                                    <StackPanel Grid.Column="1"
-                                                HorizontalAlignment="{Binding System, Converter={x:Static converters:BoolToAlignmentConverter.CenterIfSystem}}">
+                                    <Border Grid.Column="2" Height="34"
+                                            Width="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).MessageAvatarWidth}"
+                                            Margin="11,0,0,0"
+                                            VerticalAlignment="Top"
+                                            CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                            Background="{DynamicResource AuraBrandGradientBrush}"
+                                            IsVisible="{Binding IsFromCurrentUser}">
+                                        <TextBlock Text="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OwnInitial}"
+                                                   FontSize="{StaticResource AuraFont13}"
+                                                   FontWeight="Bold"
+                                                   Foreground="White"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"/>
+                                    </Border>
+
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="{Binding Alignment}">
                                         <!-- name + timestamp on one baseline row -->
                                         <StackPanel Orientation="Horizontal"
                                                     Spacing="{StaticResource AuraSpace8}"
-                                                    Margin="2,0,0,3"
-                                                    IsVisible="{Binding System, Converter={StaticResource InverseBoolConverter}}">
+                                                    Margin="2,0,2,3"
+                                                    HorizontalAlignment="{Binding Alignment}"
+                                                    IsVisible="{Binding !System}">
                                             <TextBlock Text="{Binding UserName}"
                                                        FontSize="{StaticResource AuraFont13}"
                                                        FontWeight="SemiBold"
@@ -541,42 +688,143 @@
                                                        FontSize="{StaticResource AuraMono9}"
                                                        Foreground="{DynamicResource AuraTextFaintBrush}"
                                                        VerticalAlignment="Center"/>
+                                            <TextBlock Classes="mono"
+                                                       Text="mentions you"
+                                                       FontSize="{StaticResource AuraMono9}"
+                                                       Foreground="{DynamicResource AuraCautionTextBrush}"
+                                                       VerticalAlignment="Center"
+                                                       IsVisible="{Binding IsMention}"/>
                                         </StackPanel>
 
                                         <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
-                                                BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                                                BorderBrush="{Binding ., Converter={x:Static converters:ChatBubbleBorderConverter.Instance}}"
                                                 BorderThickness="{Binding System, Converter={x:Static converters:BoolToThicknessConverter.Instance}}"
                                                 CornerRadius="{StaticResource AuraRadiusTile}"
                                                 Padding="{Binding System, Converter={x:Static converters:SystemMessagePaddingConverter.Instance}}"
                                                 MaxWidth="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).ChatBubbleMaxWidth}"
-                                                HorizontalAlignment="{Binding System, Converter={x:Static converters:BoolToAlignmentConverter.CenterIfSystem}}">
-                                            <TextBlock Text="{Binding Content}"
-                                                       Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
-                                                       TextWrapping="Wrap"
-                                                       FontSize="{StaticResource AuraFont13}"/>
+                                                HorizontalAlignment="{Binding Alignment}"
+                                                Opacity="{Binding BubbleOpacity}">
+                                            <Border.ContextMenu>
+                                                <ContextMenu IsVisible="{Binding !System}">
+                                                    <MenuItem Header="Reply" Command="{Binding ReplyCommand}"/>
+                                                    <MenuItem Header="Copy" Command="{Binding CopyCommand}"/>
+                                                </ContextMenu>
+                                            </Border.ContextMenu>
+                                            <StackPanel Spacing="{StaticResource AuraSpace5}">
+                                                <!-- Reply context: 3px primary bar, sender mono, quoted line -->
+                                                <Grid ColumnDefinitions="3,*" IsVisible="{Binding HasReply}">
+                                                    <Border Grid.Column="0" CornerRadius="2"
+                                                            Background="{DynamicResource AuraPrimarySoftBrush}"/>
+                                                    <StackPanel Grid.Column="1" Margin="9,0,0,0" Spacing="1">
+                                                        <TextBlock Classes="mono"
+                                                                   Text="{Binding ReplySender}"
+                                                                   FontSize="{StaticResource AuraMono9}"
+                                                                   Foreground="{DynamicResource AuraLinkBrush}"/>
+                                                        <TextBlock Text="{Binding ReplyPreview}"
+                                                                   FontSize="{StaticResource AuraFont11}"
+                                                                   Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
+                                                                   Opacity="0.75"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </Grid>
+                                                <controls:MarkdownText Markdown="{Binding Content}"
+                                                                       MentionName="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).DisplayName}"
+                                                                       MentionBackground="{DynamicResource AuraMentionPillBrush}"
+                                                                       MentionForeground="{DynamicResource AuraCautionTextBrush}"
+                                                                       Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
+                                                                       LinkBrush="{Binding ., Converter={x:Static converters:ChatLinkBrushConverter.Instance}}"
+                                                                       CodeBackground="{DynamicResource AuraWellBrush}"
+                                                                       CodeFontFamily="{StaticResource AuraMonoFontFamily}"
+                                                                       TextWrapping="Wrap"
+                                                                       FontSize="{StaticResource AuraFont13}"/>
+                                            </StackPanel>
                                         </Border>
+
+                                        <!-- Failed send: say why, offer retry -->
+                                        <StackPanel Orientation="Horizontal"
+                                                    Spacing="{StaticResource AuraSpace8}"
+                                                    HorizontalAlignment="Right"
+                                                    Margin="0,4,2,0"
+                                                    IsVisible="{Binding SendFailed}">
+                                            <TextBlock Classes="mono"
+                                                       Text="{Binding SendErrorLabel}"
+                                                       FontSize="{StaticResource AuraMono9}"
+                                                       Foreground="{DynamicResource AuraDangerBrush}"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="320"
+                                                       VerticalAlignment="Center"/>
+                                            <Button Classes="icon" Padding="6,2"
+                                                    Content="Retry"
+                                                    FontSize="{StaticResource AuraFont11}"
+                                                    Command="{Binding RetryCommand}"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Grid>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                 </ScrollViewer>
+
+                <!-- `N mentions below` — scrolls to the first one -->
+                <Button x:Name="MentionsBelowPill"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Bottom"
+                        Margin="0,0,0,12"
+                        Padding="12,5"
+                        CornerRadius="{StaticResource AuraRadiusPill}"
+                        Background="{DynamicResource AuraMentionFillBrush}"
+                        BorderBrush="{DynamicResource AuraMentionBorderBrush}"
+                        BorderThickness="1"
+                        IsVisible="{Binding HasMentionsBelow}">
+                    <TextBlock Classes="mono" Text="{Binding MentionsBelowLabel}"
+                               FontSize="{StaticResource AuraMono10}"
+                               Foreground="{DynamicResource AuraCautionTextBrush}"/>
+                </Button>
                 </Panel>
 
+                <!-- ── Reply bar ── -->
+                <Border Grid.Row="4"
+                        BorderBrush="{DynamicResource AuraDividerBrush}"
+                        BorderThickness="0,1,0,0"
+                        Padding="16,8"
+                        IsVisible="{Binding IsReplying}">
+                    <Grid ColumnDefinitions="3,*,Auto">
+                        <Border Grid.Column="0" CornerRadius="2" Background="{DynamicResource AuraPrimaryBrush}"/>
+                        <StackPanel Grid.Column="1" Margin="9,0,0,0" Spacing="1">
+                            <TextBlock Classes="mono"
+                                       Text="{Binding ReplyBarTitle}"
+                                       FontSize="{StaticResource AuraMono9}"
+                                       Foreground="{DynamicResource AuraLinkBrush}"/>
+                            <TextBlock Text="{Binding ReplyBarPreview}"
+                                       FontSize="{StaticResource AuraFont11}"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <Button Grid.Column="2" Classes="icon"
+                                Content="✕"
+                                Command="{Binding CancelReplyCommand}"
+                                ToolTip.Tip="Cancel reply (Esc)"/>
+                    </Grid>
+                </Border>
+
                 <!-- ── Composer ── -->
-                <Border Grid.Row="2"
+                <Border Grid.Row="5"
                         BorderBrush="{DynamicResource AuraDividerBrush}"
                         BorderThickness="0,1,0,0"
                         Padding="16,10">
-                    <!-- No attach button yet: dropped media (§5) is separate work,
-                         and the Avalonia mock's composer is field + send. -->
+                    <!-- No attach button: dropped media (§5) needs a transfer path
+                         the protocol doesn't have yet (text frames cap at 256 KB). -->
                     <Grid ColumnDefinitions="*,Auto,Auto">
-                        <TextBox Grid.Column="0" Classes="aura"
+                        <TextBox x:Name="Composer"
+                                 Grid.Column="0" Classes="aura"
                                  Text="{Binding MessageInput}"
                                  PlaceholderText="{Binding ComposerPlaceholder}"
+                                 MaxLength="4000"
                                  VerticalAlignment="Center">
                             <TextBox.KeyBindings>
                                 <KeyBinding Gesture="Enter" Command="{Binding SendMessageCommand}"/>
+                                <KeyBinding Gesture="Ctrl+Enter" Command="{Binding SendMessageCommand}"/>
+                                <KeyBinding Gesture="Escape" Command="{Binding CancelReplyCommand}"/>
                             </TextBox.KeyBindings>
                         </TextBox>
 
@@ -596,7 +844,8 @@
                                 Padding="0"
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
-                                Background="{DynamicResource AuraBrandGradientBrush}">
+                                Background="{DynamicResource AuraBrandGradientBrush}"
+                                ToolTip.Tip="Send">
                             <TextBlock Text="➤" FontSize="{StaticResource AuraFont13}" Foreground="White"/>
                         </Button>
                     </Grid>
@@ -870,9 +1119,13 @@
                                 <ItemsControl ItemsSource="{Binding VoiceRail.SilentMembers}">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate x:DataType="vm:SilentMemberViewModel">
+                                            <!-- `verify key` rows open the trust sheet on that member -->
+                                            <Button Classes="row" Padding="0" Margin="0,0,0,5"
+                                                    IsHitTestVisible="{Binding NeedsTrust}"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OpenTrustForSessionCommand}"
+                                                    CommandParameter="{Binding SessionId}">
                                             <Border CornerRadius="{StaticResource AuraRadiusTile}"
                                                     Padding="12,8"
-                                                    Margin="0,0,0,5"
                                                     Background="{Binding NeedsTrust, Converter={x:Static converters:TrustRowBrushConverter.Fill}}"
                                                     BorderBrush="{Binding NeedsTrust, Converter={x:Static converters:TrustRowBrushConverter.Border}}"
                                                     BorderThickness="1">
@@ -901,6 +1154,7 @@
                                                                Foreground="{Binding NeedsTrust, Converter={x:Static converters:TrustRowBrushConverter.Text}}"/>
                                                 </Grid>
                                             </Border>
+                                            </Button>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
@@ -924,20 +1178,23 @@
                                 <!-- Mic / deafen segmented pair in a well -->
                                 <Border Grid.Column="0" Classes="well" Padding="3">
                                     <StackPanel Orientation="Horizontal" Spacing="2">
-                                        <ToggleButton IsChecked="{Binding IsMicEnabled}"
-                                                      Command="{Binding ToggleMicrophoneCommand}"
-                                                      Classes="hudSegment"
-                                                      ToolTip.Tip="Microphone">
+                                        <!-- Plain buttons whose look follows the view model one
+                                             way. A ToggleButton flips itself AND runs the command,
+                                             so a click toggled twice and netted nothing. -->
+                                        <Button Command="{Binding ToggleMicrophoneCommand}"
+                                                Classes="hudSegment"
+                                                Classes.on="{Binding IsMicEnabled}"
+                                                ToolTip.Tip="Microphone">
                                             <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}"
                                                        FontSize="{StaticResource AuraFont13}"/>
-                                        </ToggleButton>
-                                        <ToggleButton IsChecked="{Binding IsDeafened}"
-                                                      Command="{Binding ToggleDeafenCommand}"
-                                                      Classes="hudSegment"
-                                                      ToolTip.Tip="Deafen">
+                                        </Button>
+                                        <Button Command="{Binding ToggleDeafenCommand}"
+                                                Classes="hudSegment"
+                                                Classes.on="{Binding IsDeafened}"
+                                                ToolTip.Tip="Deafen">
                                             <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}"
                                                        FontSize="{StaticResource AuraFont13}"/>
-                                        </ToggleButton>
+                                        </Button>
                                     </StackPanel>
                                 </Border>
 
@@ -963,12 +1220,13 @@
                                 <!-- PTT chip: `PTT · Ctrl+Space`, `held 0:04` while down -->
                                 <Border Grid.Column="2" Classes="well"
                                         Padding="10,6" Margin="12,0,0,0"
-                                        VerticalAlignment="Center">
+                                        VerticalAlignment="Center"
+                                        ToolTip.Tip="{Binding HudModeTip}">
                                     <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace5}">
-                                        <TextBlock Classes="mono" Text="PTT ·"
+                                        <TextBlock Classes="mono" Text="{Binding HudModeLabel}"
                                                    FontSize="{StaticResource AuraMono10}"
                                                    Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                        <TextBlock Classes="mono" Text="Ctrl+Space"
+                                        <TextBlock Classes="mono" Text="{Binding HudModeKey}"
                                                    FontSize="{StaticResource AuraMono10}"
                                                    Foreground="{DynamicResource AuraAccentBrush}"/>
                                         <TextBlock Classes="mono"
@@ -1018,7 +1276,7 @@
                     BorderBrush="{DynamicResource AuraPanelBorderBrush}"
                     BorderThickness="1"
                     CornerRadius="{StaticResource AuraRadiusTile}"
-                    Padding="{StaticResource AuraSpace18}">
+                    Padding="18">
                 <DockPanel LastChildFill="True">
 
                     <!-- Header -->
@@ -1059,7 +1317,7 @@
                                 BorderBrush="{DynamicResource AuraDangerBorderBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource AuraRadiusControl}"
-                                Padding="{StaticResource AuraSpace11}"
+                                Padding="11"
                                 Margin="0,8,0,0">
                             <TextBlock Text="{Binding TrustSheet.Error}"
                                        FontSize="{StaticResource AuraFont12}"
@@ -1075,7 +1333,7 @@
                                 BorderBrush="{DynamicResource AuraCautionBorderBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource AuraRadiusControl}"
-                                Padding="{StaticResource AuraSpace11}"
+                                Padding="11"
                                 Margin="0,10,0,0">
                             <StackPanel Spacing="{StaticResource AuraSpace3}">
                                 <TextBlock Text="{Binding TrustSheet.KeyChangedTitle}"
@@ -1199,7 +1457,7 @@
                                             <Button Classes="row"
                                                     HorizontalAlignment="Stretch"
                                                     HorizontalContentAlignment="Stretch"
-                                                    Command="{Binding $parent[ItemsControl].((vm:TrustSheetViewModel)DataContext).SelectCommand}"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).TrustSheet.SelectCommand}"
                                                     CommandParameter="{Binding}">
                                                 <Grid ColumnDefinitions="Auto,*,Auto">
                                                     <Border Grid.Column="0"
@@ -1231,5 +1489,461 @@
                 </DockPanel>
             </Border>
         </Border>
+
+        <!-- ================================================================
+             Settings sheet. Same scrim-over-the-room pattern as the trust
+             sheet; replaces the panel that used to squeeze into the roster.
+             ================================================================ -->
+        <Border IsVisible="{Binding ShowSettings}" Background="#99000000">
+            <Border Width="520" MaxHeight="720"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="18">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
+                        <TextBlock Grid.Column="0" Classes="title" Text="Settings" VerticalAlignment="Center"/>
+                        <Button Grid.Column="1" Classes="icon" Content="✕"
+                                Command="{Binding ToggleSettingsCommand}" ToolTip.Tip="Close (Esc)"/>
+                    </Grid>
+                    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Spacing="{StaticResource AuraSpace12}">
+
+                            <TextBlock Classes="monoLabel" Text="APPEARANCE"/>
+                            <Grid ColumnDefinitions="*,*" >
+                                <ComboBox Grid.Column="0" HorizontalAlignment="Stretch" Margin="0,0,6,0"
+                                          ItemsSource="{Binding ThemeOptions}"
+                                          SelectedIndex="{Binding ThemeIndex}"/>
+                                <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" Margin="6,0,0,0"
+                                          ItemsSource="{Binding AppearanceOptions}"
+                                          SelectedIndex="{Binding AppearanceIndex}"/>
+                            </Grid>
+
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="TRANSMISSION"/>
+                            <ComboBox HorizontalAlignment="Stretch"
+                                      ItemsSource="{Binding TransmissionOptions}"
+                                      SelectedIndex="{Binding TransmissionIndex}"/>
+
+                            <StackPanel Spacing="{StaticResource AuraSpace5}" IsVisible="{Binding IsPushToTalkMode}">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBlock Grid.Column="0" Text="Push-to-Talk key"
+                                               FontSize="{StaticResource AuraFont12}"
+                                               Foreground="{DynamicResource AuraTextBrush}"
+                                               VerticalAlignment="Center"/>
+                                    <Button Grid.Column="1" Classes="icon"
+                                            Command="{Binding RecordPttKeyCommand}"
+                                            ToolTip.Tip="Click, then press the key you want (Esc cancels)">
+                                        <Border Classes="well" Padding="10,4">
+                                            <TextBlock Classes="mono" Text="{Binding PttKeyLabel}"
+                                                       FontSize="{StaticResource AuraMono11}"
+                                                       Foreground="{DynamicResource AuraAccentBrush}"/>
+                                        </Border>
+                                    </Button>
+                                </Grid>
+                                <TextBlock Text="{Binding PttScopeNote}"
+                                           FontSize="{StaticResource AuraFont11}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+
+                            <StackPanel Spacing="{StaticResource AuraSpace3}" IsVisible="{Binding IsVoiceActivationMode}">
+                                <Grid ColumnDefinitions="*,Auto">
+                                    <TextBlock Grid.Column="0" Text="Sensitivity"
+                                               FontSize="{StaticResource AuraFont12}"
+                                               Foreground="{DynamicResource AuraTextBrush}"/>
+                                    <TextBlock Grid.Column="1" Classes="mono" Text="{Binding VadThresholdLabel}"
+                                               FontSize="{StaticResource AuraMono10}"
+                                               Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                </Grid>
+                                <Slider Minimum="0" Maximum="100" Value="{Binding VadSensitivity}"
+                                        IsSnapToTickEnabled="True" TickFrequency="5"/>
+                                <TextBlock Text="Left picks up quiet speech; right needs you to speak up."
+                                           FontSize="{StaticResource AuraFont11}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+                            </StackPanel>
+
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="PROCESSING"/>
+                            <ToggleSwitch IsChecked="{Binding RnnoiseEnabled}" Content="RNNoise suppression" OnContent="" OffContent=""/>
+                            <ToggleSwitch IsChecked="{Binding AecEnabled}" Content="Echo cancellation" OnContent="" OffContent=""/>
+                            <ToggleSwitch IsChecked="{Binding WebrtcNsEnabled}" Content="WebRTC noise suppression" OnContent="" OffContent=""/>
+                            <ToggleSwitch IsChecked="{Binding AgcEnabled}" Content="Auto gain control" OnContent="" OffContent=""/>
+
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="OUTPUT"/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <Slider Grid.Column="0" Minimum="0" Maximum="100" Value="{Binding MasterVolume}"
+                                        IsSnapToTickEnabled="True" TickFrequency="5"/>
+                                <TextBlock Grid.Column="1" Classes="mono"
+                                           Text="{Binding MasterVolume, StringFormat='{}{0}%'}"
+                                           FontSize="{StaticResource AuraMono10}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"/>
+                            </Grid>
+
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="LATENCY"/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <Slider Grid.Column="0" Minimum="0" Maximum="100" Value="{Binding JitterBufferMs}"
+                                        IsSnapToTickEnabled="True" TickFrequency="10"/>
+                                <TextBlock Grid.Column="1" Classes="mono"
+                                           Text="{Binding JitterBufferMs, StringFormat='jitter {0} ms'}"
+                                           FontSize="{StaticResource AuraMono10}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <Slider Grid.Column="0" Minimum="0" Maximum="10" Value="{Binding DredDuration}"
+                                        IsSnapToTickEnabled="True" TickFrequency="1"/>
+                                <TextBlock Grid.Column="1" Classes="mono"
+                                           Text="{Binding DredDuration, StringFormat='DRED {0}0 ms'}"
+                                           FontSize="{StaticResource AuraMono10}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           VerticalAlignment="Center" Margin="10,0,0,0"/>
+                            </Grid>
+                            <TextBlock Text="Input and output use the system default devices."
+                                       FontSize="{StaticResource AuraFont11}"
+                                       Foreground="{DynamicResource AuraTextFaintBrush}"
+                                       TextWrapping="Wrap"/>
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="NOTIFICATIONS"/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Text="Notify me about"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextBrush}"
+                                           VerticalAlignment="Center"/>
+                                <ComboBox Grid.Column="1" MinWidth="150"
+                                          ItemsSource="{Binding NotifyLevelOptions}"
+                                          SelectedIndex="{Binding NotifyLevelIndex}"/>
+                            </Grid>
+                            <StackPanel Spacing="{StaticResource AuraSpace3}">
+                                <TextBlock Text="Also notify on these words"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextBrush}"/>
+                                <TextBox Classes="aura" Text="{Binding NotifyKeywords}"
+                                         PlaceholderText="raid, standup, deploy"/>
+                            </StackPanel>
+                            <ToggleSwitch IsChecked="{Binding NotifyShowText}" Content="Show message text in banners" OnContent="" OffContent=""/>
+                            <ToggleSwitch IsChecked="{Binding NotifyBadge}" Content="Count mentions on the app icon" OnContent="" OffContent=""/>
+                            <ToggleSwitch IsChecked="{Binding NotifyJoinLeave}" Content="Join and leave banners" OnContent="" OffContent=""/>
+
+                            <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+                            <TextBlock Classes="monoLabel" Text="IDENTITY"/>
+                            <Border Classes="panel" Padding="12,10">
+                                <Grid ColumnDefinitions="Auto,*">
+                                    <Border Grid.Column="0" Width="34" Height="34" Margin="0,0,10,0"
+                                            VerticalAlignment="Top"
+                                            CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                            Background="{DynamicResource AuraBrandGradientBrush}">
+                                        <TextBlock Text="{Binding IdentityInitial}"
+                                                   FontSize="{StaticResource AuraFont14}" FontWeight="Bold" Foreground="White"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Spacing="{StaticResource AuraSpace3}">
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   FontSize="{StaticResource AuraFont13}" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource AuraTextBrush}"/>
+                                        <SelectableTextBlock Classes="mono" Text="{Binding IdentityFingerprintFull}"
+                                                             FontSize="{StaticResource AuraMono10}"
+                                                             Foreground="{DynamicResource AuraAccentBrush}"
+                                                             TextWrapping="Wrap"/>
+                                        <TextBlock Text="Hybrid Ed25519 + ML-DSA-65 key, kept on this device"
+                                                   FontSize="{StaticResource AuraFont11}"
+                                                   Foreground="{DynamicResource AuraTextDimBrush}"
+                                                   TextWrapping="Wrap"/>
+                                        <TextBlock Classes="mono" Text="{Binding LastBackupLabel}"
+                                                   FontSize="{StaticResource AuraMono10}"
+                                                   Foreground="{DynamicResource AuraTextDimBrush}"
+                                                   IsVisible="{Binding !NeverBackedUp}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                            <Border Padding="12,9"
+                                    CornerRadius="{StaticResource AuraRadiusTile}"
+                                    BorderThickness="1"
+                                    Background="{DynamicResource AuraCautionFillBrush}"
+                                    BorderBrush="{DynamicResource AuraCautionBorderBrush}"
+                                    IsVisible="{Binding NeverBackedUp}">
+                                <TextBlock Text="Never backed up. If this device is lost, your name on each server stays taken by a key you no longer have, and everyone who verified you will see &quot;key changed&quot;."
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraCautionTextBrush}"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+                            <TextBox Classes="aura" PasswordChar="•"
+                                     Text="{Binding BackupPassphrase}"
+                                     PlaceholderText="Backup passphrase (at least 8 characters)"/>
+                            <TextBox Classes="aura" PasswordChar="•"
+                                     Text="{Binding BackupPassphraseRepeat}"
+                                     PlaceholderText="Repeat passphrase (to save a backup)"/>
+                            <TextBlock Text="{Binding PassphraseProblem}"
+                                       IsVisible="{Binding PassphraseProblem, Converter={StaticResource StringToBoolConverter}}"
+                                       FontSize="{StaticResource AuraFont11}"
+                                       Foreground="{DynamicResource AuraCautionTextBrush}"/>
+                            <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
+                                <Button Content="Save encrypted backup…"
+                                        Command="{Binding SaveBackupCommand}"
+                                        IsEnabled="{Binding CanSaveBackup}"
+                                        Background="{DynamicResource AuraBrandGradientBrush}" Foreground="White"
+                                        CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                        FontSize="{StaticResource AuraFont12}"/>
+                                <Button Content="Restore from backup…"
+                                        Command="{Binding RestoreBackupCommand}"
+                                        IsEnabled="{Binding CanRestoreBackup}"
+                                        CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                        FontSize="{StaticResource AuraFont12}"/>
+                                <ProgressBar IsIndeterminate="True" Width="60" VerticalAlignment="Center"
+                                             IsVisible="{Binding IsIdentityBusy}"/>
+                            </StackPanel>
+                            <TextBlock Text="{Binding IdentityStatus}"
+                                       IsVisible="{Binding IdentityStatus, Converter={StaticResource StringToBoolConverter}}"
+                                       FontSize="{StaticResource AuraFont11}"
+                                       Foreground="{DynamicResource AuraAccentBrush}" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding IdentityError}"
+                                       IsVisible="{Binding IdentityError, Converter={StaticResource StringToBoolConverter}}"
+                                       FontSize="{StaticResource AuraFont11}"
+                                       Foreground="{DynamicResource AuraDangerBrush}" TextWrapping="Wrap"/>
+                            <Button Content="Leave server…"
+                                    Command="{Binding AskLeaveServerCommand}"
+                                    IsVisible="{Binding IsAuthenticated}"
+                                    HorizontalAlignment="Left"
+                                    Background="{DynamicResource AuraDangerFillBrush}"
+                                    Foreground="{DynamicResource AuraDangerBrush}"
+                                    BorderBrush="{DynamicResource AuraDangerBorderBrush}" BorderThickness="1"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                    FontSize="{StaticResource AuraFont12}"/>
+
+                        </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Border>
+
+        <!-- ================================================================
+             Profile / comment card (§6). Click any roster name.
+             ================================================================ -->
+        <Border IsVisible="{Binding ProfileCard.IsOpen}" Background="#66000000">
+            <Border Width="330"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="16">
+                <StackPanel Spacing="13">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <Border Grid.Column="0" Width="46" Height="46" Margin="0,0,12,0"
+                                CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                Background="{DynamicResource AuraBrandGradientBrush}">
+                            <TextBlock Text="{Binding ProfileCard.Initial}"
+                                       FontSize="{StaticResource AuraFont18}" FontWeight="Bold" Foreground="White"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
+                            <TextBlock Text="{Binding ProfileCard.Name}"
+                                       FontSize="15" FontWeight="Bold"
+                                       Foreground="{DynamicResource AuraTextBrush}"
+                                       TextTrimming="CharacterEllipsis"/>
+                            <Border Classes="badge" HorizontalAlignment="Left" BorderThickness="1"
+                                    Background="{Binding ProfileCard.IsKeyChanged, Converter={x:Static converters:TrustRowBrushConverter.Fill}}"
+                                    BorderBrush="{Binding ProfileCard.IsVerified, Converter={x:Static converters:VerifiedPillBorderConverter.Instance}}">
+                                <TextBlock Classes="mono" Text="{Binding ProfileCard.TrustLabel}"
+                                           FontSize="{StaticResource AuraMono9}"
+                                           Foreground="{Binding ProfileCard.IsVerified, Converter={x:Static converters:VerifiedPillTextConverter.Instance}}"/>
+                            </Border>
+                        </StackPanel>
+                        <Button Grid.Column="2" Classes="icon" Content="✕" VerticalAlignment="Top"
+                                Command="{Binding ProfileCard.CloseCommand}"/>
+                    </Grid>
+
+                    <SelectableTextBlock Classes="mono" Text="{Binding ProfileCard.FingerprintOrHint}"
+                                         FontSize="{StaticResource AuraMono9}"
+                                         Foreground="{DynamicResource AuraTextDimBrush}"
+                                         TextWrapping="Wrap"/>
+
+                    <!-- Someone else's comment, rendered -->
+                    <controls:MarkdownView IsVisible="{Binding ProfileCard.HasBio}"
+                                           Markdown="{Binding ProfileCard.Bio}"
+                                           TextSize="{StaticResource AuraFont12}"
+                                           TextBrush="{DynamicResource AuraTextMidBrush}"
+                                           LinkBrush="{DynamicResource AuraLinkBrush}"
+                                           AccentBrush="{DynamicResource AuraAccentBrush}"
+                                           CodeBackground="{DynamicResource AuraWellBrush}"
+                                           CodeFontFamily="{StaticResource AuraMonoFontFamily}"/>
+
+                    <!-- Your own comment, editable -->
+                    <StackPanel Spacing="{StaticResource AuraSpace5}" IsVisible="{Binding ProfileCard.IsSelf}">
+                        <TextBlock Classes="monoLabel" Text="YOUR COMMENT · MARKDOWN"/>
+                        <TextBox Classes="aura" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
+                                 Text="{Binding ProfileCard.BioDraft}"
+                                 PlaceholderText="Say something about yourself…"/>
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <TextBlock Grid.Column="0" Classes="mono" Text="{Binding ProfileCard.BioCountLabel}"
+                                       FontSize="{StaticResource AuraMono9}"
+                                       Foreground="{DynamicResource AuraTextFaintBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1" Classes="mono" Text="{Binding ProfileCard.Status}"
+                                       FontSize="{StaticResource AuraMono9}" Margin="8,0"
+                                       Foreground="{DynamicResource AuraAccentBrush}" VerticalAlignment="Center"/>
+                            <Button Grid.Column="2" Content="Save"
+                                    Command="{Binding ProfileCard.SaveBioDraftCommand}"
+                                    Background="{DynamicResource AuraBrandGradientBrush}" Foreground="White"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding ProfileCard.Error}"
+                               IsVisible="{Binding ProfileCard.Error, Converter={StaticResource StringToBoolConverter}}"
+                               FontSize="{StaticResource AuraFont11}"
+                               Foreground="{DynamicResource AuraDangerBrush}" TextWrapping="Wrap"/>
+
+                    <!-- Local volume + Compare keys -->
+                    <StackPanel Spacing="{StaticResource AuraSpace8}" IsVisible="{Binding ProfileCard.CanAdjust}">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <TextBlock Grid.Column="0" Text="Local volume" FontSize="{StaticResource AuraFont12}"
+                                       Foreground="{DynamicResource AuraTextBrush}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <Slider Grid.Column="1" Minimum="0" Maximum="200" Value="{Binding ProfileCard.LocalVolume}"
+                                    IsSnapToTickEnabled="True" TickFrequency="5"/>
+                            <TextBlock Grid.Column="2" Classes="mono" Text="{Binding ProfileCard.LocalVolumeLabel}"
+                                       FontSize="{StaticResource AuraMono10}" Margin="10,0,0,0"
+                                       Foreground="{DynamicResource AuraTextDimBrush}" VerticalAlignment="Center"/>
+                        </Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
+                            <Button Content="{Binding ProfileCard.LocalMuteLabel}"
+                                    Command="{Binding ProfileCard.ToggleLocalMuteCommand}"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                    FontSize="{StaticResource AuraFont12}"/>
+                            <Button Content="Compare keys"
+                                    Command="{Binding ProfileCard.CompareCommand}"
+                                    IsEnabled="{Binding ProfileCard.CanCompareKeys}"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                    FontSize="{StaticResource AuraFont12}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ================================================================
+             Channel editor (admin): create / edit / delete.
+             ================================================================ -->
+        <Border IsVisible="{Binding ChannelEditor.IsOpen}" Background="#99000000">
+            <Border Width="400"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="18">
+                <StackPanel Spacing="{StaticResource AuraSpace9}">
+                    <TextBlock Classes="title" Text="{Binding ChannelEditor.Title}"/>
+                    <Grid ColumnDefinitions="72,*">
+                        <TextBox Grid.Column="0" Classes="aura" Margin="0,0,8,0"
+                                 Text="{Binding ChannelEditor.Emoji}" PlaceholderText="🔊" MaxLength="8"/>
+                        <TextBox Grid.Column="1" Classes="aura"
+                                 Text="{Binding ChannelEditor.Name}" PlaceholderText="Channel name" MaxLength="64"/>
+                    </Grid>
+                    <TextBox Classes="aura" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72"
+                             Text="{Binding ChannelEditor.Comment}"
+                             PlaceholderText="Comment / MOTD (markdown)"/>
+                    <TextBlock Text="{Binding ChannelEditor.Error}"
+                               IsVisible="{Binding ChannelEditor.Error, Converter={StaticResource StringToBoolConverter}}"
+                               FontSize="{StaticResource AuraFont11}"
+                               Foreground="{DynamicResource AuraDangerBrush}" TextWrapping="Wrap"/>
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" Margin="0,4,0,0">
+                        <Button Grid.Column="0"
+                                Content="{Binding ChannelEditor.DeleteLabel}"
+                                Command="{Binding ChannelEditor.DeleteChannelCommand}"
+                                IsVisible="{Binding !ChannelEditor.IsNew}"
+                                Background="{DynamicResource AuraDangerFillBrush}"
+                                Foreground="{DynamicResource AuraDangerBrush}"
+                                BorderBrush="{DynamicResource AuraDangerBorderBrush}" BorderThickness="1"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                        <Button Grid.Column="2" Content="Cancel" Margin="0,0,8,0"
+                                Command="{Binding ChannelEditor.CancelCommand}"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                        <Button Grid.Column="3" Content="Save"
+                                Command="{Binding ChannelEditor.SubmitCommand}"
+                                IsEnabled="{Binding !ChannelEditor.IsBusy}"
+                                Background="{DynamicResource AuraBrandGradientBrush}" Foreground="White"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </Border>
+
+
+        <!-- ================================================================
+             Leave server: destructive confirm.
+             ================================================================ -->
+        <Border IsVisible="{Binding ShowLeaveConfirm}" Background="#99000000">
+            <Border Width="420"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraDangerBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="18">
+                <StackPanel Spacing="{StaticResource AuraSpace12}">
+                    <TextBlock Classes="title" Text="{Binding LeaveConfirmTitle}" TextWrapping="Wrap"/>
+                    <TextBlock Text="{Binding LeaveConfirmBody}"
+                               FontSize="{StaticResource AuraFont12}"
+                               Foreground="{DynamicResource AuraTextMidBrush}"
+                               TextWrapping="Wrap"/>
+                    <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}" HorizontalAlignment="Right">
+                        <Button Content="Cancel" Command="{Binding CancelLeaveServerCommand}"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                        <Button Content="Delete my account"
+                                Command="{Binding ConfirmLeaveServerCommand}"
+                                IsEnabled="{Binding !IsLeaving}"
+                                Background="{DynamicResource AuraDangerBrush}" Foreground="White"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ================================================================
+             Restore identity: confirm before replacing the identity file.
+             ================================================================ -->
+        <Border IsVisible="{Binding ShowRestoreConfirm}" Background="#99000000">
+            <Border Width="440"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraCautionBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="18">
+                <StackPanel Spacing="{StaticResource AuraSpace12}">
+                    <TextBlock Classes="title" Text="Replace this device's identity?"/>
+                    <SelectableTextBlock Classes="mono" Text="{Binding RestoreCurrentLabel}"
+                                         FontSize="{StaticResource AuraMono11}"
+                                         Foreground="{DynamicResource AuraTextDimBrush}" TextWrapping="Wrap"/>
+                    <SelectableTextBlock Classes="mono" Text="{Binding RestoreBackupLabel}"
+                                         FontSize="{StaticResource AuraMono11}"
+                                         Foreground="{DynamicResource AuraAccentBrush}" TextWrapping="Wrap"/>
+                    <TextBlock Text="The current identity file is kept alongside, renamed. You'll be disconnected and can connect again with the restored key."
+                               FontSize="{StaticResource AuraFont12}"
+                               Foreground="{DynamicResource AuraTextMidBrush}" TextWrapping="Wrap"/>
+                    <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}" HorizontalAlignment="Right">
+                        <Button Content="Cancel" Command="{Binding CancelRestoreCommand}"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                        <Button Content="Replace identity"
+                                Command="{Binding ConfirmRestoreCommand}"
+                                Background="{DynamicResource AuraCautionBrush}" Foreground="#12141A"
+                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
+                                FontSize="{StaticResource AuraFont12}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Border>
+
     </Panel>
 </Window>

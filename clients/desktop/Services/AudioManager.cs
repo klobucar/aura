@@ -8,12 +8,34 @@ namespace Aura.Desktop.Services;
 /// <summary>
 /// Manages audio encoding/decoding using the Rust core via UniFFI bindings.
 /// Wraps AudioSenderWrapper and AudioReceiverWrapper for Opus 1.6 + DRED + encryption.
+///
+/// Processing settings are remembered here rather than only forwarded, because
+/// the sender is created later (after login) than the settings are applied
+/// (at startup and on every toggle). Without that, <see cref="Initialize"/>
+/// would silently reset the user's choices to the defaults.
 /// </summary>
 public class AudioManager : IDisposable
 {
     private AudioSenderWrapper? _sender;
     private AudioReceiverWrapper? _receiver;
-    
+
+    /// <summary>
+    /// True once the sender holds a key exported from the channel's MLS voice
+    /// group. Until then nothing is sent: the bootstrap key is a public
+    /// constant, so a frame encrypted under it would be readable by the server.
+    /// </summary>
+    private volatile bool _hasGroupKey;
+
+    // Remembered settings, applied whenever the sender/receiver are (re)created.
+    private bool _noiseSuppression = true;
+    private bool _aec = true;
+    private bool _webrtcNs;
+    private bool _agc = true;
+    private int _dredFrames = 10;
+    private uint _jitterMs = 40;
+    private bool _vadEnabled;
+    private float _vadThresholdDb = -35f;
+
     /// <summary>
     /// Event fired when active speakers change (for UI indicators).
     ///
@@ -26,78 +48,109 @@ public class AudioManager : IDisposable
 
     /// <summary>
     /// Fired for every captured frame with whether the frame produced a packet.
-    /// False means the send path dropped it — today only the VAD gate does that
-    /// (opt-in, off by default), so callers should combine this with the capture
+    /// False means the send path dropped it — the VAD gate (voice-activity mode)
+    /// or no group key yet — so callers should combine this with the capture
     /// level rather than trusting it alone. Fires on the capture thread.
     /// </summary>
     public event Action<bool>? OnLocalCapture;
-    
+
     /// <summary>
     /// Last known active speakers
     /// </summary>
     private HashSet<uint> _lastActiveSpeakers = new();
-    
+
     public bool IsInitialized => _sender != null && _receiver != null;
-    
+
+    /// <summary>Whether outgoing audio can be encrypted under a real group key.</summary>
+    public bool HasGroupKey => _hasGroupKey;
+
     /// <summary>
-    /// Initialize audio sender and receiver with encryption key
+    /// Create the sender and receiver. <paramref name="bootstrapKey"/> only
+    /// satisfies the constructor; sending stays disabled until
+    /// <see cref="UpdateSenderKey"/> installs an MLS-exported key.
     /// </summary>
-    public void Initialize(uint sessionId, byte[] key)
+    public void Initialize(uint sessionId, byte[] bootstrapKey)
     {
-        Console.WriteLine($"[AudioManager] Initialize called: sessionId={sessionId}, keyLen={key.Length}");
-        
-        if (key.Length != 32)
-            throw new ArgumentException("Key must be 32 bytes", nameof(key));
-        
-        Console.WriteLine("[AudioManager] Creating AudioSenderWrapper...");
-        _sender = new AudioSenderWrapper(sessionId, key);
-        Console.WriteLine("[AudioManager] Creating AudioReceiverWrapper...");
+        if (bootstrapKey.Length != 32)
+            throw new ArgumentException("Key must be 32 bytes", nameof(bootstrapKey));
+
+        _hasGroupKey = false;
+        _sender = new AudioSenderWrapper(sessionId, bootstrapKey);
         _receiver = new AudioReceiverWrapper();
-        Console.WriteLine("[AudioManager] Wrappers created");
-        
-        // Configure Opus 1.6 features
-        _sender.SetDredDuration(10); // 100ms redundancy
-        _receiver.SetJitterBufferMs(40); // 40ms jitter buffer
-        Console.WriteLine("[AudioManager] Opus features configured");
-        
-        // Configure audio processing (Windows defaults)
-        _sender.SetNoiseSuppressionEnabled(true);  // RNNoise ON
-        _sender.SetWebrtcAecEnabled(true);         // AEC ON (for speakers)
-        _sender.SetWebrtcNsEnabled(false);         // WebRTC NS OFF (use RNNoise)
-        _sender.SetWebrtcAgcEnabled(true);         // AGC ON (normalize volume)
-        Console.WriteLine("[AudioManager] Audio processing configured");
+        _lastActiveSpeakers = new HashSet<uint>();
+        ApplyRememberedSettings();
+    }
+
+    private void ApplyRememberedSettings()
+    {
+        if (_sender != null)
+        {
+            _sender.SetDredDuration(_dredFrames);
+            _sender.SetWebrtcAecEnabled(_aec);
+            _sender.SetWebrtcAgcEnabled(_agc);
+            _sender.SetWebrtcNsEnabled(_webrtcNs);
+            // WebRTC NS and RNNoise are alternatives; NS wins when both are asked for.
+            _sender.SetNoiseSuppressionEnabled(_noiseSuppression && !_webrtcNs);
+            _sender.SetVadThresholdDb(_vadThresholdDb);
+            _sender.SetVadEnabled(_vadEnabled);
+        }
+        _receiver?.SetJitterBufferMs(_jitterMs);
     }
 
     /// <summary>
-    /// Update the local sender's encryption key without reinitializing the receiver.
+    /// Install the sender key exported from the MLS voice group. This is what
+    /// arms sending.
     /// </summary>
     public void UpdateSenderKey(byte[] key, ulong epoch)
     {
-        _sender?.UpdateKey(key, epoch);
+        if (_sender == null) return;
+        _sender.UpdateKey(key, epoch);
+        _hasGroupKey = true;
     }
 
     /// <summary>
-    /// Update a remote sender's decryption key.
+    /// Stop sending until the next group key arrives — called on channel switch,
+    /// so nothing goes out to the new room under the old room's key.
     /// </summary>
-    public void UpdateRemoteSenderKey(uint sessionId, byte[] key, ushort epochHint)
-    {
-        _receiver?.UpdateSenderKey(sessionId, key, epochHint);
-    }
-    
+    public void ClearGroupKey() => _hasGroupKey = false;
+
     /// <summary>
-    /// Process captured audio from microphone (int16 PCM → encrypted Opus packet)
+    /// Update a remote sender's decryption key. Returns false if the receiver
+    /// does not know that sender yet (the caller should add it).
+    /// </summary>
+    public bool UpdateRemoteSenderKey(uint sessionId, byte[] key, ushort epochHint)
+    {
+        if (_receiver == null) return false;
+        try
+        {
+            return _receiver.UpdateSenderKey(sessionId, key, epochHint);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Process captured audio from microphone (int16 PCM → encrypted Opus packet).
+    /// Returns null when nothing should be sent: no group key yet, or the VAD
+    /// gate judged the frame to be silence.
     /// </summary>
     public byte[]? ProcessCapture(short[] pcm)
     {
-        if (_sender == null) return null;
-        
+        if (_sender == null || !_hasGroupKey)
+        {
+            OnLocalCapture?.Invoke(false);
+            return null;
+        }
+
         // Convert int16 to float32 (-1.0 to 1.0) for Opus 1.6
         var floatSamples = new float[pcm.Length];
         for (int i = 0; i < pcm.Length; i++)
         {
             floatSamples[i] = pcm[i] / 32768.0f;
         }
-        
+
         try
         {
             var packet = _sender.ProcessFloat(floatSamples);
@@ -110,15 +163,15 @@ public class AudioManager : IDisposable
             return null;
         }
     }
-    
+
     /// <summary>
     /// Add a remote sender for receiving audio
     /// </summary>
-    public void AddRemoteSender(uint sessionId, byte[] key)
+    public void AddRemoteSender(uint sessionId, byte[] key, ushort epochHint = 0)
     {
-        _receiver?.AddSender(sessionId, key, 0);
+        _receiver?.AddSender(sessionId, key, epochHint);
     }
-    
+
     /// <summary>
     /// Remove a remote sender
     /// </summary>
@@ -144,7 +197,7 @@ public class AudioManager : IDisposable
     {
         _receiver?.SetSenderMuted(sessionId, muted);
     }
-    
+
     /// <summary>
     /// Process incoming encrypted audio packet
     /// </summary>
@@ -152,7 +205,7 @@ public class AudioManager : IDisposable
     {
         _receiver?.OnPacket(data);
     }
-    
+
     /// <summary>
     /// Pop mixed audio for playback, returns PCM samples
     /// Also updates active speaker tracking
@@ -161,7 +214,7 @@ public class AudioManager : IDisposable
     {
         var result = _receiver?.PopMixed();
         if (result == null) return null;
-        
+
         // Check if speakers changed
         var newSpeakers = new HashSet<uint>(result.ActiveSpeakers);
         if (!newSpeakers.SetEquals(_lastActiveSpeakers))
@@ -169,50 +222,71 @@ public class AudioManager : IDisposable
             _lastActiveSpeakers = newSpeakers;
             OnActiveSpeakersChanged?.Invoke(newSpeakers);
         }
-        
+
         return result.Pcm;
     }
-    
+
     // Settings API
-    
+
     public void SetNoiseSuppressionEnabled(bool enabled)
     {
-        _sender?.SetNoiseSuppressionEnabled(enabled);
+        _noiseSuppression = enabled;
+        _sender?.SetNoiseSuppressionEnabled(enabled && !_webrtcNs);
     }
-    
+
     public void SetWebrtcAecEnabled(bool enabled)
     {
+        _aec = enabled;
         _sender?.SetWebrtcAecEnabled(enabled);
     }
-    
+
     public void SetWebrtcNsEnabled(bool enabled)
     {
+        _webrtcNs = enabled;
         _sender?.SetWebrtcNsEnabled(enabled);
-        // Auto-disable RNNoise when WebRTC NS is on
-        if (enabled)
-        {
-            _sender?.SetNoiseSuppressionEnabled(false);
-        }
+        // RNNoise and WebRTC NS are alternatives; WebRTC NS wins when on.
+        _sender?.SetNoiseSuppressionEnabled(_noiseSuppression && !enabled);
     }
-    
+
     public void SetWebrtcAgcEnabled(bool enabled)
     {
+        _agc = enabled;
         _sender?.SetWebrtcAgcEnabled(enabled);
     }
-    
+
     public void SetDredDuration(int frames)
     {
+        _dredFrames = frames;
         _sender?.SetDredDuration(frames);
     }
-    
+
     public void SetJitterBufferMs(uint ms)
     {
+        _jitterMs = ms;
         _receiver?.SetJitterBufferMs(ms);
     }
-    
+
+    /// <summary>
+    /// Voice-activity gate. On, silent frames produce no packet at all (and the
+    /// sequence number holds), which is what "voice activity" transmission means.
+    /// </summary>
+    public void SetVadEnabled(bool enabled)
+    {
+        _vadEnabled = enabled;
+        _sender?.SetVadEnabled(enabled);
+    }
+
+    /// <summary>VAD threshold in dBFS.</summary>
+    public void SetVadThresholdDb(float thresholdDb)
+    {
+        _vadThresholdDb = thresholdDb;
+        _sender?.SetVadThresholdDb(thresholdDb);
+    }
+
     public void Dispose()
     {
         // UniFFI handles cleanup via Drop trait
+        _hasGroupKey = false;
         _sender = null;
         _receiver = null;
     }

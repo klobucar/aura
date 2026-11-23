@@ -31,6 +31,10 @@ public class KnownServers
         return false;
     }
 
+    /// <summary>The pinned SHA-256 for a host, or null if it was never pinned.</summary>
+    public static string? PinFor(string host) =>
+        _fingerprints.TryGetValue(host.ToLowerInvariant(), out var pin) ? pin : null;
+
     /// <summary>
     /// Add a server's fingerprint to the trusted list.
     /// </summary>

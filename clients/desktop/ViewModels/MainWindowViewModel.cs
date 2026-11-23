@@ -1,13 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Security.Authentication;
 using Aura.Desktop.Services;
-using Aura.V1Alpha1;
 using Avalonia.Media;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -16,8 +13,9 @@ using CommunityToolkit.Mvvm.Input;
 namespace Aura.Desktop.ViewModels;
 
 /// <summary>
-/// Main ViewModel for the Aura desktop client.
-/// Handles connection, authentication, and voice streaming.
+/// Main ViewModel for the Aura desktop client. Split by concern:
+/// this file (layout, voice rail, mic/deafen/PTT), <c>.Connection</c>,
+/// <c>.Chat</c>, <c>.Settings</c> and <c>.Roster</c>.
 /// </summary>
 public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
@@ -25,6 +23,8 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private UserIdentity? _identity;
     private RustAudioEngine? _audioEngine;
     private AudioManager? _audioManager;
+
+    /// <summary>Cancels in-flight audio sends when the mic stops.</summary>
     private CancellationTokenSource? _audioCts;
 
     /// <summary>Rolling 3-minute talk history behind the voice rail.</summary>
@@ -46,13 +46,14 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private bool _lastFrameProducedPacket = true;
 
     /// <summary>
-    /// Local speech gate, in RMS. The Rust VAD is opt-in and off by default, so
-    /// "a packet was produced" alone would mark us as talking forever; the level
-    /// is what actually separates speech from an open mic.
+    /// Local speech gate, in RMS. In always-on and PTT modes every frame
+    /// produces a packet, so "a packet was produced" alone would mark us as
+    /// talking forever; the level is what separates speech from an open mic.
     /// </summary>
     private const double LocalSpeechGate = 0.02;   // ≈ −34 dBFS
 
-    private DateTime? _pttPressedAt;
+    /// <summary>Push-to-talk hold state; see <see cref="PushToTalkLatch"/>.</summary>
+    private readonly PushToTalkLatch _ptt = new();
 
     /// <summary>The audio engine and manager survive a disconnect; wire their events once.</summary>
     private bool _audioEventsWired;
@@ -60,51 +61,22 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     // ==========================================================================
     // Observable Properties
     // ==========================================================================
-    
-    [ObservableProperty]
-    private bool _isConnected;
-    
-    [ObservableProperty]
-    private bool _isAuthenticated;
-    
-    [ObservableProperty]
-    private string _connectionStatus = "Disconnected";
-    
-    [ObservableProperty]
-    private string _serverAddress = "127.0.0.1";
-    
-    [ObservableProperty]
-    private int _serverPort = 8443;
-    
-    [ObservableProperty]
-    private string _serverPassword = "";
-    
-    [ObservableProperty]
-    private string _displayName = "";
-    
-    [ObservableProperty]
-    private string _publicKeyDisplay = "";
-    
-    [ObservableProperty]
-    private bool _isMicEnabled;
-    
-    [ObservableProperty]
-    private bool _isDeafened;
-    
-    [ObservableProperty]
-    private string _audioStats = "";
-    
-    [ObservableProperty]
-    private Channel? _selectedChannel;
-    
-    [ObservableProperty]
-    private ObservableCollection<ChatMessage> _messages = new();
-    
-    [ObservableProperty]
-    private ObservableCollection<Channel> _channels = new();
-    
-    [ObservableProperty]
-    private string _messageInput = "";
+
+    [ObservableProperty] private bool _isConnected;
+    [ObservableProperty] private bool _isAuthenticated;
+    [ObservableProperty] private string _connectionStatus = "Disconnected";
+    [ObservableProperty] private string _serverAddress = "127.0.0.1";
+    [ObservableProperty] private int _serverPort = 8443;
+    [ObservableProperty] private string _serverPassword = "";
+    [ObservableProperty] private string _displayName = "";
+    [ObservableProperty] private string _publicKeyDisplay = "";
+    [ObservableProperty] private bool _isMicEnabled;
+    [ObservableProperty] private bool _isDeafened;
+    [ObservableProperty] private Channel? _selectedChannel;
+    [ObservableProperty] private ObservableCollection<Channel> _channels = new();
+
+    /// <summary>Admin per the login response: shows channel management.</summary>
+    [ObservableProperty] private bool _isAdmin;
 
     // ==========================================================================
     // Layout modes (handoff Overview + "Interactions & behavior" > Mode swap)
@@ -114,12 +86,10 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// Which column is wide. Persisted globally per user under the
     /// <c>AuraLayoutMode</c> key, shared with the macOS client.
     /// </summary>
-    [ObservableProperty]
-    private LayoutMode _layoutMode = LayoutMode.ChatFirst;
+    [ObservableProperty] private LayoutMode _layoutMode = LayoutMode.ChatFirst;
 
     /// <summary>Window width, fed from the view so the flex column can be sized.</summary>
-    [ObservableProperty]
-    private double _windowWidth = 1100;
+    [ObservableProperty] private double _windowWidth = 1100;
 
     /// <summary>The voice rail (§3) / stage (§4).</summary>
     public VoiceRailViewModel VoiceRail { get; } = new();
@@ -132,28 +102,33 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// </summary>
     [ObservableProperty] private bool _showQuicUnavailable;
 
-    /// <summary>Headline for the QUIC banner.</summary>
     public string QuicUnavailableHeadline => QuicSupport.Availability.Headline;
-
-    /// <summary>The concrete fix for <em>this</em> platform.</summary>
     public string QuicUnavailableRemedy => QuicSupport.Availability.Remedy ?? "";
 
     /// <summary>
-    /// Backing store for everything persisted, held rather than rebuilt so the
-    /// <see cref="TrustStore"/> has somewhere durable to write.
+    /// Everything persisted. Mutated in place and saved whole, so state owned
+    /// by other components (the trust store's dictionaries) is never dropped.
     /// </summary>
     private AppSettings _settings = new();
 
     private TrustStore? _trustStore;
-
-    /// <summary>Verification bookkeeping; see <see cref="TrustStore"/>.</summary>
     private TrustStore Trust => _trustStore ??= new TrustStore(_settings, SaveSettings);
 
     /// <summary>The trust sheet (§7), opened over the channel.</summary>
-    public TrustSheetViewModel TrustSheet => _trustSheet ??=
-        new TrustSheetViewModel(Trust, NameForUuid);
-
+    public TrustSheetViewModel TrustSheet => _trustSheet ??= CreateTrustSheet();
     private TrustSheetViewModel? _trustSheet;
+
+    private TrustSheetViewModel CreateTrustSheet()
+    {
+        var sheet = new TrustSheetViewModel(Trust, NameForUuid);
+        // A verification made in the sheet must show up in the roster and rail
+        // as soon as it closes, not on the next epoch.
+        sheet.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(TrustSheetViewModel.IsOpen) && !sheet.IsOpen) RefreshTrust(force: true);
+        };
+        return sheet;
+    }
 
     /// <summary>
     /// Resolve an MLS credential identity (a user UUID) to the display name the
@@ -162,21 +137,18 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string? NameForUuid(string uuid)
     {
         if (_client == null || string.IsNullOrEmpty(uuid)) return null;
+        if (_client.UserUuid == uuid) return DisplayName;
 
-        foreach (var channel in Channels)
+        foreach (var user in Channels.SelectMany(c => c.Users))
         {
-            foreach (var user in channel.Users)
-            {
-                if (_client.UuidForSession(user.Id) == uuid) return user.Name;
-            }
+            if (!user.IsSelf && _client.UuidForSession(user.Id) == uuid) return user.Name;
         }
-
-        return _client.UserUuid == uuid ? DisplayName : null;
+        return null;
     }
 
     /// <summary>
-    /// Open the trust sheet for the current channel. Reached from the roster,
-    /// and from the rail's `verify key` row with that member preselected.
+    /// Open the trust sheet for the current channel. Reached from the E2EE pill,
+    /// the profile card's Compare keys, and the rail's `verify key` row.
     /// </summary>
     [RelayCommand]
     private async Task OpenTrustSheet(string? focusUuid)
@@ -189,11 +161,16 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var channel = Channels.FirstOrDefault(c => c.IsCurrent);
+        var channel = SelectedChannel;
         if (channel == null) return;
 
         await TrustSheet.OpenAsync(mls, channel.Id, channel.Name, focusUuid);
     }
+
+    /// <summary>The rail's SILENT `verify key` rows know a session, not a uuid.</summary>
+    [RelayCommand]
+    private Task OpenTrustForSession(uint sessionId) =>
+        OpenTrustSheet(_client?.UuidForSession(sessionId));
 
     public bool IsChatFirst => LayoutMode == LayoutMode.ChatFirst;
     public bool IsVoiceFocus => LayoutMode == LayoutMode.VoiceFocus;
@@ -204,7 +181,6 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// <summary>
     /// The only animated dimension. Chat-first pins the rail at 336 and lets
     /// chat flex; voice-focus pins chat at 320 and gives the rest to the stage.
-    /// Both are the same property so a mode swap is one cubic-ease-out tween.
     /// </summary>
     public double VoiceColumnWidth => IsChatFirst
         ? 336
@@ -238,23 +214,18 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void NotifyLayoutDerived()
     {
-        OnPropertyChanged(nameof(IsChatFirst));
-        OnPropertyChanged(nameof(IsVoiceFocus));
-        OnPropertyChanged(nameof(VoiceColumnWidth));
-        OnPropertyChanged(nameof(LaneHeight));
-        OnPropertyChanged(nameof(LaneSegmentHeight));
-        OnPropertyChanged(nameof(LaneSegmentRadius));
-        OnPropertyChanged(nameof(LaneNameColumnWidth));
-        OnPropertyChanged(nameof(TimeAxisHeight));
-        OnPropertyChanged(nameof(ModeExtrasOpacity));
-        OnPropertyChanged(nameof(WaveformBarCount));
-        OnPropertyChanged(nameof(WaveformHeight));
-        OnPropertyChanged(nameof(HeroAvatarSize));
-        OnPropertyChanged(nameof(HeroNameFontSize));
-        OnPropertyChanged(nameof(ChatBubbleMaxWidth));
-        OnPropertyChanged(nameof(MessageAvatarWidth));
-        OnPropertyChanged(nameof(LayoutToggleGlyph));
-        OnPropertyChanged(nameof(LayoutToggleTip));
+        foreach (var name in new[]
+                 {
+                     nameof(IsChatFirst), nameof(IsVoiceFocus), nameof(VoiceColumnWidth), nameof(LaneHeight),
+                     nameof(LaneSegmentHeight), nameof(LaneSegmentRadius), nameof(LaneNameColumnWidth),
+                     nameof(TimeAxisHeight), nameof(ModeExtrasOpacity), nameof(WaveformBarCount),
+                     nameof(WaveformHeight), nameof(HeroAvatarSize), nameof(HeroNameFontSize),
+                     nameof(ChatBubbleMaxWidth), nameof(MessageAvatarWidth), nameof(LayoutToggleGlyph),
+                     nameof(LayoutToggleTip),
+                 })
+        {
+            OnPropertyChanged(name);
+        }
     }
 
     /// <summary>Header toggle and <c>Ctrl+Alt+V</c>.</summary>
@@ -268,13 +239,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     // Header / roster labels. Copy is shared byte-for-byte with macOS.
     // ==========================================================================
 
-    /// <summary>`ROSTER · 7 ONLINE`</summary>
+    /// <summary>`ROSTER · 7 ONLINE` — everyone on the server, us included.</summary>
     public string RosterLabel => $"ROSTER · {Channels.Sum(c => c.Users.Count)} ONLINE";
 
     /// <summary>
     /// `verified · 3f8a…5503`, the identity card's fingerprint line. Same short
-    /// fingerprint the trust sheet shows for our own key, so the two can be
-    /// compared at a glance.
+    /// fingerprint the trust sheet shows for our own key.
     /// </summary>
     public string FingerprintDisplay
     {
@@ -294,43 +264,36 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     /// <summary>`E2EE · epoch 14`, hidden until the channel has an MLS group.</summary>
-    [ObservableProperty]
-    private string _epochLabel = "";
+    [ObservableProperty] private string _epochLabel = "";
 
     public bool HasEpoch => !string.IsNullOrEmpty(EpochLabel);
 
     partial void OnEpochLabelChanged(string value) => OnPropertyChanged(nameof(HasEpoch));
 
-    /// <summary>`12 messages today`</summary>
-    [ObservableProperty]
-    private string _messagesTodayLabel = "0 messages today";
-
     /// <summary>
-    /// `… ms` until there is a round-trip measurement to show. The client has no
-    /// RTT probe yet, so the pill stays in the handoff's reconnecting state
-    /// rather than inventing a number.
+    /// `… ms`: System.Net.Quic exposes neither QUIC datagrams nor RTT, and the
+    /// server's only echo is datagram-based, so this client cannot measure
+    /// latency yet. The pill stays in the handoff's unknown state rather than
+    /// inventing a number.
     /// </summary>
-    [ObservableProperty]
-    private string _latencyLabel = "… ms";
+    [ObservableProperty] private string _latencyLabel = "… ms";
 
-    /// <summary>Latency dot: good/caution/danger by the &lt;80 / &lt;200 / ≥200ms rule.</summary>
-    [ObservableProperty]
-    private IBrush? _latencyBrush;
-
-    /// <summary>`Message #Lounge…`</summary>
-    public string ComposerPlaceholder =>
-        SelectedChannel == null ? "Message…" : $"Message #{SelectedChannel.Name}…";
+    [ObservableProperty] private IBrush? _latencyBrush;
 
     /// <summary>PTT hold readout: `held 0:04`.</summary>
-    [ObservableProperty]
-    private string _pttHeldLabel = "";
+    [ObservableProperty] private string _pttHeldLabel = "";
 
-    public bool IsPushToTalkHeld => _pttPressedAt != null;
+    public bool IsPushToTalkHeld => _ptt.IsHeld;
 
     partial void OnSelectedChannelChanged(Channel? value)
     {
-        OnPropertyChanged(nameof(ComposerPlaceholder));
         foreach (var channel in Channels) channel.IsCurrent = ReferenceEquals(channel, value);
+        OnPropertyChanged(nameof(ComposerPlaceholder));
+        OnPropertyChanged(nameof(ChannelMotd));
+        OnPropertyChanged(nameof(HasChannelMotd));
+        ShowMessagesFor(value?.Id);
+        ClearMentionsBelow();
+        RefreshInvite();
         RefreshEpoch();
         // The rail rebuilds from the same segment store — switching channels
         // re-projects it rather than resetting the history.
@@ -338,136 +301,16 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     // ==========================================================================
-    // Audio Settings
-    // ==========================================================================
-    
-    [ObservableProperty]
-    private bool _rnnoiseEnabled = true;
-    
-    [ObservableProperty]
-    private bool _aecEnabled = true;
-    
-    [ObservableProperty]
-    private bool _webrtcNsEnabled = false;
-    
-    [ObservableProperty]
-    private bool _agcEnabled = true;
-    
-    [ObservableProperty]
-    private int _dredDuration = 10;  // 100ms
-    
-    [ObservableProperty]
-    private int _jitterBufferMs = 40;
-
-    [ObservableProperty]
-    private int _masterVolume = 100;  // 0–100 %
-
-    [ObservableProperty]
-    private bool _showAudioSettings = false;
-    
-    [ObservableProperty]
-    private bool _showingCertWarning = false;
-    
-    [ObservableProperty]
-    private string _certFingerprint = "";
-    
-    [ObservableProperty]
-    private string _certHost = "";
-    
-    partial void OnRnnoiseEnabledChanged(bool value) { _audioManager?.SetNoiseSuppressionEnabled(value); SaveSettings(); }
-    partial void OnAecEnabledChanged(bool value) { _audioManager?.SetWebrtcAecEnabled(value); SaveSettings(); }
-    partial void OnWebrtcNsEnabledChanged(bool value)
-    {
-        _audioManager?.SetWebrtcNsEnabled(value);
-        // Auto-disable RNNoise when WebRTC NS is enabled
-        if (value) RnnoiseEnabled = false;
-        SaveSettings();
-    }
-    partial void OnAgcEnabledChanged(bool value) { _audioManager?.SetWebrtcAgcEnabled(value); SaveSettings(); }
-    partial void OnDredDurationChanged(int value) { _audioManager?.SetDredDuration(value); SaveSettings(); }
-    partial void OnJitterBufferMsChanged(int value) { _audioManager?.SetJitterBufferMs((uint)value); SaveSettings(); }
-    partial void OnMasterVolumeChanged(int value)
-    {
-        if (_audioEngine != null) _audioEngine.Volume = value / 100f;
-        SaveSettings();
-    }
-
-    /// <summary>True while loading persisted settings, to suppress redundant saves.</summary>
-    private bool _suppressSettingsSave;
-
-    /// <summary>
-    /// Local-only mixer preferences, keyed by stable user UUID so they survive
-    /// the other party reconnecting with a fresh session id.
-    /// </summary>
-    private Dictionary<string, float> _localVolumes = new();
-    private List<string> _locallyMutedUsers = new();
-
-    /// <summary>Persist local mixer preferences after the client mutates them.</summary>
-    private void SaveLocalMixerPrefs()
-    {
-        if (_client == null) return;
-        var (volumes, muted) = _client.LocalMixerPrefs();
-        _localVolumes = volumes;
-        _locallyMutedUsers = muted;
-        SaveSettings();
-    }
-
-    /// <summary>Persist the current settings (no-op during initial load).</summary>
-    private void SaveSettings()
-    {
-        if (_suppressSettingsSave) return;
-        new AppSettings
-        {
-            RnnoiseEnabled = RnnoiseEnabled,
-            AecEnabled = AecEnabled,
-            WebrtcNsEnabled = WebrtcNsEnabled,
-            AgcEnabled = AgcEnabled,
-            DredDuration = DredDuration,
-            JitterBufferMs = JitterBufferMs,
-            MasterVolume = MasterVolume,
-            LayoutMode = LayoutMode,
-            Theme = AuraThemeManager.ToSettingValue(AuraThemeManager.Current),
-            LocalVolumes = _localVolumes,
-            LocallyMutedUsers = _locallyMutedUsers,
-            // Carried across from the loaded settings rather than rebuilt: the
-            // TrustStore mutates these in place, and rebuilding from scratch
-            // here would silently discard every verification the user has made.
-            VerifiedKeys = _settings.VerifiedKeys,
-            BlockedKeys = _settings.BlockedKeys,
-            KnownUserKeys = _settings.KnownUserKeys,
-            KeyChangedAt = _settings.KeyChangedAt,
-        }.Save();
-    }
-
-    /// <summary>Push the current settings into freshly-created audio components.</summary>
-    private void ApplyAudioSettings()
-    {
-        if (_audioManager != null)
-        {
-            _audioManager.SetNoiseSuppressionEnabled(RnnoiseEnabled);
-            _audioManager.SetWebrtcAecEnabled(AecEnabled);
-            _audioManager.SetWebrtcNsEnabled(WebrtcNsEnabled);
-            _audioManager.SetWebrtcAgcEnabled(AgcEnabled);
-            _audioManager.SetDredDuration(DredDuration);
-            _audioManager.SetJitterBufferMs((uint)JitterBufferMs);
-        }
-        if (_audioEngine != null) _audioEngine.Volume = MasterVolume / 100f;
-    }
-    
-    // ==========================================================================
     // Initialization
     // ==========================================================================
-    
+
     public MainWindowViewModel()
     {
-        // Try to load libmsquic explicitly on macOS
         MsQuicLoader.TryLoadMsQuic();
-
-        // Check QUIC support
         QuicSupport.CheckQuicSupport();
 
-        // Try to load existing identity. Loading goes through aura-core (and
-        // may upgrade a v1 file), so the native library resolver comes first.
+        // Loading goes through aura-core (and may upgrade a v1 file), so the
+        // native library resolver comes first.
         var identityPath = UserIdentity.GetIdentityFilePath();
         try
         {
@@ -489,47 +332,27 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ConnectionStatus = $"Error loading identity: {ex.Message}";
         }
 
-        // Say so up front rather than at the first failed connect. Aura speaks
-        // QUIC and nothing else, so this is not a degraded mode to discover
-        // later — the app cannot work at all here.
+        // Aura speaks QUIC and nothing else, so this is not a degraded mode to
+        // discover later — the app cannot work at all here.
         if (!QuicSupport.Availability.IsSupported)
         {
             ConnectionStatus = QuicSupport.Availability.Headline;
         }
 
-        // Restore persisted audio settings (defaults if none saved). Suppress
-        // saves while loading so setting each property doesn't rewrite the file.
-        var settings = AppSettings.Load();
-        _settings = settings;
-        _suppressSettingsSave = true;
-        RnnoiseEnabled = settings.RnnoiseEnabled;
-        AecEnabled = settings.AecEnabled;
-        WebrtcNsEnabled = settings.WebrtcNsEnabled;
-        AgcEnabled = settings.AgcEnabled;
-        DredDuration = settings.DredDuration;
-        JitterBufferMs = settings.JitterBufferMs;
-        MasterVolume = settings.MasterVolume;
-        LayoutMode = settings.LayoutMode;
-        AuraThemeManager.Apply(AuraThemeManager.Parse(settings.Theme));
-        // Held here until a client exists to hand them to; the network client
-        // owns the session → UUID mapping these are keyed on.
-        _localVolumes = settings.LocalVolumes;
-        _locallyMutedUsers = settings.LocallyMutedUsers;
-        _suppressSettingsSave = false;
-        NotifyLayoutDerived();
+        LoadSettings();
+        WireChannelEditor();
 
-        // Start with empty channels - server will sync them on connect
-        Channels = new ObservableCollection<Channel>();
-        Messages.CollectionChanged += (_, _) => RefreshMessageCount();
+        Channels.CollectionChanged += (_, _) => OnPropertyChanged(nameof(RosterLabel));
+        ShowMessagesFor(null);
 
-        // No RTT probe exists yet, so the pill starts in the handoff's unknown
-        // state: a textDim dot and `… ms`.
         LatencyBrush = AuraBrushes.Named("AuraTextDimBrush");
 
         _laneTimer.Tick += (_, _) => OnLaneTick();
         _meterTimer.Tick += (_, _) => OnMeterTick();
         _laneTimer.Start();
         _meterTimer.Start();
+
+        InstallGlobalPushToTalk();
     }
 
     // ==========================================================================
@@ -537,17 +360,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     // ==========================================================================
 
     /// <summary>
-    /// Channel occupants as the rail sees them — the remote members plus us. The
-    /// local user is never in <see cref="Channel.Users"/> (the roster shows them
-    /// in the identity card instead), but the lanes need them: the mocks show
-    /// "you" with a lane of their own.
+    /// Channel occupants as the rail sees them — the remote members plus us,
+    /// with us always last so the lanes put "you" at the bottom like the mocks.
     /// </summary>
     private List<VoiceParticipant> BuildParticipants()
     {
         var participants = new List<VoiceParticipant>();
         if (SelectedChannel == null) return participants;
 
-        foreach (var user in SelectedChannel.Users)
+        foreach (var user in SelectedChannel.Users.Where(u => !u.IsSelf))
         {
             participants.Add(new VoiceParticipant(
                 user.Id, user.Name, user.IsMuted, user.IsDeafened, user.Trust, IsLocal: false));
@@ -567,13 +388,14 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         return participants;
     }
 
-    /// <summary>1s tick: trim the window, re-lay out the lanes, refresh the epoch badge.</summary>
+    /// <summary>1s tick: trim the window, re-lay out the lanes, refresh badges.</summary>
     private void OnLaneTick()
     {
         _talkStore.Trim();
         VoiceRail.Rebuild(BuildParticipants(), _talkStore);
         RefreshEpoch();
         RefreshPushToTalkLabel();
+        RefreshTrust(force: false);
     }
 
     /// <summary>
@@ -596,13 +418,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (_client != null && IsAuthenticated)
         {
             // Our session id is learned after connect, so keep the store in
-            // step rather than setting it once — until it knows, it cannot tell
-            // our lane apart from anyone else's and would put us back in the
-            // hero card.
+            // step rather than setting it once.
             _talkStore.LocalSessionId = _client.UserId;
 
             var speaking = IsMicEnabled && producedPacket && level >= LocalSpeechGate;
             _talkStore.SetSpeaking(_client.UserId, speaking);
+            if (SelfUser is { } self) self.IsSpeaking = speaking;
         }
 
         VoiceRail.RefreshSpeaker(BuildParticipants(), _talkStore);
@@ -639,582 +460,158 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         EpochLabel = epoch == null ? "" : $"E2EE · epoch {epoch}";
     }
 
-    private void RefreshMessageCount()
-    {
-        var today = DateTime.Now.Date;
-        var count = Messages.Count(m => !m.System && m.Timestamp.Date == today);
-        MessagesTodayLabel = count == 1 ? "1 message today" : $"{count} messages today";
+    // ==========================================================================
+    // Microphone, deafen, push to talk
+    // ==========================================================================
 
-        // Join notices alone still leave the column looking unused, so they do
-        // not count as content here.
-        ShowChatEmptyState = !Messages.Any(m => !m.System);
+    /// <summary>
+    /// Create the audio engine and manager once and wire their events once.
+    /// Subscribing per mic toggle (as before) stacked a new capture handler on
+    /// every toggle, so each frame was sent once per toggle so far.
+    /// </summary>
+    private void EnsureAudio()
+    {
+        NativeLibraryLoader.Initialize();
+        _audioEngine ??= new RustAudioEngine();
+        _audioManager ??= new AudioManager();
+        if (_audioEventsWired) return;
+
+        _audioEngine.OnAudioData += OnCapturedAudio;
+        _audioEngine.OnError += error =>
+            Dispatcher.UIThread.Post(() => ShowBanner($"Audio error: {error}", isError: true));
+        _audioEngine.OnCaptureLevel += OnCaptureLevel;
+        _audioManager.OnLocalCapture += OnLocalCapture;
+        // The jitter buffer's talking signal: remote speakers only, never us.
+        _audioManager.OnActiveSpeakersChanged += speakers =>
+            Dispatcher.UIThread.Post(() => UpdateSpeakingIndicators(speakers));
+        _audioEventsWired = true;
+        ApplyAudioSettings();
+    }
+
+    /// <summary>Capture thread: one 20ms frame. Encryption happens in the client.</summary>
+    private void OnCapturedAudio(byte[] frame)
+    {
+        var client = _client;
+        var cts = _audioCts;
+        if (client == null || cts == null || cts.IsCancellationRequested) return;
+        _ = client.SendAudioFrameAsync(frame, cts.Token);
+    }
+
+    [RelayCommand]
+    private Task ToggleMicrophoneAsync()
+    {
+        // A click always wins over a hold in progress.
+        _ptt.Disown();
+        return SetMicAsync(!IsMicEnabled);
     }
 
     /// <summary>
-    /// The chat column had no empty state at all — a full-height void with the
-    /// composer stranded at the bottom, which is the first thing every new user
-    /// sees. The dead space now carries the one claim worth making here.
+    /// Open or close the mic. State changes before the first await, so calls
+    /// interleaved by push-to-talk apply in the order they were made.
     /// </summary>
-    [ObservableProperty] private bool _showChatEmptyState = true;
-
-    // ==========================================================================
-    // Push to talk. In-window only for now: the low-level keyboard hook the
-    // handoff calls for ("PTT · must become a global hook") is separate work.
-    // ==========================================================================
-
-    public async Task BeginPushToTalkAsync()
+    private async Task SetMicAsync(bool open)
     {
-        if (_pttPressedAt != null) return;
-        _pttPressedAt = DateTime.UtcNow;
-        RefreshPushToTalkLabel();
-        if (!IsMicEnabled) await ToggleMicrophoneAsync();
-    }
+        if (open && IsDeafened) return;
+        if (IsMicEnabled == open) return;
 
-    public async Task EndPushToTalkAsync()
-    {
-        if (_pttPressedAt == null) return;
-        _pttPressedAt = null;
-        PttHeldLabel = "";
-        OnPropertyChanged(nameof(IsPushToTalkHeld));
-        if (IsMicEnabled) await ToggleMicrophoneAsync();
-    }
+        IsMicEnabled = open;
+        if (open) StartMic(); else StopMic();
+        UpdateSelfRow();
 
-    private void RefreshPushToTalkLabel()
-    {
-        if (_pttPressedAt == null) return;
-        var held = DateTime.UtcNow - _pttPressedAt.Value;
-        PttHeldLabel = $"held {held.Minutes}:{held.Seconds:00}";
-        OnPropertyChanged(nameof(IsPushToTalkHeld));
-    }
-    
-    // ==========================================================================
-    // Commands
-    // ==========================================================================
-    
-    [RelayCommand]
-    private async Task ConnectAsync()
-    {
-        // Checked before anything else: without QUIC the attempt cannot get off
-        // the ground, and a generic timeout would send the user looking for a
-        // bug in Aura rather than installing a package or reading the OS floor.
-        if (!QuicSupport.Availability.IsSupported)
-        {
-            ShowQuicUnavailable = true;
-            ConnectionStatus = QuicSupport.Availability.Headline;
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(DisplayName))
-        {
-            ConnectionStatus = "Error: Display name required";
-            return;
-        }
-
-        try
-        {
-            Console.WriteLine("[ViewModel] Starting connection...");
-            
-            // 1. Generate or load identity
-            _identity ??= UserIdentity.LoadOrCreate(DisplayName);
-            _identity.DisplayName = DisplayName;
-            PublicKeyDisplay = _identity.PublicKeyHex[..16] + "...";
-            OnPropertyChanged(nameof(FingerprintDisplay));
-            Console.WriteLine($"[ViewModel] Identity loaded: {_identity.PublicKeyHex[..16]}...");
-            
-            // 2. Create client and connect
-            _client = new AuraNetworkClient();
-            _audioEngine ??= new RustAudioEngine();
-            Console.WriteLine("[ViewModel] Creating AudioManager...");
-            NativeLibraryLoader.Initialize();
-            _audioManager ??= new AudioManager();
-            Console.WriteLine("[ViewModel] AudioManager created");
-            _client.SetAudioEngine(_audioEngine);
-            _client.SetAudioManager(_audioManager);
-            // Apply persisted audio settings to the freshly-created components.
-            ApplyAudioSettings();
-            Console.WriteLine("[ViewModel] Audio components wired");
-            
-            // Listen for active speaker changes. This is the jitter buffer's
-            // talking signal: remote speakers only, never us.
-            _audioManager.OnActiveSpeakersChanged += speakers =>
-                Dispatcher.UIThread.Post(() => UpdateSpeakingIndicators(speakers));
-
-            // Local talking signal — the other half of the picture. Both come off
-            // the capture thread and are accumulated, not dispatched per frame.
-            // The engine and manager outlive a disconnect, so wire these once.
-            if (!_audioEventsWired)
-            {
-                _audioManager.OnLocalCapture += OnLocalCapture;
-                _audioEngine.OnCaptureLevel += OnCaptureLevel;
-                _audioEventsWired = true;
-            }
-            _client.OnStatusChanged += status => 
-                Dispatcher.UIThread.Post(() => ConnectionStatus = status);
-            _client.OnError += error => 
-                Dispatcher.UIThread.Post(() => ConnectionStatus = $"Error: {error}");
-            
-            _client.OnUserJoined += (cid, sid, name) => 
-                Dispatcher.UIThread.Post(() => HandleUserJoined(cid, sid, name));
-            _client.OnUserLeft += (cid, sid) => 
-                Dispatcher.UIThread.Post(() => HandleUserLeft(cid, sid));
-            _client.OnServerSnapshot += snapshot => 
-                Dispatcher.UIThread.Post(() => HandleServerSnapshot(snapshot));
-            
-            _client.OnTextMessage += (mid, sid, cid, content, reply) => 
-                Dispatcher.UIThread.Post(() => HandleTextMessage(mid, sid, cid, content, reply));
-            
-            _client.OnUserStatusUpdated += (sid, muted, deafened) =>
-                Dispatcher.UIThread.Post(() => HandleUserStatusUpdate(sid, muted, deafened));
-
-            _client.OnChannelDeleted += (deletedId, fallbackId) =>
-                Dispatcher.UIThread.Post(() => _ = HandleChannelDeletedAsync(deletedId, fallbackId));
-
-            // Per-user playback gain is local-only state the rail edits and the
-            // network client owns (it holds the session → UUID mapping the
-            // preference is keyed on).
-            _client.LoadLocalMixerPrefs(_localVolumes, _locallyMutedUsers);
-            _client.OnLocalMixerPrefsChanged += SaveLocalMixerPrefs;
-            VoiceRail.LocalVolumeProvider = sid => _client!.LocalVolumeForSession(sid);
-            VoiceRail.LocalVolumeSetter = (sid, gain) => _client!.SetLocalVolume(sid, gain);
-
-            ConnectionStatus = "Connecting...";
-            Console.WriteLine($"[ViewModel] Connecting to {ServerAddress}:{ServerPort}...");
-            await _client.ConnectAsync(ServerAddress, ServerPort);
-            IsConnected = true;
-            Console.WriteLine($"[ViewModel] IsConnected = {IsConnected}");
-            
-            // 3. Authenticate with TOFU
-            ConnectionStatus = "Authenticating...";
-            Console.WriteLine("[ViewModel] Starting authentication...");
-            var password = string.IsNullOrWhiteSpace(ServerPassword) ? null : ServerPassword;
-            await _client.AuthenticateAsync(_identity, password);
-            Console.WriteLine("[ViewModel] Authentication completed!");
-            IsAuthenticated = true;
-            Console.WriteLine($"[ViewModel] IsAuthenticated = {IsAuthenticated}, UserId = {_client.UserId}");
-            
-            ConnectionStatus = $"Connected as {DisplayName} (ID: {_client.UserId})";
-            Console.WriteLine($"[ViewModel] ConnectionStatus = {ConnectionStatus}");
-            
-            Messages.Add(new ChatMessage 
-            { 
-                Content = $"Connected to {ServerAddress}:{ServerPort}",
-                System = true 
-            });
-            
-            Console.WriteLine("[ViewModel] Connection complete!");
-        }
-        catch (UntrustedCertificateException ex)
-        {
-            Console.WriteLine($"[ViewModel] UNTRUSTED CERTIFICATE: {ex.Fingerprint}");
-            CertFingerprint = ex.Fingerprint;
-            CertHost = ex.Host;
-            ShowingCertWarning = true;
-            ConnectionStatus = "Certificate Verification Failed";
-            await DisconnectInternalAsync();
-        }
-        catch (AuthenticationException ex)
-        {
-            Console.WriteLine($"[ViewModel] AUTH EXCEPTION: {ex.Message}");
-            Console.WriteLine($"[ViewModel] Stack trace: {ex.StackTrace}");
-            ConnectionStatus = $"Auth failed: {ex.Message}";
-            await DisconnectInternalAsync();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ViewModel] CONNECTION EXCEPTION: {ex.GetType().Name}: {ex.Message}");
-            Console.WriteLine($"[ViewModel] Stack trace: {ex.StackTrace}");
-            if (ex.InnerException != null)
-            {
-                Console.WriteLine($"[ViewModel] INNER EXCEPTION: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
-                Console.WriteLine($"[ViewModel] Inner stack trace: {ex.InnerException.StackTrace}");
-            }
-            ConnectionStatus = $"Connection failed: {ex.Message}";
-            await DisconnectInternalAsync();
-        }
-    }
-
-    [RelayCommand]
-    private async Task TrustAndConnectAsync()
-    {
-        if (string.IsNullOrEmpty(CertHost) || string.IsNullOrEmpty(CertFingerprint)) return;
-        
-        Console.WriteLine($"[ViewModel] Adding {CertHost} to trusted fingerprints: {CertFingerprint}");
-        KnownServers.Trust(CertHost, CertFingerprint);
-        
-        ShowingCertWarning = false;
-        await ConnectAsync();
-    }
-
-    [RelayCommand]
-    private void DismissCertWarning()
-    {
-        ShowingCertWarning = false;
-    }
-
-    [RelayCommand]
-    private async Task DisconnectAsync()
-    {
-        await DisconnectInternalAsync();
-        ConnectionStatus = "Disconnected";
-        Messages.Add(new ChatMessage 
-        { 
-            Content = "Disconnected from server",
-            System = true 
-        });
-    }
-    
-    private async Task DisconnectInternalAsync()
-    {
-        StopMic();
-        
-        if (_client != null)
-        {
-            await _client.DisposeAsync();
-            _client = null;
-        }
-        
-        IsConnected = false;
-        IsAuthenticated = false;
-        Channels.Clear();
-        _talkStore.Clear();
-        VoiceRail.Rebuild(BuildParticipants(), _talkStore);
-        EpochLabel = "";
-        OnPropertyChanged(nameof(RosterLabel));
-    }
-    
-    [RelayCommand]
-    private async Task JoinChannelAsync(Channel? channel)
-    {
-        if (channel == null || _client == null) return;
-        
-        try
-        {
-            SelectedChannel = channel;
-            channel.IsExpanded = true;
-            
-            await _client.JoinChannelAsync(channel.Id);
-            
-            Messages.Add(new ChatMessage 
-            { 
-                Content = $"Joined channel: {channel.Name}",
-                System = true 
-            });
-        }
-        catch (Exception ex)
-        {
-            ConnectionStatus = $"Failed to join channel: {ex.Message}";
-        }
-    }
-    
-    [RelayCommand]
-    private async Task ToggleMicrophoneAsync()
-    {
-        if (IsDeafened && !IsMicEnabled) return;
-        
-        IsMicEnabled = !IsMicEnabled;
-        if (IsMicEnabled)
-        {
-            StartMic();
-        }
-        else
-        {
-            StopMic();
-        }
-        
         if (_client != null)
         {
             await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
         }
     }
-    
+
     [RelayCommand]
     private async Task ToggleDeafenAsync()
     {
         IsDeafened = !IsDeafened;
-        
+        if (_audioEngine != null) _audioEngine.OutputMuted = IsDeafened;
+
         if (IsDeafened && IsMicEnabled)
         {
-            // Auto-mute on deafen
-            await ToggleMicrophoneAsync();
+            // Auto-mute on deafen (sends the status update itself).
+            _ptt.Disown();
+            await SetMicAsync(false);
         }
         else if (_client != null)
         {
             await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
         }
-        
-        // TODO: Actually mute output in RustAudioEngine if needed
+        UpdateSelfRow();
     }
-    
+
     private void StartMic()
     {
-        if (_audioEngine == null || _client == null) return;
-        
+        if (_client == null) return;
+        EnsureAudio();
+        _audioCts?.Cancel();
         _audioCts = new CancellationTokenSource();
-        
-        _audioEngine.OnAudioData += d =>
-        {
-            if (_client != null && IsAuthenticated)
-            {
-                // Off-thread send to avoid blocking engine
-                _ = _client.SendAudioFrameAsync(d, _audioCts.Token);
-            }
-        };
-        
-        _audioEngine.OnError += error =>
-            Dispatcher.UIThread.Post(() => ConnectionStatus = $"Audio error: {error}");
-        
-        _audioEngine.StartCapture();
-        
-        Messages.Add(new ChatMessage 
-        { 
-            Content = "Rust Audio Engine enabled (CPAL)",
-            System = true 
-        });
+        _audioEngine!.StartCapture();
     }
-    
+
     private void StopMic()
     {
         _audioCts?.Cancel();
-        _audioEngine?.StopCapture();
         _audioCts = null;
-        AudioStats = "";
-    }
-    
-    [RelayCommand]
-    private async Task SendMessage()
-    {
-        if (string.IsNullOrWhiteSpace(MessageInput)) return;
-        if (_client == null || SelectedChannel == null) return;
-
-        var content = MessageInput;
-        MessageInput = ""; // Clear input immediately
-
-        try 
-        {
-            string channelId = SelectedChannel.Id;
-            string msgId = Guid.NewGuid().ToString();
-
-            // Optimistic Add
-            Messages.Add(new ChatMessage 
-            { 
-                UserId = _client.UserId,
-                UserName = "You",
-                Content = content,
-                IsFromCurrentUser = true
-            });
-
-            await _client.SendTextMessageAsync(channelId, content, msgId);
-        }
-        catch (Exception ex)
-        {
-            Messages.Add(new ChatMessage { Content = $"Failed to send: {ex.Message}", System = true });
-        }
-    }
-
-    private void HandleTextMessage(string msgId, uint senderId, string channelId, string content, string? replyToId)
-    {
-        // Don't show own messages again
-        if (_client != null && senderId == _client.UserId) return;
-
-        // Only show if for current channel or specific logic?
-        // For simple parity, just show it.
-        
-        string senderName = $"User {senderId}";
-        
-        // Try to find name in channel
-        var channel = Channels.FirstOrDefault(c => c.Id == channelId);
-        if (channel != null)
-        {
-            var user = channel.Users.FirstOrDefault(u => u.Id == senderId);
-            if (user != null) senderName = user.Name;
-        }
-
-        Messages.Add(new ChatMessage 
-        { 
-            UserId = senderId,
-            UserName = senderName,
-            Content = content,
-            IsFromCurrentUser = false
-        });
+        _audioEngine?.StopCapture();
     }
 
     /// <summary>
-    /// The channel we were in was deleted. Drop it from the list and move to a
-    /// channel that still exists so we aren't left pointing at nothing.
+    /// PTT pressed. Opens the mic for the hold unless it is already open (a
+    /// latched mic stays latched on release). Ignored while deafened, outside
+    /// push-to-talk mode, or when not connected.
     /// </summary>
-    private async Task HandleChannelDeletedAsync(string deletedChannelId, string fallbackChannelId)
+    public async Task BeginPushToTalkAsync()
     {
-        var wasCurrent = SelectedChannel?.Id == deletedChannelId;
+        if (TransmissionMode != TransmissionMode.PushToTalk) return;
+        if (!IsAuthenticated || IsDeafened) return;
 
-        var deleted = Channels.FirstOrDefault(c => c.Id == deletedChannelId);
-        if (deleted != null) Channels.Remove(deleted);
-
-        if (!wasCurrent) return;
-
-        SelectedChannel = null;
-        Messages.Add(new ChatMessage { Content = "This channel was deleted", System = true });
-
-        var fallback = Channels.FirstOrDefault(c => c.Id == fallbackChannelId)
-                       ?? Channels.FirstOrDefault();
-        if (fallback != null)
-        {
-            await JoinChannelAsync(fallback);
-        }
+        var open = _ptt.Press(IsMicEnabled, DateTime.UtcNow);
+        RefreshPushToTalkLabel();
+        if (open) await SetMicAsync(true);
     }
 
-    private void HandleUserStatusUpdate(uint sessionId, bool isMuted, bool isDeafened)
+    public async Task EndPushToTalkAsync()
     {
-        foreach (var channel in Channels)
-        {
-            var user = channel.Users.FirstOrDefault(u => u.Id == sessionId);
-            if (user != null)
-            {
-                user.IsMuted = isMuted;
-                user.IsDeafened = isDeafened;
-                break;
-            }
-        }
+        if (!_ptt.IsHeld) return;
+        var close = _ptt.Release();
+        PttHeldLabel = "";
+        OnPropertyChanged(nameof(IsPushToTalkHeld));
+        if (close) await SetMicAsync(false);
     }
-    
+
+    private void RefreshPushToTalkLabel()
+    {
+        if (_ptt.HeldSince is not { } since) return;
+        var held = DateTime.UtcNow - since;
+        PttHeldLabel = $"held {held.Minutes}:{held.Seconds:00}";
+        OnPropertyChanged(nameof(IsPushToTalkHeld));
+    }
+
+    private void UpdateSpeakingIndicators(HashSet<uint> speakers)
+    {
+        foreach (var user in Channels.SelectMany(c => c.Users).Where(u => !u.IsSelf))
+        {
+            user.IsSpeaking = speakers.Contains(user.Id);
+        }
+
+        // OnMeterTick drives our own lane; this set can never contain us.
+        _talkStore.ApplyRemoteSpeakers(speakers, _client?.UserId);
+        VoiceRail.RefreshSpeaker(BuildParticipants(), _talkStore);
+    }
+
     public async ValueTask DisposeAsync()
     {
         _laneTimer.Stop();
         _meterTimer.Stop();
+        _reconnectTimer.Stop();
+        DisposeGlobalPushToTalk();
         await DisconnectInternalAsync();
         _identity?.Dispose();
         GC.SuppressFinalize(this);
-    }
-    private void HandleUserJoined(string channelId, uint sessionId, string name)
-    {
-        var channel = GetOrCreateChannel(channelId);
-        
-        // Check if user already exists
-        if (channel.Users.Any(u => u.Id == sessionId)) return;
-        
-        // Don't add self
-        if (_client != null && sessionId == _client.UserId) return;
-        
-        channel.Users.Add(new User { Id = sessionId, Name = name });
-        OnPropertyChanged(nameof(RosterLabel));
-
-        // Log event
-        Messages.Add(new ChatMessage { Content = $"{name} joined {channel.Name}", System = true });
-    }
-    
-    private void HandleUserLeft(string channelId, uint sessionId)
-    {
-        var channel = Channels.FirstOrDefault(c => c.Id == channelId);
-        if (channel == null) return;
-        
-        var user = channel.Users.FirstOrDefault(u => u.Id == sessionId);
-        if (user != null)
-        {
-            channel.Users.Remove(user);
-            _talkStore.Forget(sessionId);
-            OnPropertyChanged(nameof(RosterLabel));
-            Messages.Add(new ChatMessage { Content = $"{user.Name} left {channel.Name}", System = true });
-        }
-    }
-    
-    private void HandleServerSnapshot(ServerState snapshot)
-    {
-        Console.WriteLine($"[ViewModel] Handling ServerSnapshot: {snapshot.Channels.Count} channels");
-        
-        // 1. Build a map of user profiles for easy lookup
-        var profileMap = snapshot.Profiles.ToDictionary(p => p.UserId, p => p);
-        
-        // 2. Sync channels
-        // We want to preserve the selected channel if possible
-        var previousSelectedId = SelectedChannel?.Id;
-        
-        Channels.Clear();
-        foreach (var chanInfo in snapshot.Channels.OrderBy(c => c.Position))
-        {
-            var channel = new Channel
-            {
-                Id = chanInfo.ChannelId,
-                Name = chanInfo.Name,
-                Comment = chanInfo.Comment,
-                IsExpanded = true
-            };
-            
-            foreach (var userStatus in chanInfo.Users)
-            {
-                uint userId = userStatus.SessionId;
-                if (_client != null && userId == _client.UserId) continue; // Skip self
-                
-                string name = $"User {userId}";
-                string comment = "";
-                
-                if (profileMap.TryGetValue(userId.ToString(), out var profile))
-                {
-                    name = profile.DisplayName;
-                    comment = profile.Bio;
-                }
-                
-                channel.Users.Add(new User 
-                { 
-                    Id = userId, 
-                    Name = name,
-                    Comment = comment,
-                    IsMuted = userStatus.IsMuted,
-                    IsDeafened = userStatus.IsDeafened
-                });
-            }
-            Channels.Add(channel);
-        }
-        
-        // 3. Restore selection or pick first
-        if (previousSelectedId != null)
-        {
-            SelectedChannel = Channels.FirstOrDefault(c => c.Id == previousSelectedId);
-        }
-        
-        if (SelectedChannel == null && Channels.Count > 0)
-        {
-            SelectedChannel = Channels[0];
-        }
-
-        OnPropertyChanged(nameof(RosterLabel));
-    }
-    
-    private Channel GetOrCreateChannel(string channelId)
-    {
-        var idStr = channelId;
-        var channel = Channels.FirstOrDefault(c => c.Id == idStr);
-        if (channel == null)
-        {
-            channel = new Channel 
-            { 
-                Id = idStr, 
-                Name = $"Channel {channelId}",
-                IsExpanded = true
-            };
-            Channels.Add(channel);
-        }
-        return channel;
-    }
-    
-    private void UpdateSpeakingIndicators(HashSet<uint> speakers)
-    {
-        foreach (var channel in Channels)
-        {
-            foreach (var user in channel.Users)
-            {
-                user.IsSpeaking = speakers.Contains(user.Id);
-            }
-        }
-
-        // Feed the talk lanes. The local session id is excluded here because it
-        // can never appear in this set — OnMeterTick drives our own lane.
-        _talkStore.ApplyRemoteSpeakers(speakers, _client?.UserId);
-        VoiceRail.RefreshSpeaker(BuildParticipants(), _talkStore);
-    }
-    
-    [RelayCommand]
-    private void ToggleAudioSettings()
-    {
-        ShowAudioSettings = !ShowAudioSettings;
     }
 }
 
@@ -1232,10 +629,33 @@ public partial class Channel : ObservableObject
     /// <summary>Channel comment / MOTD (Markdown on the wire).</summary>
     [ObservableProperty] private string _comment = "";
 
+    /// <summary>The emoji icon, or the speaker glyph when none is set.</summary>
+    [ObservableProperty] private string _icon = "🔊";
+
+    [ObservableProperty] private bool _isLobby;
+
     /// <summary>The channel we're in: 3px accent bar + subtle fill.</summary>
     [ObservableProperty] private bool _isCurrent;
 
+    /// <summary>Admin context menu (edit / delete) is offered.</summary>
+    [ObservableProperty] private bool _canManage;
+
     public bool HasOccupants => Users.Count > 0;
+
+    /// <summary>First line of the comment, for the roster subtitle.</summary>
+    public string CommentPreview => InlineMarkdown.PlainText(Comment.Split('\n')[0]);
+    public bool HasComment => !string.IsNullOrWhiteSpace(Comment);
+
+    // Set by the owning view model: context menus live in a popup outside the
+    // window's visual tree, so they bind to the item rather than to an ancestor.
+    public IRelayCommand? EditCommand { get; set; }
+    public IRelayCommand? DeleteCommand { get; set; }
+
+    partial void OnCommentChanged(string value)
+    {
+        OnPropertyChanged(nameof(CommentPreview));
+        OnPropertyChanged(nameof(HasComment));
+    }
 
     public Channel()
     {
@@ -1247,39 +667,49 @@ public partial class User : ObservableObject
 {
     [ObservableProperty] private uint _id;
     [ObservableProperty] private string _name = "";
+
+    /// <summary>The user's profile comment (Markdown).</summary>
     [ObservableProperty] private string _comment = "";
     [ObservableProperty] private bool _isMuted;
     [ObservableProperty] private bool _isDeafened;
     [ObservableProperty] private bool _isSpeaking;
+    [ObservableProperty] private bool _isLocallyMuted;
     [ObservableProperty] private Position3D _position = new(0, 0, 0);
 
+    /// <summary>The local user's own row ("you").</summary>
+    public bool IsSelf { get; init; }
+
     /// <summary>
-    /// Drives the roster key glyph and the rail's `verify key` row. Everyone
-    /// starts at TOFU: out-of-band verification lands with the trust sheet (§7),
-    /// which is separate work, so nothing sets this to Verified yet.
+    /// Trust in this user's identity key, from the MLS group of the channel
+    /// we're in. Users in other channels stay at TOFU: we hold no key for them.
     /// </summary>
     [ObservableProperty] private TrustState _trust = TrustState.Tofu;
 
-    /// <summary>Roster trailing glyph: mic.slash.fill in warn, key.fill in caution.</summary>
-    public bool NeedsKeyCheck => Trust != TrustState.Verified;
+    /// <summary>
+    /// Roster key.fill in caution: a key that differs from the one first seen.
+    /// A merely uncompared (TOFU) key is the normal state and gets no glyph.
+    /// </summary>
+    public bool NeedsKeyCheck => Trust == TrustState.KeyChanged;
+
+    /// <summary>The trailing mic.slash glyph (deafen implies muted).</summary>
+    public bool ShowMuted => IsMuted || IsDeafened;
+
+    public string Initial => string.IsNullOrWhiteSpace(Name) ? "?" : Name.Trim()[..1].ToUpperInvariant();
+
+    public IRelayCommand? OpenProfileCommand { get; set; }
+    public IRelayCommand? ToggleLocalMuteCommand { get; set; }
+    public IRelayCommand<string>? SetVolumeCommand { get; set; }
+
+    /// <summary>Local mute and volume make no sense on our own row.</summary>
+    public bool CanAdjust => !IsSelf;
+
+    public string LocalMuteLabel => IsLocallyMuted ? "Unmute locally" : "Mute locally";
 
     partial void OnTrustChanged(TrustState value) => OnPropertyChanged(nameof(NeedsKeyCheck));
+    partial void OnIsMutedChanged(bool value) => OnPropertyChanged(nameof(ShowMuted));
+    partial void OnIsDeafenedChanged(bool value) => OnPropertyChanged(nameof(ShowMuted));
+    partial void OnNameChanged(string value) => OnPropertyChanged(nameof(Initial));
+    partial void OnIsLocallyMutedChanged(bool value) => OnPropertyChanged(nameof(LocalMuteLabel));
 }
 
 public record Position3D(float X, float Y, float Z);
-
-public class ChatMessage
-{
-    public uint UserId { get; init; }
-    public string UserName { get; init; } = "";
-    public string Content { get; init; } = "";
-    public DateTime Timestamp { get; init; } = DateTime.Now;
-    public bool IsFromCurrentUser { get; init; }
-    public bool System { get; init; }
-
-    /// <summary>Initial for the 34px avatar beside the message.</summary>
-    public string Initial => string.IsNullOrWhiteSpace(UserName) ? "?" : UserName.Trim()[..1].ToUpperInvariant();
-
-    /// <summary>`20:14`, mono, on the name row.</summary>
-    public string TimeLabel => Timestamp.ToString("HH:mm");
-}

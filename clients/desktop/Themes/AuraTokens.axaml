@@ -146,4 +146,12 @@
     <sys:Double x:Key="AuraNarrowChatWidth">320</sys:Double>
     <sys:Double x:Key="AuraHeaderHeight">46</sys:Double>
 
+    <!-- ==================================================================
+         Mentions: caution #FFBD2E at 10% fill / 38% border on the bubble,
+         and a caution pill on the @name token. Same in every theme.
+         ================================================================== -->
+    <SolidColorBrush x:Key="AuraMentionFillBrush">#1AFFBD2E</SolidColorBrush>
+    <SolidColorBrush x:Key="AuraMentionBorderBrush">#61FFBD2E</SolidColorBrush>
+    <SolidColorBrush x:Key="AuraMentionPillBrush">#40FFBD2E</SolidColorBrush>
+
 </ResourceDictionary>
