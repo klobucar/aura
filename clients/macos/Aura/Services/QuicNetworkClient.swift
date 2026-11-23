@@ -1,3 +1,4 @@
+import AuraCore
 import Foundation
 import Combine
 import Network
@@ -5,6 +6,7 @@ import Observation
 import UserNotifications
 import SwiftUI
 import CryptoKit
+import os
 
 /// Native QUIC client for Aura server using Apple's Network framework.
 /// Uses NWConnectionGroup to handle server-initiated streams for Apple/Quinn interop.
@@ -15,7 +17,10 @@ public class QuicNetworkClient {
     // MARK: - Published State
     
     public var isConnected = false
-    public var isAuthenticated = false
+    public var isAuthenticated = false {
+        // The audio domain sends nothing while we aren't logged in.
+        didSet { voice.post(.setAuthenticated(isAuthenticated)) }
+    }
     public var isAdmin = false
     public var connectionStatus = "Disconnected"
     public var userId: UInt32 = 0
@@ -55,7 +60,10 @@ public class QuicNetworkClient {
     // MARK: - Private Properties
     
     /// The QUIC connection group (manages the tunnel and accepts streams)
-    private var quicGroup: NWConnectionGroup?
+    private var quicGroup: NWConnectionGroup? {
+        // Audio datagrams go out from the audio domain, on this group.
+        didSet { voice.post(.setLink(quicGroup.map { ConnectionGroupLink(group: $0) })) }
+    }
     
     /// Control stream from server (for auth and signaling)
     private var controlStream: NWConnection?
@@ -63,11 +71,17 @@ public class QuicNetworkClient {
     /// Continuation for waiting on server stream
     private var streamContinuation: CheckedContinuation<NWConnection, Error>?
     
-    /// Audio sender (Rust UniFFI wrapper for encoding + encryption)
-    private var audioSender: AudioSenderWrapper?
-    
-    /// Audio receiver (Rust UniFFI wrapper for decoding + decryption)
-    private var audioReceiver: AudioReceiverWrapper?
+    /// The audio domain. It owns the Rust audio sender and receiver,
+    /// playback, and the audio datagram path; frames never pass through the
+    /// main actor. This class derives keys (MLS lives here) and settings, and
+    /// posts them to it in order. See `VoiceEngine`.
+    nonisolated let voice = VoiceEngine(output: AudioPlayback())
+
+    /// True once a sender and receiver have been handed to `voice`.
+    private var isVoiceAttached = false
+
+    /// Bumped by `clearLocalSpeaking()`; see `VoiceMeters.localSpeechGeneration`.
+    private var localSpeechGeneration: UInt64 = 0
     
     // Text crypto now uses MLS-derived per-sender keys (no shared instance)
     
@@ -75,16 +89,24 @@ public class QuicNetworkClient {
     private var mlsWrapper: MlsWrapper?
     
     /// Track the current voice channel for MLS group ID generation
-    private var currentVoiceChannelId: String?
-    
-    /// Audio playback engine
-    private let audioPlayback = AudioPlayback()
+    private var currentVoiceChannelId: String? {
+        // A new channel needs its own key: the audio domain stops sending
+        // until that channel's MLS key arrives.
+        didSet {
+            if currentVoiceChannelId != oldValue {
+                voice.post(.setVoiceChannel(currentVoiceChannelId))
+            }
+        }
+    }
     
     /// Track which users are currently speaking (for UI indicators).
     ///
     /// This is fed from `receiver.popMixed()`, so it only ever contains
     /// *remote* senders — our own audio never round-trips through the
     /// receiver. Use `isLocalSpeaking` for the local talking signal.
+    ///
+    /// This and the three properties below are published by `voice` at most
+    /// ~30 times a second; a speaker drops out 500ms after their last frame.
     public var activeSpeakers: Set<UInt32> = []
 
     /// True while the local send path is actually emitting packets, i.e. the
@@ -92,7 +114,7 @@ public class QuicNetworkClient {
     ///
     /// The talk lanes need the local user's lane filled in too, and
     /// `activeSpeakers` structurally cannot provide it (see above), so the
-    /// signal is lifted off the send path in `sendAudioDatagram` instead.
+    /// signal is lifted off the send path in `VoiceEngine` instead.
     public var isLocalSpeaking = false
 
     /// Level of the most recent captured frame, in dBFS, floored at -60.
@@ -105,17 +127,7 @@ public class QuicNetworkClient {
     public var outputLevelDb: Float = QuicNetworkClient.levelFloorDb
 
     /// Quietest level the meters represent; everything below reads as silence.
-    static let levelFloorDb: Float = -60
-
-    /// Local speech is judged over by the sender's VAD, but VAD is only
-    /// enabled in voice-activation mode — in always-on and PTT modes every
-    /// frame produces a packet. This floor keeps the local lane from filling
-    /// solid with room noise in those modes.
-    private static let localSpeechFloorDb: Float = -45
-
-    /// Clears `isLocalSpeaking` once frames stop being produced. Mirrors the
-    /// receive-side `speakerTimeouts` window so both lanes fringe alike.
-    private var localSpeakingTimeout: Task<Void, Never>?
+    static let levelFloorDb: Float = VoiceMeters.floorDb
 
     /// Local-only per-user playback gain, keyed by stable user UUID.
     /// 1.0 = unchanged, 0.0..2.0 is the UI-allowed range.
@@ -182,11 +194,6 @@ public class QuicNetworkClient {
 
     /// Task running the datagram RTT probe loop.
     private var pingTask: Task<Void, Never>?
-    
-    /// Timeout tasks for clearing speakers who stop sending audio
-    private var speakerTimeouts: [UInt32: Task<Void, Never>] = [:]
-    
-    private var sequenceNumber: UInt16 = 0
     
     // Protocol message types (matching server)
     private static let MSG_CHALLENGE_REQUEST: UInt8 = 0x01
@@ -274,64 +281,30 @@ public class QuicNetworkClient {
     public init() {
         loadLocalMixerPrefs()
 
-        // Listen for audio settings changes
+        // Listen for audio settings changes. Everything they touch belongs to
+        // the audio domain, so they go straight there.
         NotificationCenter.default.addObserver(
             forName: .audioSettingsChanged,
             object: nil,
             queue: .main
-        ) { [weak self] notification in
-            self?.applyAudioSettings(notification.object as? [String: Any])
+        ) { [voice] notification in
+            if let change = AudioSettingsChange(notification.object) {
+                voice.post(.applySettings(change))
+            }
+        }
+
+        // Meter snapshots from the audio domain: at most ~30 a second, and
+        // only the newest if the main actor falls behind.
+        Task { [weak self, meters = voice.meters] in
+            for await snapshot in meters {
+                self?.applyVoiceMeters(snapshot)
+            }
         }
     }
     
     deinit {
         NotificationCenter.default.removeObserver(self)
-    }
-    
-    // MARK: - Audio Settings
-    
-    private func applyAudioSettings(_ settings: [String: Any]?) {
-        guard let settings = settings else { return }
-        
-        if let enabled = settings["noiseSuppression"] as? Bool {
-            audioSender?.setNoiseSuppressionEnabled(enabled: enabled)
-            print("[QuicClient] Noise suppression: \(enabled ? "enabled" : "disabled")")
-        }
-        
-        if let enabled = settings["aecEnabled"] as? Bool {
-            audioSender?.setWebrtcAecEnabled(enabled: enabled)
-            print("[QuicClient] AEC: \(enabled ? "enabled" : "disabled")")
-        }
-        
-        if let enabled = settings["webrtcNsEnabled"] as? Bool {
-            audioSender?.setWebrtcNsEnabled(enabled: enabled)
-            print("[QuicClient] WebRTC NS: \(enabled ? "enabled" : "disabled")")
-        }
-        
-        if let enabled = settings["webrtcAgcEnabled"] as? Bool {
-            audioSender?.setWebrtcAgcEnabled(enabled: enabled)
-            print("[QuicClient] AGC: \(enabled ? "enabled" : "disabled")")
-        }
-        
-        if let ms = settings["jitterBuffer"] as? Int {
-            audioReceiver?.setJitterBufferMs(latencyMs: UInt32(ms))
-            print("[QuicClient] Jitter buffer set to \(ms)ms")
-        }
-
-        if let volume = settings["masterVolume"] as? Float {
-            audioPlayback.setVolume(volume)
-            print("[QuicClient] Master volume: \(Int((volume * 100).rounded()))%")
-        }
-
-        if let enabled = settings["vadEnabled"] as? Bool {
-            audioSender?.setVadEnabled(enabled: enabled)
-            print("[QuicClient] VAD: \(enabled ? "enabled" : "disabled")")
-        }
-
-        if let thresholdDb = settings["vadThresholdDb"] as? Float {
-            audioSender?.setVadThresholdDb(thresholdDb: thresholdDb)
-            print("[QuicClient] VAD threshold: \(thresholdDb) dB")
-        }
+        voice.shutdown()
     }
     
     // MARK: - Telemetry
@@ -388,9 +361,15 @@ public class QuicNetworkClient {
         let expectedFingerprint = expectedCertificateFingerprint?.lowercased()
         let pinCheck = CertificatePinCheck()
         self.pinCheck = pinCheck
+#if !DEBUG
+        // The verify block runs on a background queue, so it gets the
+        // fingerprint trusted for this host now rather than reading settings.
+        let trustedFingerprint = AppSettings.shared.pinnedFingerprint(forHost: host)
+#endif
 
-        // Strict certificate verification in release, TOFU in dev
-        sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { [weak self] _, trust, completeHandler in
+        // Strict certificate verification in release, TOFU in dev. The block
+        // runs on the queue passed below, never on the main actor.
+        sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { @Sendable [weak self] _, trust, completeHandler in
             guard let self = self else {
                 completeHandler(false)
                 return
@@ -433,7 +412,7 @@ public class QuicNetworkClient {
             print("[QuicClient] TLS verify failure - fingerprint: \(fingerprint)")
             
             // Check if user has already trusted this fingerprint for this host
-            if AppSettings.shared.isFingerprintTrusted(host: host, fingerprint: fingerprint) {
+            if trustedFingerprint == fingerprint {
                 print("[QuicClient] Fingerprint matches known trusted list. Proceeding.")
                 completeHandler(true)
             } else {
@@ -470,8 +449,8 @@ public class QuicNetworkClient {
         }
         
         // Set up handler for incoming datagrams (audio packets + ping echoes)
-        group.setReceiveHandler(maximumMessageSize: 1220, rejectOversizedMessages: true) { [weak self] _, content, _ in
-            guard let self = self, let data = content, !data.isEmpty else { return }
+        group.setReceiveHandler(maximumMessageSize: 1220, rejectOversizedMessages: true) { [weak self, voice] _, content, _ in
+            guard let data = content, !data.isEmpty else { return }
 
             // Ping echo from the server: [0x00][8-byte nonce]. A bare
             // 1-byte 0x00 is a legacy server-initiated keepalive; ignore.
@@ -481,17 +460,14 @@ public class QuicNetworkClient {
                         $0.load(as: UInt64.self)
                     }
                     Task { @MainActor in
-                        self.recordPingEcho(nonce: nonce)
+                        self?.recordPingEcho(nonce: nonce)
                     }
                 }
                 return
             }
 
-            if data[0] == 0x01 {  // Audio datagram
-                let audioData = data.subdata(in: 1..<data.count)
-                Task { @MainActor in
-                    self.processIncomingAudioPacket(audioData)
-                }
+            if data[0] == 0x01 {  // Audio datagram: straight to the audio domain
+                voice.submitReceived(data.subdata(in: 1..<data.count))
             } else {
                 print("[QuicClient] Unknown datagram type: 0x\(String(format: "%02X", data[0]))")
             }
@@ -517,10 +493,12 @@ public class QuicNetworkClient {
 
     private func waitForGroupReady(_ group: NWConnectionGroup) async throws {
         return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
+            // Set on the main actor once the continuation has been resumed;
+            // the handler checks it first on the group's queue.
+            let resumed = OSAllocatedUnfairLock(initialState: false)
             
             group.stateUpdateHandler = { [weak self] state in
-                guard !resumed else { return }
+                guard !resumed.withLock({ $0 }) else { return }
                 
                 Task { @MainActor in
                     switch state {
@@ -530,12 +508,12 @@ public class QuicNetworkClient {
                         print("[QuicClient] Group waiting: \(error)")
                     case .ready:
                         print("[QuicClient] Group ready!")
-                        resumed = true
+                        resumed.withLock { $0 = true }
                         continuation.resume()
                     case .failed(let error):
                         print("[QuicClient] Group failed: \(error)")
                         self?.isConnected = false
-                        resumed = true
+                        resumed.withLock { $0 = true }
                         
                         // Trigger reconnection only if this was an unexpected disconnect
                         if self?.isAuthenticated == true && self?.isIntentionalDisconnect != true {
@@ -546,9 +524,12 @@ public class QuicNetworkClient {
                     case .cancelled:
                         print("[QuicClient] Group cancelled")
                         self?.isConnected = false
-                        if !resumed {
-                            resumed = true
-                            
+                        let wasResumed = resumed.withLock { flag in
+                            let was = flag
+                            flag = true
+                            return was
+                        }
+                        if !wasResumed {
                             // Trigger reconnection only if this was an unexpected disconnect
                             if self?.isAuthenticated == true && self?.isIntentionalDisconnect != true {
                                 self?.handleConnectionLoss()
@@ -738,18 +719,22 @@ public class QuicNetworkClient {
             keyData.replaceSubrange(0..<copyCount, with: tokenData[0..<copyCount])
             
             do {
-                // Initialize audio sender/receiver with temporary DAVE key
-                // This will be replaced with MLS-derived key when joining a channel
+                // Initialize audio sender/receiver with a placeholder DAVE
+                // key. It never encrypts audio: `voice` sends nothing until an
+                // MLS-derived key for the current channel replaces it.
+                //
+                // Both are built and configured here, then handed to `voice`,
+                // which is the only thing that uses them from then on.
                 let tempKeyData = Data(repeating: 0x42, count: 32)
-                audioSender = try AudioSenderWrapper(sessionId: responseUserId, key: tempKeyData)
-                audioSender?.setEpoch(epoch: 0)
+                let sender = try AudioSenderWrapper(sessionId: responseUserId, key: tempKeyData)
+                sender.setEpoch(epoch: 0)
                 
                 // Enable DRED (10 frames = 100ms of redundancy)
-                audioSender?.setDredDuration(duration: 10)
+                sender.setDredDuration(duration: 10)
                 print("[QuicClient] DRED enabled (100ms redundancy)")
                 
                 // Initialize audio receiver (for receiving others' voice)
-                audioReceiver = try AudioReceiverWrapper()
+                let receiver = AudioReceiverWrapper()
                 
                 // Apply saved audio settings
                 let noiseSuppressionEnabled = UserDefaults.standard.object(forKey: "noiseSuppressionEnabled") as? Bool ?? true
@@ -758,10 +743,10 @@ public class QuicNetworkClient {
                 let webrtcAgcEnabled = UserDefaults.standard.object(forKey: "webrtcAgcEnabled") as? Bool ?? true
                 let jitterBufferMs = UserDefaults.standard.object(forKey: "jitterBufferMs") as? Int ?? 20
                 
-                audioSender?.setNoiseSuppressionEnabled(enabled: noiseSuppressionEnabled)
-                audioSender?.setWebrtcAecEnabled(enabled: aecEnabled)
-                audioSender?.setWebrtcNsEnabled(enabled: webrtcNsEnabled)
-                audioSender?.setWebrtcAgcEnabled(enabled: webrtcAgcEnabled)
+                sender.setNoiseSuppressionEnabled(enabled: noiseSuppressionEnabled)
+                sender.setWebrtcAecEnabled(enabled: aecEnabled)
+                sender.setWebrtcNsEnabled(enabled: webrtcNsEnabled)
+                sender.setWebrtcAgcEnabled(enabled: webrtcAgcEnabled)
 
                 // VAD: enabled when transmission mode is voice activation; threshold derived
                 // from the saved sensitivity slider (0.0–1.0 maps to -50..-20 dB).
@@ -770,20 +755,20 @@ public class QuicNetworkClient {
                 let savedSensitivity = UserDefaults.standard.float(forKey: "AuraVADSensitivity")
                 let sensitivity = savedSensitivity == 0 ? Float(0.5) : savedSensitivity
                 let thresholdDb = -50.0 + (sensitivity * 30.0) // 0.0 → -50 dB, 1.0 → -20 dB
-                audioSender?.setVadThresholdDb(thresholdDb: thresholdDb)
-                audioSender?.setVadEnabled(enabled: vadEnabled)
+                sender.setVadThresholdDb(thresholdDb: thresholdDb)
+                sender.setVadEnabled(enabled: vadEnabled)
 
-                audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
+                receiver.setJitterBufferMs(latencyMs: UInt32(jitterBufferMs))
 
                 let masterVolume = UserDefaults.standard.object(forKey: "masterVolume") as? Double ?? 1.0
-                audioPlayback.setVolume(Float(masterVolume))
 
                 print("[QuicClient] Applied settings: RNNoise=\(noiseSuppressionEnabled), AEC=\(aecEnabled), WebRTC-NS=\(webrtcNsEnabled), AGC=\(webrtcAgcEnabled), Jitter=\(jitterBufferMs)ms, VAD=\(vadEnabled)@\(thresholdDb)dB, Volume=\(Int((masterVolume * 100).rounded()))%")
                 
                 // Text crypto will use MLS-derived keys per-sender (no initialization needed)
                 
-                // Start audio playback engine
-                audioPlayback.start()
+                // Hand over; the audio domain sets the volume and starts playback.
+                voice.post(.attach(sender: sender, receiver: receiver, masterVolume: Float(masterVolume)))
+                isVoiceAttached = true
                 
                 // Start audio capture automatically for testing
                 Task { @MainActor in
@@ -812,7 +797,7 @@ public class QuicNetworkClient {
     @MainActor
     public func setLocalVolume(sessionId: UInt32, volume: Float) {
         let clamped = max(0.0, min(2.0, volume))
-        audioReceiver?.setSenderGain(sessionId: sessionId, gain: clamped)
+        voice.post(.setSenderGain(sessionId: sessionId, gain: clamped))
 
         guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else {
             // No stable identity yet — apply to this session only,
@@ -836,16 +821,16 @@ public class QuicNetworkClient {
             // Can't persist without a stable id; fall back to a
             // session-scoped toggle via the Rust mixer directly.
             let nowMuted = !(audioReceiverIsMuted(sessionId: sessionId))
-            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: nowMuted)
+            voice.post(.setSenderMuted(sessionId: sessionId, muted: nowMuted))
             return
         }
 
         if locallyMutedUsers.contains(uuid) {
             locallyMutedUsers.remove(uuid)
-            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: false)
+            voice.post(.setSenderMuted(sessionId: sessionId, muted: false))
         } else {
             locallyMutedUsers.insert(uuid)
-            audioReceiver?.setSenderMuted(sessionId: sessionId, muted: true)
+            voice.post(.setSenderMuted(sessionId: sessionId, muted: true))
         }
         saveLocalMixerPrefs()
     }
@@ -875,14 +860,16 @@ public class QuicNetworkClient {
     /// gets muted immediately after they register in the current
     /// connection).
     fileprivate func applyLocalMixerPrefs(sessionId: UInt32) {
-        guard let receiver = audioReceiver else { return }
-        guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else { return }
-        if let vol = userVolumes[uuid] {
-            receiver.setSenderGain(sessionId: sessionId, gain: vol)
-        }
-        if locallyMutedUsers.contains(uuid) {
-            receiver.setSenderMuted(sessionId: sessionId, muted: true)
-        }
+        guard isVoiceAttached, let prefs = mixerPrefs(forSession: sessionId),
+              prefs != VoiceMixerPrefs() else { return }
+        voice.post(.applyMixerPrefs(sessionId: sessionId, prefs: prefs))
+    }
+
+    /// The persisted local volume / mute for whoever holds `sessionId`, or
+    /// nil while we don't know who that is.
+    private func mixerPrefs(forSession sessionId: UInt32) -> VoiceMixerPrefs? {
+        guard let uuid = sessionToUuid[sessionId], !uuid.isEmpty else { return nil }
+        return VoiceMixerPrefs(gain: userVolumes[uuid], muted: locallyMutedUsers.contains(uuid))
     }
 
     /// Register the session → UUID mapping the server just told us
@@ -1178,7 +1165,8 @@ public class QuicNetworkClient {
             self.pendingPings[nonce] = DispatchTime.now()
         }
 
-        group.send(content: datagram) { error in
+        // Runs on the group's queue, not the main actor.
+        group.send(content: datagram) { @Sendable error in
             if let error = error {
                 print("[QuicClient] Ping datagram send failed: \(error)")
             }
@@ -1368,17 +1356,18 @@ public class QuicNetworkClient {
                     print("[QuicClient] Channel \(channelId) now has \(usersByChannel[channelId]?.count ?? 0) users")
                     
                     // Add sender to audio receiver for decryption
-                    if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
+                    if self.isVoiceAttached, let mls = self.mlsWrapper {
                         // Derive actual DAVE key from MLS if we are in the group
-                        let keyData: Data
                         if mls.isMember(channelId: channelId, isVoice: true) {
                             do {
                                 let keyBytes = try mls.exportAudioKey(channelId: channelId, senderSessionId: sessionId)
                                 let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
-                                keyData = Data(keyBytes)
-                                try receiver.addSender(sessionId: sessionId, key: keyData, epochHint: UInt16(epoch & 0xFFFF))
-                                self.applyLocalMixerPrefs(sessionId: sessionId)
-                                print("[QuicClient] Added audio sender \(sessionId) with MLS key")
+                                self.voice.post(.addSender(
+                                    sessionId: sessionId,
+                                    key: Data(keyBytes),
+                                    epochHint: UInt16(epoch & 0xFFFF),
+                                    prefs: self.mixerPrefs(forSession: sessionId) ?? VoiceMixerPrefs()
+                                ))
                             } catch {
                                 print("[QuicClient] Failed to derive MLS key for new user \(sessionId): \(error)")
                             }
@@ -1410,7 +1399,7 @@ public class QuicNetworkClient {
             let sessionId = left.sessionId
 
             // Remove from audio receiver
-            audioReceiver?.removeSender(sessionId: sessionId)
+            voice.post(.removeSender(sessionId: sessionId))
 
             // Drop the session → UUID mapping. Local prefs stay in
             // the UUID-keyed dicts so they re-apply on reconnect.
@@ -1689,16 +1678,19 @@ public class QuicNetworkClient {
                     newUserMapping[c.channelId] = usersList
 
                     // Add listeners for decryption
-                    if let receiver = self.audioReceiver, let mls = self.mlsWrapper {
+                    if self.isVoiceAttached, let mls = self.mlsWrapper {
                         for userStatus in c.users {
                             let sid = userStatus.sessionId
                             if sid != self.sessionId && mls.isMember(channelId: c.channelId, isVoice: true) {
                                 do {
                                     let keyBytes = try mls.exportAudioKey(channelId: c.channelId, senderSessionId: sid)
                                     let epoch = try mls.currentEpoch(channelId: c.channelId, isVoice: true)
-                                    try receiver.addSender(sessionId: sid, key: Data(keyBytes), epochHint: UInt16(epoch & 0xFFFF))
-                                    self.applyLocalMixerPrefs(sessionId: sid)
-                                    print("[QuicClient] Added receiver key for user \(sid) from snapshot")
+                                    self.voice.post(.addSender(
+                                        sessionId: sid,
+                                        key: Data(keyBytes),
+                                        epochHint: UInt16(epoch & 0xFFFF),
+                                        prefs: self.mixerPrefs(forSession: sid) ?? VoiceMixerPrefs()
+                                    ))
                                 } catch {
                                     print("[QuicClient] Failed to derive snapshot key for \(sid): \(error)")
                                 }
@@ -2160,36 +2152,34 @@ public class QuicNetworkClient {
         // Get our own key for sending
         let myKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: session)
         let epoch = try mls.currentEpoch(channelId: channelId, isVoice: true)
-        
-        // Update sender with new key
-        if let sender = audioSender {
-            // Use updateKey to preserve sequence numbers and other state
-            try sender.updateKey(key: Data(myKey), epoch: epoch)
-            print("[QuicClient] Rotated audio sender key from MLS, epoch=\(epoch)")
-        }
-        
-        // Update receiver keys for all known users
-        if let receiver = audioReceiver {
-            for (chId, users) in usersByChannel where chId == channelId {
-                for user in users {
-                    do {
-                        let userKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: user.id)
-                        let updated = try receiver.updateSenderKey(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
-                        
-                        if updated {
-                            print("[QuicClient] Updated receiver key for user \(user.id)")
-                        } else {
-                            // If update failed, it's a new sender we missed during the initial Join race
-                            print("[QuicClient] New user \(user.id) found during key rotation, adding sender...")
-                            try receiver.addSender(sessionId: user.id, key: Data(userKey), epochHint: UInt16(epoch & 0xFFFF))
-                            self.applyLocalMixerPrefs(sessionId: user.id)
-                        }
-                    } catch {
-                        print("[QuicClient] Failed to update/add audio key for user \(user.id): \(error)")
-                    }
+
+        // Receiver keys for everyone we know in this channel. A key that
+        // can't be derived is logged and left out.
+        var receivers: [VoiceReceiverKey] = []
+        if isVoiceAttached {
+            for user in usersByChannel[channelId] ?? [] {
+                do {
+                    let userKey = try mls.exportAudioKey(channelId: channelId, senderSessionId: user.id)
+                    receivers.append(VoiceReceiverKey(
+                        sessionId: user.id,
+                        key: Data(userKey),
+                        prefs: mixerPrefs(forSession: user.id) ?? VoiceMixerPrefs()
+                    ))
+                } catch {
+                    print("[QuicClient] Failed to update/add audio key for user \(user.id): \(error)")
                 }
             }
         }
+
+        // The audio domain applies these in one step, between two frames:
+        // the sender (updateKey keeps sequence numbers and encoder state),
+        // then each receiver key, adding senders the join race missed.
+        voice.post(.rotateKeys(VoiceKeyRotation(
+            channelId: channelId,
+            sendKey: Data(myKey),
+            epoch: epoch,
+            receivers: receivers
+        )))
     }
     
     /// Handle incoming audio packet from server
@@ -2199,10 +2189,8 @@ public class QuicNetworkClient {
             
             print("[QuicClient] Received audio packet: \(packetData.count) bytes")
             
-            // Process the audio packet (decrypt + decode + play)
-            await MainActor.run {
-                processIncomingAudioPacket(packetData)
-            }
+            // Decrypt, decode and play in the audio domain.
+            voice.submitReceived(packetData)
         } catch {
             print("[QuicClient] Failed to parse audio packet: \(error)")
         }
@@ -2226,190 +2214,48 @@ public class QuicNetworkClient {
     }
     
     // MARK: - Audio
-    
-    /// Send audio frame via QUIC datagram (or control stream for now)
-    /// - Parameter rawPcmBytes: Raw PCM data from AudioCapture (Int16 samples)
-    public func sendAudioDatagram(_ floatPcm: [Float]) async throws {
-        // Meter every captured frame, gated or not, so the HUD input meter
-        // still moves while VAD is holding the transmit gate shut.
-        let frameLevelDb = Self.levelDb(floatPcm)
-        if frameLevelDb != inputLevelDb { inputLevelDb = frameLevelDb }
 
-        guard isAuthenticated, let sender = audioSender else { return }
-
-        // Process through audio sender (Opus + Encrypt) using high-fidelity float path.
-        // Returns nil when VAD is enabled and the frame is silence — skip the send.
-        let packetData: Data
-        do {
-            guard let bytes = try sender.processFloat(pcm: floatPcm) else {
-                return // VAD silenced; nothing to transmit this 20ms slice
-            }
-            packetData = Data(bytes)
-        } catch {
-            print("[QuicClient] Audio encoding error: \(error)")
-            return
-        }
-
-        // A packet came out of the gate, so we are talking — that is the local
-        // half of the talk-lane signal.
-        if frameLevelDb > Self.localSpeechFloorDb {
-            markLocalSpeaking()
-        }
-
-        // Send via QUIC datagram (unreliable, low-latency)
-        guard let group = quicGroup else {
-            print("[QuicClient] Cannot send audio: no connection group")
-            return
-        }
-        
-        var datagram = Data([0x01])  // Audio datagram type
-        datagram.append(packetData)
-        
-        group.send(content: datagram) { [weak self] error in
-            if let error = error {
-                print("[QuicClient] ✗ Failed to send audio datagram: \(error)")
-            } else if let self = self, self.sequenceNumber % 100 == 0 {
-                print("[QuicClient] ✓ Sent audio packet #\(sender.sequence()) (67 bytes) via datagram")
-            }
-        }
-        
-        sequenceNumber &+= 1
+    /// Hand a captured 20 ms frame to the audio domain, which meters, encodes,
+    /// encrypts and sends it. Called on the capture tap's thread.
+    public nonisolated func sendAudioFrame(_ floatPcm: [Float]) {
+        voice.submitCaptured(floatPcm)
     }
 
-    /// Raise `isLocalSpeaking` and (re)arm the trailing timeout that lowers it.
-    private func markLocalSpeaking() {
-        if !isLocalSpeaking { isLocalSpeaking = true }
-
-        localSpeakingTimeout?.cancel()
-        localSpeakingTimeout = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000) // 500ms, matching speakerTimeouts
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self?.isLocalSpeaking = false
-                self?.localSpeakingTimeout = nil
-            }
-        }
-    }
-
-    /// Drop the local talking signal immediately — used when capture stops so
-    /// the lane does not keep a live segment open for another 500ms.
+    /// Drop the local talking signal and input meter immediately — used when
+    /// capture stops so the lane does not keep a live segment open for
+    /// another 500ms.
     public func clearLocalSpeaking() {
-        localSpeakingTimeout?.cancel()
-        localSpeakingTimeout = nil
+        localSpeechGeneration &+= 1
+        voice.post(.clearLocalSpeech(generation: localSpeechGeneration))
         isLocalSpeaking = false
         inputLevelDb = Self.levelFloorDb
     }
 
-    /// RMS of a PCM frame in dBFS, floored at `levelFloorDb`.
-    private static func levelDb(_ pcm: [Float]) -> Float {
-        guard !pcm.isEmpty else { return levelFloorDb }
-        var sumSquares: Float = 0
-        for sample in pcm { sumSquares += sample * sample }
-        let rms = (sumSquares / Float(pcm.count)).squareRoot()
-        guard rms > 0 else { return levelFloorDb }
-        // Quantized to whole dB: the meters read in integers anyway, and it
-        // keeps float jitter from republishing on every 20ms frame.
-        return max(levelFloorDb, (20 * log10(rms)).rounded())
-    }
-
-    /// RMS of an Int16 PCM frame in dBFS, floored at `levelFloorDb`.
-    private static func levelDb(_ pcm: [Int16]) -> Float {
-        guard !pcm.isEmpty else { return levelFloorDb }
-        var sumSquares: Double = 0
-        for sample in pcm {
-            let normalized = Double(sample) / 32768.0
-            sumSquares += normalized * normalized
+    /// A meter snapshot from the audio domain.
+    private func applyVoiceMeters(_ meters: VoiceMeters) {
+        if meters.activeSpeakers != activeSpeakers {
+            print("[QuicClient] Active speakers changed: \(activeSpeakers) -> \(meters.activeSpeakers)")
+            activeSpeakers = meters.activeSpeakers
+            NotificationCenter.default.post(name: .activeSpeakersChanged, object: meters.activeSpeakers)
         }
-        let rms = (sumSquares / Double(pcm.count)).squareRoot()
-        guard rms > 0 else { return levelFloorDb }
-        return max(levelFloorDb, Float((20 * log10(rms)).rounded()))
-    }
+        if meters.outputLevelDb != outputLevelDb { outputLevelDb = meters.outputLevelDb }
 
-    /// Handle incoming audio packet and play it
-    /// - Parameter packetData: Raw packet bytes from network
-    private func processIncomingAudioPacket(_ packetData: Data) {
-        guard let receiver = audioReceiver else { return }
-        
-        // Pass to receiver for decryption + decoding
-        do {
-            try receiver.onPacket(data: packetData)
-            
-            // Pop mixed audio from Rust core (handles PLC/DRED/talking detection internals)
-            if let result = receiver.popMixed() {
-                // Check if active speakers changed
-                let newSpeakers = Set(result.activeSpeakers)
-                if newSpeakers != activeSpeakers {
-                    print("[QuicClient] Active speakers changed: \(activeSpeakers) -> \(newSpeakers)")
-                    activeSpeakers = newSpeakers
-                    
-                    // Post notification for UI to update (non-blocking)
-                    NotificationCenter.default.post(
-                        name: .activeSpeakersChanged,
-                        object: newSpeakers
-                    )
-                }
-                
-                // Receive-side speaker timeout: when a sender uses VAD, no packets arrive
-                // during silence — and even without VAD, datagrams can be lost. Mark a
-                // speaker as inactive after 500ms of no packets so the UI clears the
-                // talking indicator promptly.
-                for speakerId in result.activeSpeakers {
-                    // Reset timeout for this speaker
-                    speakerTimeouts[speakerId]?.cancel()
-                    speakerTimeouts[speakerId] = Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
-                        if !Task.isCancelled {
-                            await MainActor.run {
-                                guard let self = self else { return }
-                                self.activeSpeakers.remove(speakerId)
-                                self.speakerTimeouts.removeValue(forKey: speakerId)
-                                if self.activeSpeakers.isEmpty {
-                                    self.outputLevelDb = Self.levelFloorDb
-                                }
-                                print("[QuicClient] Speaker \(speakerId) timed out (silence detected)")
-                                
-                                // Post notification
-                                NotificationCenter.default.post(
-                                    name: .activeSpeakersChanged,
-                                    object: self.activeSpeakers
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                // Level of the mixed remote audio, for the current-speaker
-                // waveform. Per-speaker levels would need a Rust change; the
-                // mix is the honest signal available here.
-                let mixedLevelDb = Self.levelDb(result.pcm)
-                if mixedLevelDb != outputLevelDb { outputLevelDb = mixedLevelDb }
-
-                // Audio processing (immediate, not blocked by UI)
-                audioPlayback.enqueue(pcm: result.pcm)
-            }
-        } catch {
-            print("[QuicClient] Audio processing error: \(error)")
-        }
+        // Taken before the engine saw our latest clearLocalSpeaking(): its
+        // local fields would undo that.
+        guard meters.localSpeechGeneration == localSpeechGeneration else { return }
+        if meters.inputLevelDb != inputLevelDb { inputLevelDb = meters.inputLevelDb }
+        if meters.isLocalSpeaking != isLocalSpeaking { isLocalSpeaking = meters.isLocalSpeaking }
     }
     
     /// Start audio capture and send frames to network
     private func startAudioCapture() async {
-        guard let sender = audioSender else { return }
-        
         print("[QuicClient] Starting audio capture...")
         
         // Import AudioCapture if needed
         let capture = AudioCapture()
         
-        capture.start { [weak self] pcmData in
-            guard let self = self else { return }
-            Task {
-                do {
-                    try await self.sendAudioDatagram(pcmData)
-                } catch {
-                    // Silently ignore send errors
-                }
-            }
+        capture.start { [voice] pcmData in
+            voice.submitCaptured(pcmData)
         }
         
         print("[QuicClient] Audio capture started and sending packets")
@@ -2921,31 +2767,6 @@ public class QuicNetworkClient {
             }
         }
     }
-    
-    private func handleAudioSettingsChanged(_ notification: Notification) {
-        guard let settings = notification.object as? [String: Any] else { return }
-        
-        if let ns = settings["noiseSuppression"] as? Bool {
-            audioSender?.setNoiseSuppressionEnabled(enabled: ns)
-            print("[QuicClient] Runtime: RNNoise=\(ns)")
-        }
-        if let aec = settings["aecEnabled"] as? Bool {
-            audioSender?.setWebrtcAecEnabled(enabled: aec)
-            print("[QuicClient] Runtime: AEC=\(aec)")
-        }
-        if let wns = settings["webrtcNsEnabled"] as? Bool {
-            audioSender?.setWebrtcNsEnabled(enabled: wns)
-            print("[QuicClient] Runtime: WebRTC-NS=\(wns)")
-        }
-        if let agc = settings["webrtcAgcEnabled"] as? Bool {
-            audioSender?.setWebrtcAgcEnabled(enabled: agc)
-            print("[QuicClient] Runtime: AGC=\(agc)")
-        }
-        if let jitter = settings["jitterBuffer"] as? Int {
-            audioReceiver?.setJitterBufferMs(latencyMs: UInt32(jitter))
-            print("[QuicClient] Runtime: Jitter=\(jitter)ms")
-        }
-    }
 }
 
 // MARK: - Errors
@@ -3069,6 +2890,34 @@ public struct SystemEvent: Identifiable, Equatable {
     public init(content: String, channelId: String = "0") {
         self.content = content
         self.channelId = channelId
+    }
+}
+
+// MARK: - Audio settings notification
+
+/// The values an `.audioSettingsChanged` notification can carry, copied out of
+/// its `[String: Any]` payload. Each is nil when the payload doesn't set it.
+nonisolated struct AudioSettingsChange: Sendable {
+    let noiseSuppression: Bool?
+    let aecEnabled: Bool?
+    let webrtcNsEnabled: Bool?
+    let webrtcAgcEnabled: Bool?
+    let jitterBuffer: Int?
+    let masterVolume: Float?
+    let vadEnabled: Bool?
+    let vadThresholdDb: Float?
+
+    /// Nil when `payload` isn't a settings dictionary.
+    init?(_ payload: Any?) {
+        guard let settings = payload as? [String: Any] else { return nil }
+        noiseSuppression = settings["noiseSuppression"] as? Bool
+        aecEnabled = settings["aecEnabled"] as? Bool
+        webrtcNsEnabled = settings["webrtcNsEnabled"] as? Bool
+        webrtcAgcEnabled = settings["webrtcAgcEnabled"] as? Bool
+        jitterBuffer = settings["jitterBuffer"] as? Int
+        masterVolume = settings["masterVolume"] as? Float
+        vadEnabled = settings["vadEnabled"] as? Bool
+        vadThresholdDb = settings["vadThresholdDb"] as? Float
     }
 }
 

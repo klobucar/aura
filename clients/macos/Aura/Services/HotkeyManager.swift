@@ -42,7 +42,9 @@ class HotkeyManager: ObservableObject {
     }
 
     func requestAccessibilityPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        // The value of `kAXTrustedCheckOptionPrompt`. The constant is imported
+        // as a mutable C global, which Swift 6 won't read outside an actor.
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
         startPermissionPoll()
     }
@@ -53,8 +55,11 @@ class HotkeyManager: ObservableObject {
     /// when the PTT mode is disabled.
     private func startPermissionPoll() {
         stopPermissionPoll()
+        // Scheduled from the main actor, so the timer fires on the main run loop.
         permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.checkAccessibilityPermission()
+            MainActor.assumeIsolated {
+                self?.checkAccessibilityPermission()
+            }
         }
     }
 

@@ -9,9 +9,17 @@
 /* Begin PBXBuildFile section */
 		260C27742EEE054F00FD1227 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 260C27732EEE054F00FD1227 /* Security.framework */; };
 		260C27762EEE055A00FD1227 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 260C27752EEE055A00FD1227 /* SystemConfiguration.framework */; };
+		A0C0DE000000000000000002 /* libAuraCore.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A0C0DE000000000000000001 /* libAuraCore.a */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		A0C0DE000000000000000030 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 26CEE0BC2EEE01F4007D1C27 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A0C0DE000000000000000010;
+			remoteInfo = AuraCore;
+		};
 		26CEE0D22EEE01F6007D1C27 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 26CEE0BC2EEE01F4007D1C27 /* Project object */;
@@ -48,15 +56,24 @@
 		26CEE0C42EEE01F5007D1C27 /* Aura.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aura.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		26CEE0D12EEE01F6007D1C27 /* AuraTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AuraTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		26CEE0DB2EEE01F6007D1C27 /* AuraUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AuraUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0C0DE000000000000000001 /* libAuraCore.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libAuraCore.a; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		2A7E0C1B2F0A000100C0FFEE /* Exceptions for "Aura" folder in "Aura" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Generated/aura_core.swift,
 				Info.plist,
 			);
 			target = 26CEE0C32EEE01F4007D1C27 /* Aura */;
+		};
+		A0C0DE000000000000000003 /* Exceptions for "Aura" folder in "AuraCore" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Generated/aura_core.swift,
+			);
+			target = A0C0DE000000000000000010 /* AuraCore */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -78,6 +95,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				2A7E0C1B2F0A000100C0FFEE /* Exceptions for "Aura" folder in "Aura" target */,
+				A0C0DE000000000000000003 /* Exceptions for "Aura" folder in "AuraCore" target */,
 				263FF9DB2EF3E54900DFDBF7 /* Exceptions for "Aura" folder in "Embed Libraries" phase from "Aura" target */,
 			);
 			path = Aura;
@@ -100,8 +118,16 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A0C0DE000000000000000002 /* libAuraCore.a in Frameworks */,
 				260C27762EEE055A00FD1227 /* SystemConfiguration.framework in Frameworks */,
 				260C27742EEE054F00FD1227 /* Security.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A0C0DE000000000000000012 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -149,6 +175,7 @@
 				26CEE0C42EEE01F5007D1C27 /* Aura.app */,
 				26CEE0D12EEE01F6007D1C27 /* AuraTests.xctest */,
 				26CEE0DB2EEE01F6007D1C27 /* AuraUITests.xctest */,
+				A0C0DE000000000000000001 /* libAuraCore.a */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -160,7 +187,6 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 26CEE0E52EEE01F6007D1C27 /* Build configuration list for PBXNativeTarget "Aura" */;
 			buildPhases = (
-				263FF9F02EF5083F00DFDBF7 /* ShellScript */,
 				26CEE0C02EEE01F4007D1C27 /* Sources */,
 				26CEE0C12EEE01F4007D1C27 /* Frameworks */,
 				26CEE0C22EEE01F4007D1C27 /* Resources */,
@@ -169,6 +195,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				A0C0DE000000000000000031 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				26CEE0C62EEE01F5007D1C27 /* Aura */,
@@ -226,6 +253,25 @@
 			productReference = 26CEE0DB2EEE01F6007D1C27 /* AuraUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A0C0DE000000000000000010 /* AuraCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A0C0DE000000000000000020 /* Build configuration list for PBXNativeTarget "AuraCore" */;
+			buildPhases = (
+				263FF9F02EF5083F00DFDBF7 /* Build Rust Core */,
+				A0C0DE000000000000000011 /* Sources */,
+				A0C0DE000000000000000012 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AuraCore;
+			packageProductDependencies = (
+			);
+			productName = AuraCore;
+			productReference = A0C0DE000000000000000001 /* libAuraCore.a */;
+			productType = "com.apple.product-type.library.static";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -247,6 +293,9 @@
 						CreatedOnToolsVersion = 26.1.1;
 						TestTargetID = 26CEE0C32EEE01F4007D1C27;
 					};
+					A0C0DE000000000000000010 = {
+						CreatedOnToolsVersion = 27.2;
+					};
 				};
 			};
 			buildConfigurationList = 26CEE0BF2EEE01F4007D1C27 /* Build configuration list for PBXProject "Aura" */;
@@ -266,6 +315,7 @@
 				26CEE0C32EEE01F4007D1C27 /* Aura */,
 				26CEE0D02EEE01F6007D1C27 /* AuraTests */,
 				26CEE0DA2EEE01F6007D1C27 /* AuraUITests */,
+				A0C0DE000000000000000010 /* AuraCore */,
 			);
 		};
 /* End PBXProject section */
@@ -295,7 +345,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		263FF9F02EF5083F00DFDBF7 /* ShellScript */ = {
+		263FF9F02EF5083F00DFDBF7 /* Build Rust Core */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -305,6 +355,7 @@
 			);
 			inputPaths = (
 			);
+			name = "Build Rust Core";
 			outputFileListPaths = (
 			);
 			outputPaths = (
@@ -337,9 +388,21 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A0C0DE000000000000000011 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		A0C0DE000000000000000031 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A0C0DE000000000000000010 /* AuraCore */;
+			targetProxy = A0C0DE000000000000000030 /* PBXContainerItemProxy */;
+		};
 		26CEE0D32EEE01F6007D1C27 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 26CEE0C32EEE01F4007D1C27 /* Aura */;
@@ -519,9 +582,8 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				"SWIFT_INCLUDE_PATHS[arch=*]" = "$(PROJECT_DIR)/Aura/Generated";
-				"SWIFT_OBJC_BRIDGING_HEADER[arch=*]" = "Aura/Aura-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -574,9 +636,8 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				"SWIFT_INCLUDE_PATHS[arch=*]" = "$(PROJECT_DIR)/Aura/Generated";
-				SWIFT_OBJC_BRIDGING_HEADER = "Aura/Aura-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -600,7 +661,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				"SWIFT_INCLUDE_PATHS[arch=*]" = "$(PROJECT_DIR)/Aura/Generated";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Aura.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Aura";
 			};
 			name = Debug;
@@ -625,7 +686,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				"SWIFT_INCLUDE_PATHS[arch=*]" = "$(PROJECT_DIR)/Aura/Generated";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Aura.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Aura";
 			};
 			name = Release;
@@ -643,7 +704,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TEST_TARGET_NAME = Aura;
 			};
 			name = Debug;
@@ -661,8 +722,40 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.0;
 				TEST_TARGET_NAME = Aura;
+			};
+			name = Release;
+		};
+		A0C0DE000000000000000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/Aura/Generated";
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A0C0DE000000000000000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_INCLUDE_PATHS = "$(PROJECT_DIR)/Aura/Generated";
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
@@ -701,6 +794,15 @@
 			buildConfigurations = (
 				26CEE0EC2EEE01F6007D1C27 /* Debug */,
 				26CEE0ED2EEE01F6007D1C27 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A0C0DE000000000000000020 /* Build configuration list for PBXNativeTarget "AuraCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A0C0DE000000000000000021 /* Debug */,
+				A0C0DE000000000000000022 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

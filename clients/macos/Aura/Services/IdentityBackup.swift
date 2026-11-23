@@ -1,3 +1,4 @@
+import AuraCore
 import Foundation
 import UniformTypeIdentifiers
 
@@ -45,18 +46,17 @@ nonisolated enum IdentityBackup {
     /// Encrypt on a background thread: the key derivation (scrypt, N = 2^17)
     /// takes long enough to stall the UI.
     static func encrypt(secret: Data, displayName: String, passphrase: String) async throws -> Data {
-        let encrypt = CoreBackup.encrypt
-        return try await Task.detached(priority: .userInitiated) {
-            try encrypt(secret, displayName, passphrase)
+        try await Task.detached(priority: .userInitiated) {
+            try encryptIdentityBackup(identitySecret: secret, displayName: displayName, passphrase: passphrase)
         }.value
     }
 
     /// Decrypt on a background thread; see `encrypt`.
     static func decrypt(_ backup: Data, passphrase: String) async throws -> (secret: Data, displayName: String) {
-        let decrypt = CoreBackup.decrypt
-        return try await Task.detached(priority: .userInitiated) {
-            try decrypt(backup, passphrase)
+        let contents = try await Task.detached(priority: .userInitiated) {
+            try decryptIdentityBackup(backup: backup, passphrase: passphrase)
         }.value
+        return (contents.identitySecret, contents.displayName)
     }
 
     /// What to tell the user when a backup can't be made or opened.
@@ -81,30 +81,3 @@ nonisolated enum IdentityBackup {
     }
 }
 
-/// aura-core's backup functions with the main-actor isolation stripped.
-///
-/// `aura_core.swift` is compiled into this module, so it takes the module's
-/// default `@MainActor` isolation — but the functions only marshal bytes into
-/// Rust and touch no main-actor state. Calling them through the main actor
-/// would run scrypt on the main thread; calling them directly from a
-/// detached task is an isolation error. The cast keeps the call off the main
-/// thread without either.
-private nonisolated enum CoreBackup {
-    typealias Encrypt = @Sendable (Data, String, String) throws -> Data
-    typealias Decrypt = @Sendable (Data, String) throws -> (secret: Data, displayName: String)
-
-    static var encrypt: Encrypt {
-        let isolated: @MainActor (Data, String, String) throws -> Data = { secret, name, passphrase in
-            try encryptIdentityBackup(identitySecret: secret, displayName: name, passphrase: passphrase)
-        }
-        return unsafeBitCast(isolated, to: Encrypt.self)
-    }
-
-    static var decrypt: Decrypt {
-        let isolated: @MainActor (Data, String) throws -> (secret: Data, displayName: String) = { backup, passphrase in
-            let contents = try decryptIdentityBackup(backup: backup, passphrase: passphrase)
-            return (contents.identitySecret, contents.displayName)
-        }
-        return unsafeBitCast(isolated, to: Decrypt.self)
-    }
-}

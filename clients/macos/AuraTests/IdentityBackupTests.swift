@@ -1,4 +1,5 @@
 import XCTest
+import AuraCore
 @testable import Aura
 
 /// Encrypted identity backups through aura-core. The key derivation is

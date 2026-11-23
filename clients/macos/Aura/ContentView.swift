@@ -3,6 +3,7 @@
 //  Aura
 //
 
+import AuraCore
 import SwiftUI
 import Combine
 import UniformTypeIdentifiers
@@ -788,7 +789,7 @@ struct ContentView: View {
     /// Id of the empty row after the last message, and the scroll view's
     /// coordinate space: together they tell whether the chat is at its end.
     private static let chatBottomId = "chat_bottom"
-    private static let chatScrollSpace = "chatScroll"
+    nonisolated private static let chatScrollSpace = "chatScroll"
 
     private func chatPanel(client: QuicNetworkClient, messages: [ChatMessage]) -> some View {
         VStack(spacing: 0) {
@@ -1083,9 +1084,7 @@ struct ContentView: View {
                     .sink { [weak audioCapture] isActive in
                         if isActive {
                             audioCapture?.start { pcmData in
-                                Task {
-                                    try? await client.sendAudioDatagram(pcmData)
-                                }
+                                client.sendAudioFrame(pcmData)
                             }
                         } else {
                             audioCapture?.stop()
@@ -1106,9 +1105,7 @@ struct ContentView: View {
                 client.isMuted = true
             } else {
                 audioCapture.start { pcmData in
-                    Task {
-                        try? await client.sendAudioDatagram(pcmData)
-                    }
+                    client.sendAudioFrame(pcmData)
                 }
                 isMicEnabled = true
                 client.isMuted = false
@@ -1124,9 +1121,7 @@ struct ContentView: View {
                 client.isMuted = true
             } else {
                 audioCapture.start { pcmData in
-                    Task {
-                        try? await client.sendAudioDatagram(pcmData)
-                    }
+                    client.sendAudioFrame(pcmData)
                 }
                 isMicEnabled = true
                 client.isMuted = false

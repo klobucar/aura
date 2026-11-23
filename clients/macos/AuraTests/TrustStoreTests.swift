@@ -10,6 +10,7 @@ import CryptoKit
 /// The property worth defending here is that trust attaches to a *key*, not to
 /// a name — otherwise a takeover inherits the trust of whoever held the name
 /// before.
+@MainActor
 final class TrustStoreTests: XCTestCase {
 
     private final class FakeClock {

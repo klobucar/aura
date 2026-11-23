@@ -3,6 +3,7 @@
 //  Aura
 //
 
+import AuraCore
 import SwiftUI
 
 @main

@@ -4,7 +4,7 @@ This document explains how to configure Xcode to automatically build the Rust co
 
 ## Prerequisites
 
-- Xcode 15+
+- Xcode 26+ (every target builds in the Swift 6 language mode)
 - Rust toolchain (`rustup`)
 - The `aarch64-apple-darwin` target: `rustup target add aarch64-apple-darwin`
 
@@ -12,8 +12,11 @@ This document explains how to configure Xcode to automatically build the Rust co
 
 ## Step 1: Add Run Script Build Phase
 
+The project already has this phase, in the **AuraCore** target (see Step 4).
+To recreate it:
+
 1. Open **Aura.xcodeproj** in Xcode
-2. Select the **Aura** target
+2. Select the **AuraCore** target
 3. Go to **Build Phases** tab
 4. Click **+** → **New Run Script Phase**
 5. **Drag it ABOVE** "Compile Sources" phase (this is critical!)
@@ -70,26 +73,28 @@ xattr -cr /path/to/Aura.app
 
 ---
 
-## Step 4: Update Bridging Header
+## Step 4: The AuraCore Module
 
-The bridging header at `Aura/Aura-Bridging-Header.h` should import the UniFFI C header:
+The generated `Aura/Generated/aura_core.swift` is compiled by the **AuraCore**
+static library target, not by the app. The app target defaults to main-actor
+isolation; AuraCore uses Swift's default (nonisolated), so the Rust functions
+and objects can be called from any thread or task. The Rust core is
+thread-safe and its UniFFI objects are `Sendable`.
 
-```c
-#import "Generated/aura_coreFFI.h"
-```
+AuraCore imports the C side through `Generated/module.modulemap`
+(`aura_coreFFI`), found via **Swift Include Paths** (`$(PROJECT_DIR)/Aura/Generated`).
+The app and test targets need the same include path, because importing
+AuraCore also loads `aura_coreFFI`. There is no bridging header.
 
 ---
 
 ## Step 5: Import in Swift
 
-In any Swift file, import the generated module:
+In any Swift file that uses aura-core's types or functions:
 
 ```swift
-import aura_core  // If you added the module map
-// OR just use the types directly - they're in Generated/aura_core.swift
+import AuraCore
 ```
-
-The `AuraBridge.swift` wrapper is already set up in `Aura/Core/`.
 
 ---
 
@@ -138,7 +143,7 @@ If the build fails only for `x86_64` with a message about `audiopus_sys` or `Opu
 
 ### Sandbox: cp deny(1) file-write-data
 This happens on Xcode 15+ because of a new security feature "User Script Sandboxing".
-1. Go to **Build Settings** for the Aura target.
+1. Go to **Build Settings** for the AuraCore target (it runs the script).
 2. Search for **Enable User Script Sandboxing**.
 3. Set it to **No**.
 
