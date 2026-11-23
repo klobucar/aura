@@ -40,8 +40,16 @@ export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # terminal or CI shell doesn't. The `cc` crate re-runs C builds (opus16-sys)
 # when any of them changes, so a build from the command line followed by one
 # from Xcode compiled the C code twice. Clearing them gives both the same
-# environment; `cc` then finds the SDK via xcrun, which follows xcode-select.
+# environment.
 unset SDKROOT DEVELOPER_DIR TOOLCHAINS
+
+# ...but then set SDKROOT again, to the same value in both places. Xcode puts
+# its toolchain's bare `clang` first on PATH, and without SDKROOT that clang
+# has no SDK: any C file it has to compile fails on <math.h>. Builds only
+# worked when a terminal run had already compiled the C code. xcrun follows
+# xcode-select now that DEVELOPER_DIR is gone, so both get the same path.
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export SDKROOT
 
 echo "Environment Diagnostics:"
 echo "  PATH: $PATH"
