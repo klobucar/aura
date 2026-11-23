@@ -638,14 +638,49 @@ impl Database {
     }
 
     /// Delete a user and their profile.
+    /// Delete an account and every row that refers to it, atomically.
+    ///
+    /// Foreign keys are enforced, and `create_user` always writes a
+    /// `tofu_identities` row, so deleting only the profile, admin and user rows
+    /// failed for every account. DM conversations the user took part in go
+    /// with them (nothing left in them can be delivered); admins they promoted
+    /// keep their rights and simply lose the "granted by" link.
     pub fn delete_user(&self, user_uuid: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM user_profiles WHERE user_uuid = ?",
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM dm_messages
+             WHERE sender_uuid = ?1
+                OR dm_group_uuid IN (SELECT dm_group_uuid FROM dm_groups
+                                     WHERE user1_uuid = ?1 OR user2_uuid = ?1)",
             params![user_uuid],
         )?;
-        conn.execute("DELETE FROM admins WHERE user_uuid = ?", params![user_uuid])?;
-        conn.execute("DELETE FROM users WHERE user_uuid = ?", params![user_uuid])?;
+        tx.execute(
+            "DELETE FROM dm_groups WHERE user1_uuid = ?1 OR user2_uuid = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute(
+            "DELETE FROM display_name_history WHERE user_uuid = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute(
+            "DELETE FROM tofu_identities WHERE user_uuid = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute(
+            "UPDATE admins SET granted_by = NULL WHERE granted_by = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute(
+            "DELETE FROM admins WHERE user_uuid = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute(
+            "DELETE FROM user_profiles WHERE user_uuid = ?1",
+            params![user_uuid],
+        )?;
+        tx.execute("DELETE FROM users WHERE user_uuid = ?1", params![user_uuid])?;
+        tx.commit()?;
         Ok(())
     }
 }
@@ -653,6 +688,61 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_user_removes_every_referencing_row() {
+        let db = Database::open_in_memory().unwrap();
+        let alice = db.create_user(&[0x01u8; 32], None, "Alice").unwrap();
+        let bob = db.create_user(&[0x02u8; 32], None, "Bob").unwrap();
+
+        // Everything that can point at Alice: her profile, her admin row, an
+        // admin she promoted, a rename, and a DM conversation with Bob.
+        db.upsert_user_profile(&alice, "hi", &[1, 2, 3], &[], &[])
+            .unwrap();
+        db.grant_admin(&alice, &AdminPermissions::full(), None)
+            .unwrap();
+        db.grant_admin(&bob, &AdminPermissions::full(), Some(&alice))
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO display_name_history (user_uuid, old_name, new_name, changed_at)
+                 VALUES (?1, 'Al', 'Alice', 0)",
+                params![alice],
+            )
+            .unwrap();
+            let (u1, u2) = if alice < bob {
+                (&alice, &bob)
+            } else {
+                (&bob, &alice)
+            };
+            conn.execute(
+                "INSERT INTO dm_groups (dm_group_uuid, user1_uuid, user2_uuid, created_at)
+                 VALUES ('dm1', ?1, ?2, 0)",
+                params![u1, u2],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO dm_messages (message_uuid, dm_group_uuid, sender_uuid, timestamp, encrypted_content)
+                 VALUES ('m1', 'dm1', ?1, 0, x'00')",
+                params![bob],
+            )
+            .unwrap();
+        }
+
+        db.delete_user(&alice)
+            .expect("delete must not trip a foreign key");
+
+        assert!(db.find_user_by_uuid(&alice).unwrap().is_none());
+        assert!(db.get_user_profile(&alice).unwrap().is_none());
+        assert!(!db.is_admin(&alice).unwrap());
+        // Bob keeps his admin rights; only the link to Alice goes.
+        assert!(db.is_admin(&bob).unwrap());
+        assert!(db.find_user_by_uuid(&bob).unwrap().is_some());
+        // The name is free again.
+        db.create_user(&[0x03u8; 32], None, "Alice")
+            .expect("the deleted user's name can be registered again");
+    }
 
     #[test]
     fn test_create_and_find_user() {
