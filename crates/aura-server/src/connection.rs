@@ -2,9 +2,10 @@
 //!
 //! Handles incoming QUIC connections, authentication, and stream routing.
 
-use crate::auth::AuthService;
-use crate::rate_limit::HandshakeRateLimiter;
-use crate::state::{ServerState, ServiceMessage};
+use crate::auth::{AuthError, AuthService};
+use crate::db::AdminPermissions;
+use crate::rate_limit::{HandshakeRateLimiter, PingRateLimiter};
+use crate::state::{ModerationError, ServerState, ServiceMessage};
 use crate::tls;
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, BytesMut};
@@ -23,10 +24,20 @@ use tracing::field::Empty;
 use tracing::{debug, error, info, warn, Instrument as _};
 
 // Protocol message types
+//
+// Every control-stream message except the bare 0x00 keepalive and the
+// ServerHello is framed as [type u8][u32 LE length][payload].
 // const MSG_CHALLENGE_REQUEST: u8 = 0x01;
 const MSG_CHALLENGE_RESPONSE: u8 = 0x02;
 const MSG_AUTH_REQUEST: u8 = 0x03;
 const MSG_AUTH_RESPONSE: u8 = 0x04;
+/// Client → server RTT probe on the control stream, for clients that can't
+/// send QUIC datagrams: the payload is an 8-byte nonce.
+const MSG_PING: u8 = 0x05;
+/// Server → client reply to `MSG_PING`, carrying the same nonce.
+const MSG_PONG: u8 = 0x06;
+/// Length of a `MSG_PING` / `MSG_PONG` payload.
+const PING_NONCE_LEN: usize = 8;
 const MSG_JOIN_CHANNEL: u8 = 0x10;
 // const MSG_AUDIO_STREAM: u8 = 0x20;
 const MSG_TEXT_PACKET: u8 = 0x30;
@@ -39,6 +50,22 @@ const MSG_CHANNEL_DELETED: u8 = 0x47;
 const MSG_DELETE_CHANNEL: u8 = 0x43;
 const MSG_DELETE_USER: u8 = 0x44;
 const MSG_UPDATE_STATUS: u8 = 0x45;
+
+// Moderation. Each request is answered on its own message type.
+/// ListUsersRequest → ListUsersResponse (any admin).
+const MSG_LIST_USERS: u8 = 0x48;
+/// VerifyUserRequest → AdminResponse (verify_users).
+const MSG_VERIFY_USER: u8 = 0x49;
+/// BanUserRequest → AdminResponse (ban_users). Bans and unbans.
+const MSG_BAN_USER: u8 = 0x4A;
+/// GrantAdminRequest → AdminResponse (grant_admin).
+const MSG_GRANT_ADMIN: u8 = 0x4B;
+/// KickUserRequest → AdminResponse (ban_users).
+const MSG_KICK_USER: u8 = 0x4C;
+
+/// QUIC application error code the server closes a connection with when the
+/// account has just been banned.
+const CLOSE_BANNED: u32 = 0x01;
 
 // MLS Protocol messages
 const MSG_MLS_JOIN: u8 = 0x50; // Client sends key package on channel join
@@ -64,6 +91,9 @@ const MAX_AUTH_REQUEST_SIZE: usize = 16 * 1024;
 // Hard ceiling on how long a single control frame body may take to arrive.
 // Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a refused login waits for the client to acknowledge the
+/// AuthResponse that says why, before the connection is dropped.
+const REFUSAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// QUIC server for handling client connections.
 pub struct QuicServer {
@@ -363,6 +393,11 @@ fn message_type_name(msg_type: u8) -> &'static str {
         MSG_DELETE_CHANNEL => "delete_channel",
         MSG_DELETE_USER => "delete_user",
         MSG_UPDATE_STATUS => "update_status",
+        MSG_LIST_USERS => "list_users",
+        MSG_VERIFY_USER => "verify_user",
+        MSG_BAN_USER => "ban_user",
+        MSG_GRANT_ADMIN => "grant_admin",
+        MSG_KICK_USER => "kick_user",
         MSG_MLS_JOIN => "mls_join",
         MSG_MLS_COMMIT_WELCOME => "mls_commit_welcome",
         MSG_MLS_RATCHET_COMMIT => "mls_ratchet_commit",
@@ -420,6 +455,8 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
     // Reader handle for datagrams (cloned)
     let datagram_conn = conn.clone();
 
+    let ping_limiter = PingRateLimiter::new();
+
     // Initialize context
     let mut ctx = ConnectionContext {
         conn, // Move original connection handle
@@ -474,6 +511,15 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             debug!("[{}] Keepalive ping received", remote);
                             continue;
                         }
+                        // RTT probes skip the per-message span and metrics:
+                        // they arrive every few seconds from every client.
+                        if type_byte == MSG_PING {
+                            if let Err(e) = ctx.handle_ping(&ping_limiter).await {
+                                warn!("[{}] Bad ping: {}", remote, e);
+                                break;
+                            }
+                            continue;
+                        }
 
                         // Root span per message; its type is the only detail.
                         let span = tracing::info_span!(
@@ -507,9 +553,13 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 
             // 3. Service internal messages (relay)
             Some(msg) = rx.recv() => {
-                if let Err(e) = ctx.handle_service_message(msg).await {
-                    warn!("[{}] Error handling service message: {}", remote, e);
-                    break;
+                match ctx.handle_service_message(msg).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => {
+                        warn!("[{}] Error handling service message: {}", remote, e);
+                        break;
+                    }
                 }
             }
 
@@ -526,15 +576,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
     }
 
     // Cleanup
-    if let Some(channel_id) = ctx.current_channel_id.clone() {
-        ctx.state
-            .remove_from_voice_group(channel_id.clone(), session_id)
-            .await;
-        ctx.state
-            .remove_from_text_group(channel_id.clone(), session_id)
-            .await;
-        ctx.state.broadcast_user_left(channel_id, session_id).await;
-    }
+    ctx.leave_current_channel().await;
 
     // Log bandwidth before removing session
     if let Some(sess) = state.sessions.get(&session_id) {
@@ -705,6 +747,15 @@ async fn authenticate_client_inner(
     frame.put_slice(&payload);
     send.write_all(&frame).await?;
 
+    if outcome.is_err() {
+        // A refused login drops the connection, which would discard the
+        // response if it hasn't been delivered yet, and the client would see
+        // a lost connection instead of why (banned, wrong password, ...).
+        // Wait for the client to acknowledge it, briefly.
+        let _ = send.finish();
+        let _ = timeout(REFUSAL_DELIVERY_TIMEOUT, send.stopped()).await;
+    }
+
     let (session_id, user_uuid, rx) = outcome?;
     Ok((session_id, user_uuid, send, recv, rx))
 }
@@ -734,17 +785,30 @@ impl ConnectionContext {
 
                 info!("[{}] Joining channel {}", self.remote, channel_id);
 
-                // Leave previous channel if any
-                if let Some(old_id) = self.current_channel_id.clone() {
-                    self.state
-                        .remove_from_voice_group(old_id.clone(), self.session_id)
-                        .await;
-                    self.state
-                        .remove_from_text_group(old_id.clone(), self.session_id)
-                        .await;
-                    self.state
-                        .broadcast_user_left(old_id, self.session_id)
-                        .await;
+                // Leave previous channel if any. A join is a move, and the
+                // client has already moved on locally, even if the channel
+                // it asked for turns out not to exist.
+                self.leave_current_channel().await;
+
+                if !self.state.channel_exists(&channel_id) {
+                    // Typically a client reconnecting into a channel that was
+                    // deleted while it was away. Joining would leave it in a
+                    // group nobody can see and let its MLS join create one.
+                    // Answer the way clients already handle a deletion: point
+                    // them at the lobby.
+                    info!(
+                        "[{}] Refused join to unknown channel {}",
+                        self.remote, channel_id
+                    );
+                    let notice = aura_protocol::ChannelDeleted {
+                        channel_id,
+                        fallback_channel_id: self.state.lobby_channel_id().unwrap_or_default(),
+                        reason: aura_protocol::ChannelRemovalReason::NotFound as i32,
+                        detail: String::new(),
+                    };
+                    self.send_proto_response(MSG_CHANNEL_DELETED, notice)
+                        .await?;
+                    return Ok(true);
                 }
 
                 // Join new channel
@@ -827,12 +891,12 @@ impl ConnectionContext {
                 let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::CreateChannelRequest::decode(&buf[..])?;
 
-                // Only admins can create channels
-                if !self.state.db.is_admin(&self.user_uuid)? {
+                // Only admins with manage_channels can create channels
+                if let Some(denied) = self.channel_permission_error()? {
                     let resp = aura_protocol::CreateChannelResponse {
                         success: false,
                         channel_id: String::new(),
-                        error_message: "Admin required".into(),
+                        error_message: denied.into(),
                     };
                     self.send_proto_response(0x40, resp).await?;
                     return Ok(true);
@@ -865,11 +929,11 @@ impl ConnectionContext {
                 let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::UpdateChannelRequest::decode(&buf[..])?;
 
-                // Only admins can update channels
-                if !self.state.db.is_admin(&self.user_uuid)? {
+                // Only admins with manage_channels can update channels
+                if let Some(denied) = self.channel_permission_error()? {
                     let resp = aura_protocol::MetadataUpdateResponse {
                         success: false,
-                        error_message: "Admin required".into(),
+                        error_message: denied.into(),
                     };
                     self.send_proto_response(0x41, resp).await?;
                     return Ok(true);
@@ -943,11 +1007,11 @@ impl ConnectionContext {
                 let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::DeleteChannelRequest::decode(&buf[..])?;
 
-                // Only admins can delete channels
-                if !self.state.db.is_admin(&self.user_uuid)? {
+                // Only admins with manage_channels can delete channels
+                if let Some(denied) = self.channel_permission_error()? {
                     let resp = aura_protocol::AdminResponse {
                         success: false,
-                        error_message: "Admin required".into(),
+                        error_message: denied.into(),
                     };
                     self.send_proto_response(MSG_DELETE_CHANNEL, resp).await?;
                     return Ok(true);
@@ -974,11 +1038,16 @@ impl ConnectionContext {
                 let buf = self.read_frame_payload().await?;
                 let req = aura_protocol::DeleteUserRequest::decode(&buf[..])?;
 
-                // Only admins or the user themselves can delete their profile
-                if self.user_uuid != req.user_uuid && !self.state.db.is_admin(&self.user_uuid)? {
+                // Users may delete their own account; deleting someone
+                // else's is moderation (ban_users, and the same rules as a ban).
+                if let Err(e) = self
+                    .state
+                    .auth
+                    .authorize_delete_user(&self.user_uuid, &req.user_uuid)
+                {
                     let resp = aura_protocol::AdminResponse {
                         success: false,
-                        error_message: "Permission denied".into(),
+                        error_message: e.client_message(),
                     };
                     self.send_proto_response(MSG_DELETE_USER, resp).await?;
                     return Ok(true);
@@ -1018,6 +1087,98 @@ impl ConnectionContext {
                     .broadcast_user_status(req.session_id, req.is_muted, req.is_deafened)
                     .await;
             }
+            // Moderation. The requests' `session_token` fields are ignored:
+            // like every other admin operation here, these are authorised
+            // with the identity this connection logged in as, and the
+            // permissions that account holds now.
+            MSG_LIST_USERS => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::ListUsersRequest::decode(&buf[..])?;
+                let resp = self
+                    .state
+                    .list_users(&self.user_uuid, req.offset, req.limit)
+                    .unwrap_or_else(|e| {
+                        info!("[{}] List users refused: {}", self.remote, e);
+                        aura_protocol::ListUsersResponse {
+                            success: false,
+                            error_message: e.client_message(),
+                            ..Default::default()
+                        }
+                    });
+                self.send_proto_response(MSG_LIST_USERS, resp).await?;
+            }
+            MSG_VERIFY_USER => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::VerifyUserRequest::decode(&buf[..])?;
+                let result = self
+                    .state
+                    .auth
+                    .verify_user(&self.user_uuid, &req.target_user_uuid);
+                self.send_admin_response(
+                    MSG_VERIFY_USER,
+                    "Verify user",
+                    result,
+                    AuthError::client_message,
+                )
+                .await?;
+            }
+            MSG_BAN_USER => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::BanUserRequest::decode(&buf[..])?;
+                let result =
+                    self.state
+                        .set_user_banned(&self.user_uuid, &req.target_user_uuid, req.banned);
+                if result.is_ok() && req.banned {
+                    info!(
+                        "[{}] Ban of {} gave reason {:?}",
+                        self.remote, req.target_user_uuid, req.reason
+                    );
+                }
+                self.send_admin_response(
+                    MSG_BAN_USER,
+                    "Ban user",
+                    result,
+                    AuthError::client_message,
+                )
+                .await?;
+            }
+            MSG_GRANT_ADMIN => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::GrantAdminRequest::decode(&buf[..])?;
+                let permissions = AdminPermissions {
+                    verify_users: req.verify_users,
+                    ban_users: req.ban_users,
+                    grant_admin: req.grant_admin,
+                    manage_channels: req.manage_channels,
+                };
+                let result = self.state.auth.grant_admin(
+                    &self.user_uuid,
+                    &req.target_user_uuid,
+                    &permissions,
+                );
+                self.send_admin_response(
+                    MSG_GRANT_ADMIN,
+                    "Grant admin",
+                    result,
+                    AuthError::client_message,
+                )
+                .await?;
+            }
+            MSG_KICK_USER => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::KickUserRequest::decode(&buf[..])?;
+                let result = self
+                    .state
+                    .kick_user(&self.user_uuid, &req.target_user_uuid, &req.reason)
+                    .map(|_| ());
+                self.send_admin_response(
+                    MSG_KICK_USER,
+                    "Kick user",
+                    result,
+                    ModerationError::client_message,
+                )
+                .await?;
+            }
             MSG_MLS_JOIN => {
                 let buf = self.read_frame_payload().await?;
                 let envelope = aura_protocol::MlsEnvelope::decode(&buf[..])?;
@@ -1032,6 +1193,23 @@ impl ConnectionContext {
                     aura_protocol::mls_envelope::Content::KeyPackage(kp) => kp,
                     _ => return Err(anyhow!("MLS join envelope must contain key_package")),
                 };
+
+                // Key packages are only taken for the channel this session is
+                // in. Clients send them right after JoinChannel, so one for
+                // any other channel follows a refused join (the channel
+                // doesn't exist) or raced the channel's deletion, and
+                // handling it would bring the channel's MLS group back.
+                let in_channel = self.current_channel_id.as_deref().is_some_and(|current| {
+                    aura_protocol::make_mls_group_id(current, is_voice)
+                        == aura_protocol::make_mls_group_id(&channel_id, is_voice)
+                });
+                if !in_channel {
+                    warn!(
+                        "[{}] Ignoring MLS join for channel {}, which session {} is not in",
+                        self.remote, channel_id, self.session_id
+                    );
+                    return Ok(true);
+                }
 
                 info!(
                     "[{}] MLS join for {} channel {}",
@@ -1113,14 +1291,142 @@ impl ConnectionContext {
                     .await;
             }
             _ => {
-                // Unknown message
-                warn!("[{}] Unknown message type: 0x{:02x}", self.remote, msg_type);
+                // Unknown message. Every message but the 0x00 keepalive is
+                // framed, so skip the whole frame: reading on from the length
+                // prefix would take its bytes for message types and lose
+                // sync with the client. Skipping also lets newer clients send
+                // messages this server doesn't know.
+                let skipped = self.skip_frame_payload(MAX_MLS_PACKET_SIZE).await?;
+                warn!(
+                    "[{}] Skipped unknown message type 0x{:02x} ({} bytes)",
+                    self.remote, msg_type, skipped
+                );
             }
         }
         Ok(true)
     }
 
-    async fn handle_service_message(&mut self, msg: ServiceMessage) -> Result<()> {
+    /// Leave the channel this session is in, if any: drop it from the
+    /// channel's voice and text groups and tell everyone it left.
+    async fn leave_current_channel(&mut self) {
+        if let Some(channel_id) = self.current_channel_id.take() {
+            self.state
+                .remove_from_voice_group(channel_id.clone(), self.session_id)
+                .await;
+            self.state
+                .remove_from_text_group(channel_id.clone(), self.session_id)
+                .await;
+            self.state
+                .broadcast_user_left(channel_id, self.session_id)
+                .await;
+        }
+    }
+
+    /// Why this connection's user may not create, edit or delete channels,
+    /// or `None` if they may (an admin holding `manage_channels`). Non-admins
+    /// get "Admin required", which the macOS client takes as its cue to hide
+    /// its admin controls.
+    fn channel_permission_error(&self) -> Result<Option<&'static str>> {
+        Ok(
+            match self.state.db.get_admin_permissions(&self.user_uuid)? {
+                None => Some("Admin required"),
+                Some(p) if !p.manage_channels => Some("Channel management permission required"),
+                Some(_) => None,
+            },
+        )
+    }
+
+    /// Answer a control-stream ping: `[MSG_PING][u32 LE 8][nonce]` comes in,
+    /// `[MSG_PONG][u32 LE 8][nonce]` goes back. The reply is built in place
+    /// in a stack buffer. Pings over the rate limit are read and dropped.
+    async fn handle_ping(&mut self, limiter: &PingRateLimiter) -> Result<()> {
+        let mut frame = [0u8; 5 + PING_NONCE_LEN];
+        frame[0] = MSG_PONG;
+        timeout(FRAME_READ_TIMEOUT, self.recv.read_exact(&mut frame[1..5]))
+            .await
+            .map_err(|_| anyhow!("Ping read timed out"))??;
+        let len = u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        if len != PING_NONCE_LEN {
+            return Err(anyhow!(
+                "Ping must carry a {}-byte nonce, got {} bytes",
+                PING_NONCE_LEN,
+                len
+            ));
+        }
+        timeout(FRAME_READ_TIMEOUT, self.recv.read_exact(&mut frame[5..]))
+            .await
+            .map_err(|_| anyhow!("Ping read timed out"))??;
+
+        if limiter.check() {
+            self.send.write_all(&frame).await?;
+            self.send.flush().await?;
+        } else {
+            debug!("[{}] Ping over the rate limit dropped", self.remote);
+        }
+        Ok(())
+    }
+
+    /// Read the rest of a frame (`[u32 LE length][payload]`) and discard it,
+    /// without buffering it. Returns the payload length.
+    async fn skip_frame_payload(&mut self, max_len: usize) -> Result<usize> {
+        let mut len_buf = [0u8; 4];
+        self.recv.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > max_len {
+            return Err(anyhow!(
+                "Incoming frame too large: {} bytes (max {})",
+                len,
+                max_len
+            ));
+        }
+
+        let skipped = timeout(
+            FRAME_READ_TIMEOUT,
+            tokio::io::copy(
+                &mut (&mut self.recv).take(len as u64),
+                &mut tokio::io::sink(),
+            ),
+        )
+        .await
+        .map_err(|_| anyhow!("Frame read timed out after {:?}", FRAME_READ_TIMEOUT))??;
+        if skipped != len as u64 {
+            return Err(anyhow!(
+                "Incomplete frame: got {} of {} bytes",
+                skipped,
+                len
+            ));
+        }
+        Ok(len)
+    }
+
+    /// Reply to a moderation request with an `AdminResponse`. A refusal is
+    /// logged in full; the client gets `client_message` of it.
+    async fn send_admin_response<E: std::fmt::Display>(
+        &mut self,
+        msg_type: u8,
+        operation: &str,
+        result: std::result::Result<(), E>,
+        client_message: fn(&E) -> String,
+    ) -> Result<()> {
+        let resp = match result {
+            Ok(()) => aura_protocol::AdminResponse {
+                success: true,
+                error_message: String::new(),
+            },
+            Err(e) => {
+                info!("[{}] {} refused: {}", self.remote, operation, e);
+                aura_protocol::AdminResponse {
+                    success: false,
+                    error_message: client_message(&e),
+                }
+            }
+        };
+        self.send_proto_response(msg_type, resp).await
+    }
+
+    /// Act on a message from the rest of the server. `Ok(false)` ends the
+    /// connection.
+    async fn handle_service_message(&mut self, msg: ServiceMessage) -> Result<bool> {
         match msg {
             ServiceMessage::RelayAudio(packet) => {
                 // Use QUIC datagrams for unreliable, low-latency audio
@@ -1288,6 +1594,8 @@ impl ConnectionContext {
                 let notice = aura_protocol::ChannelDeleted {
                     channel_id,
                     fallback_channel_id,
+                    reason: aura_protocol::ChannelRemovalReason::Deleted as i32,
+                    detail: String::new(),
                 };
                 self.send_proto_response(MSG_CHANNEL_DELETED, notice)
                     .await?;
@@ -1328,8 +1636,38 @@ impl ConnectionContext {
                 };
                 self.send_proto_response(MSG_MLS_SYNC_MEMBERS, sync).await?;
             }
+            ServiceMessage::Kicked {
+                channel_id,
+                fallback_channel_id,
+                reason,
+            } => {
+                // The client may have moved on by itself since the kick.
+                if self.current_channel_id.as_deref() == Some(channel_id.as_str()) {
+                    info!(
+                        "[{}] Session {} kicked from channel {}",
+                        self.remote, self.session_id, channel_id
+                    );
+                    self.leave_current_channel().await;
+                    let notice = aura_protocol::ChannelDeleted {
+                        channel_id,
+                        fallback_channel_id,
+                        reason: aura_protocol::ChannelRemovalReason::Kicked as i32,
+                        detail: reason,
+                    };
+                    self.send_proto_response(MSG_CHANNEL_DELETED, notice)
+                        .await?;
+                }
+            }
+            ServiceMessage::Banned => {
+                info!(
+                    "[{}] Closing session {}: account banned",
+                    self.remote, self.session_id
+                );
+                self.conn.close(CLOSE_BANNED.into(), b"banned");
+                return Ok(false);
+            }
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn read_frame_payload(&mut self) -> Result<Vec<u8>> {
@@ -1680,5 +2018,734 @@ mod tests {
 
         assert_eq!(m.logins_with("ok"), ok0 + 1);
         assert_eq!(m.logins_with("invalid_password"), pw0 + 1);
+    }
+
+    // --- End to end: the real connection handler over QUIC ---
+
+    /// A server running `handle_connection` for every client, on a loopback
+    /// port with a throwaway certificate.
+    struct TestServer {
+        addr: SocketAddr,
+        cert: CertificateDer<'static>,
+        accept: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.accept.abort();
+        }
+    }
+
+    fn start_server(state: Arc<ServerState>) -> Result<TestServer> {
+        crate::tls::install_default_provider();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let cert_der = CertificateDer::from(cert.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            cert.signing_key.serialize_der(),
+        ));
+        let server_config = QuicServer::quic_server_config_from_cert(vec![cert_der.clone()], key)?;
+        let endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse()?)?;
+        let addr = endpoint.local_addr()?;
+        let accept = tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    if let Ok(conn) = incoming.await {
+                        let _ = handle_connection(conn, state).await;
+                    }
+                });
+            }
+        });
+        Ok(TestServer {
+            addr,
+            cert: cert_der,
+            accept,
+        })
+    }
+
+    /// One client's control stream, after its login attempt.
+    struct TestClient {
+        _endpoint: Endpoint,
+        conn: Connection,
+        send: SendStream,
+        recv: RecvStream,
+        auth: aura_protocol::AuthResponse,
+    }
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    impl TestClient {
+        /// Connect and log in as `name`, the way a client does.
+        async fn login(
+            server: &TestServer,
+            id: &aura_identity::IdentitySecret,
+            name: &str,
+        ) -> Result<Self> {
+            use aura_identity::{auth_transcript, Purpose};
+
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(server.cert.clone())?;
+            let mut client_crypto =
+                rustls::ClientConfig::builder_with_provider(Arc::new(tls::crypto_provider()))
+                    .with_protocol_versions(&[&rustls::version::TLS13])?
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+            client_crypto.alpn_protocols = vec![tls::ALPN.to_vec()];
+            let mut endpoint = Endpoint::client("127.0.0.1:0".parse()?)?;
+            endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
+            )));
+            let conn = endpoint.connect(server.addr, "localhost")?.await?;
+            let (send, mut recv) = conn.accept_bi().await?;
+
+            let mut hello = [0u8; 33];
+            recv.read_exact(&mut hello).await?;
+            let challenge: [u8; 32] = hello[1..].try_into()?;
+            let pk = id.public_key();
+            let sig = id.sign(Purpose::Auth, &auth_transcript(&challenge, name, &pk));
+            let request = aura_protocol::AuthRequest {
+                identity_public_key: pk.as_bytes().to_vec(),
+                display_name: name.into(),
+                signature: sig.as_bytes().to_vec(),
+                server_password: None,
+                challenge: challenge.to_vec(),
+            };
+            let mut client = Self {
+                _endpoint: endpoint,
+                conn,
+                send,
+                recv,
+                auth: Default::default(),
+            };
+            client.send_proto(MSG_AUTH_REQUEST, request).await?;
+            client.auth = client.expect(MSG_AUTH_RESPONSE).await?;
+            Ok(client)
+        }
+
+        async fn send_frame(&mut self, msg_type: u8, payload: &[u8]) -> Result<()> {
+            self.send.write_all(&[msg_type]).await?;
+            self.send
+                .write_all(&(payload.len() as u32).to_le_bytes())
+                .await?;
+            self.send.write_all(payload).await?;
+            Ok(())
+        }
+
+        async fn send_proto(&mut self, msg_type: u8, msg: impl Message) -> Result<()> {
+            self.send_frame(msg_type, &msg.encode_to_vec()).await
+        }
+
+        /// The next frame from the server, whatever its type.
+        async fn read_frame(&mut self) -> Result<(u8, Vec<u8>)> {
+            timeout(TEST_TIMEOUT, async {
+                let msg_type = self.recv.read_u8().await?;
+                let len = self.recv.read_u32_le().await? as usize;
+                let mut payload = vec![0u8; len];
+                self.recv.read_exact(&mut payload).await?;
+                Ok((msg_type, payload))
+            })
+            .await
+            .map_err(|_| anyhow!("no frame from the server within {TEST_TIMEOUT:?}"))?
+        }
+
+        /// The next frame of `msg_type`, skipping anything else (snapshots,
+        /// presence) the server sends meanwhile.
+        async fn expect<M: Message + Default>(&mut self, msg_type: u8) -> Result<M> {
+            loop {
+                let (t, payload) = self.read_frame().await?;
+                if t == msg_type {
+                    return Ok(M::decode(payload.as_slice())?);
+                }
+            }
+        }
+
+        async fn ping(&mut self, nonce: u64) -> Result<()> {
+            self.send_frame(MSG_PING, &nonce.to_le_bytes()).await
+        }
+
+        /// Ping and wait for the pong: once it arrives, the server has
+        /// handled everything sent before it.
+        async fn sync(&mut self, nonce: u64) -> Result<()> {
+            self.ping(nonce).await?;
+            loop {
+                let (t, payload) = self.read_frame().await?;
+                if t == MSG_PONG && payload == nonce.to_le_bytes() {
+                    return Ok(());
+                }
+            }
+        }
+
+        async fn admin_request(
+            &mut self,
+            msg_type: u8,
+            msg: impl Message,
+        ) -> Result<aura_protocol::AdminResponse> {
+            self.send_proto(msg_type, msg).await?;
+            self.expect(msg_type).await
+        }
+
+        /// How the server ended the connection.
+        async fn closed(&self) -> Result<quinn::ConnectionError> {
+            timeout(TEST_TIMEOUT, self.conn.closed())
+                .await
+                .map_err(|_| anyhow!("the server kept the connection open"))
+        }
+
+        /// Hang up. Skips waiting out QUIC's draining period, which the
+        /// tests have no use for.
+        fn close(self) {
+            self.conn.close(0u32.into(), b"done");
+        }
+    }
+
+    /// A channel in the DB and in memory, as `main` creates the lobby.
+    fn add_channel(state: &ServerState, name: &str, lobby: bool) -> String {
+        let channel_type = i32::from(lobby);
+        let id = state
+            .db
+            .upsert_channel(None, name, "", 0, &[], 0, channel_type)
+            .unwrap();
+        state.channel_metadata.insert(
+            id.clone(),
+            crate::state::ChannelMetadata {
+                id: id.clone(),
+                name: name.into(),
+                comment: String::new(),
+                icon_type: 0,
+                icon_data: vec![],
+                position: 0,
+                channel_type,
+            },
+        );
+        state.create_channel(id.clone());
+        id
+    }
+
+    /// A server with a lobby and the bootstrap admin "Root" for `root_id`.
+    fn moderation_state(root_id: &aura_identity::IdentitySecret) -> (Arc<ServerState>, String) {
+        let state = test_state(None);
+        state
+            .db
+            .create_bootstrap_admin(&root_id.public_key().ed25519_bytes(), "Root")
+            .unwrap();
+        let lobby = add_channel(&state, "Lobby", true);
+        (state, lobby)
+    }
+
+    #[tokio::test]
+    async fn control_stream_ping_echoes_the_nonce() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let server = start_server(test_state(None)).unwrap();
+        let id = aura_identity::IdentitySecret::generate();
+        let mut alice = TestClient::login(&server, &id, "Alice").await.unwrap();
+        assert!(alice.auth.success);
+
+        let nonce = 0x0123_4567_89ab_cdefu64;
+        alice.ping(nonce).await.unwrap();
+        let (msg_type, payload) = loop {
+            let frame = alice.read_frame().await.unwrap();
+            if frame.0 != 0x13 {
+                break frame;
+            }
+        };
+        assert_eq!(msg_type, MSG_PONG);
+        assert_eq!(payload, nonce.to_le_bytes());
+        alice.close();
+    }
+
+    /// Past the burst, pings go unanswered; the connection stays up.
+    #[tokio::test]
+    async fn control_stream_pings_are_rate_limited() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let server = start_server(test_state(None)).unwrap();
+        let id = aura_identity::IdentitySecret::generate();
+        let mut alice = TestClient::login(&server, &id, "Alice").await.unwrap();
+
+        for nonce in 0..20u64 {
+            alice.ping(nonce).await.unwrap();
+        }
+        // A request that isn't a ping marks the end of the flood.
+        alice
+            .send_proto(MSG_LIST_USERS, aura_protocol::ListUsersRequest::default())
+            .await
+            .unwrap();
+        let mut pongs = 0;
+        loop {
+            match alice.read_frame().await.unwrap() {
+                (MSG_PONG, _) => pongs += 1,
+                (MSG_LIST_USERS, _) => break,
+                _ => {}
+            }
+        }
+        assert!((1..20).contains(&pongs), "{pongs} of 20 pings answered");
+        alice.close();
+    }
+
+    #[tokio::test]
+    async fn malformed_ping_closes_the_connection() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let server = start_server(test_state(None)).unwrap();
+        let id = aura_identity::IdentitySecret::generate();
+        let mut alice = TestClient::login(&server, &id, "Alice").await.unwrap();
+
+        alice.send_frame(MSG_PING, &[1, 2, 3, 4]).await.unwrap();
+        alice.closed().await.unwrap();
+        alice.close();
+    }
+
+    /// An unknown message type is skipped whole. Its payload starts with
+    /// bytes that are valid message types, which a server reading on from
+    /// the length prefix would act on.
+    #[tokio::test]
+    async fn unknown_message_types_are_skipped_without_losing_sync() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let server = start_server(test_state(None)).unwrap();
+        let id = aura_identity::IdentitySecret::generate();
+        let mut alice = TestClient::login(&server, &id, "Alice").await.unwrap();
+
+        let payload = [
+            MSG_TEXT_PACKET,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            MSG_JOIN_CHANNEL,
+            0,
+            0,
+        ];
+        alice.send_frame(0x7e, &payload).await.unwrap();
+        alice.sync(42).await.unwrap();
+        alice.close();
+    }
+
+    /// A client rejoining a channel deleted while it was away is pointed at
+    /// the lobby, and its MLS join for the dead channel doesn't bring the
+    /// channel's group back.
+    #[tokio::test]
+    async fn joining_an_unknown_channel_points_at_the_lobby() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, lobby) = moderation_state(&root_id);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let id = aura_identity::IdentitySecret::generate();
+        let mut alice = TestClient::login(&server, &id, "Alice").await.unwrap();
+
+        let gone = "C_deleted_while_away".to_string();
+        alice
+            .send_proto(
+                MSG_JOIN_CHANNEL,
+                aura_protocol::JoinChannelRequest {
+                    channel_id: gone.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let notice: aura_protocol::ChannelDeleted =
+            alice.expect(MSG_CHANNEL_DELETED).await.unwrap();
+        assert_eq!(notice.channel_id, gone);
+        assert_eq!(notice.fallback_channel_id, lobby);
+        assert_eq!(
+            notice.reason(),
+            aura_protocol::ChannelRemovalReason::NotFound
+        );
+
+        for is_voice in [true, false] {
+            let group_type = if is_voice {
+                aura_protocol::MlsGroupType::Voice
+            } else {
+                aura_protocol::MlsGroupType::Text
+            };
+            let envelope = aura_protocol::MlsEnvelope {
+                channel_id: gone.clone(),
+                group_type: group_type as i32,
+                content: Some(aura_protocol::mls_envelope::Content::KeyPackage(vec![
+                    1, 2, 3,
+                ])),
+                ..Default::default()
+            };
+            alice.send_proto(MSG_MLS_JOIN, envelope).await.unwrap();
+        }
+        alice.sync(1).await.unwrap();
+        assert!(!state
+            .voice_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&gone, true)));
+        assert!(!state
+            .text_groups
+            .contains_key(&aura_protocol::make_mls_group_id(&gone, false)));
+
+        // Joining a channel that exists still works.
+        alice
+            .send_proto(
+                MSG_JOIN_CHANNEL,
+                aura_protocol::JoinChannelRequest {
+                    channel_id: lobby.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        alice.sync(2).await.unwrap();
+        let voice = state
+            .voice_groups
+            .get(&aura_protocol::make_mls_group_id(&lobby, true))
+            .unwrap()
+            .clone();
+        assert!(voice.read().await.members.contains(&alice.auth.session_id));
+        alice.close();
+    }
+
+    #[tokio::test]
+    async fn non_admins_cannot_moderate() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, _) = moderation_state(&root_id);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let mut root = TestClient::login(&server, &root_id, "Root").await.unwrap();
+        let bob_id = aura_identity::IdentitySecret::generate();
+        let mut bob = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        let root_uuid = root.auth.user_uuid.clone();
+
+        let list: aura_protocol::ListUsersResponse = {
+            bob.send_proto(MSG_LIST_USERS, aura_protocol::ListUsersRequest::default())
+                .await
+                .unwrap();
+            bob.expect(MSG_LIST_USERS).await.unwrap()
+        };
+        assert!(!list.success && list.users.is_empty());
+        assert_eq!(list.error_message, "Permission denied");
+
+        let requests: [(u8, Vec<u8>); 4] = [
+            (
+                MSG_VERIFY_USER,
+                aura_protocol::VerifyUserRequest {
+                    target_user_uuid: root_uuid.clone(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                MSG_BAN_USER,
+                aura_protocol::BanUserRequest {
+                    target_user_uuid: root_uuid.clone(),
+                    banned: true,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                MSG_GRANT_ADMIN,
+                aura_protocol::GrantAdminRequest {
+                    target_user_uuid: bob.auth.user_uuid.clone(),
+                    grant_admin: true,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            ),
+            (
+                MSG_KICK_USER,
+                aura_protocol::KickUserRequest {
+                    target_user_uuid: root_uuid.clone(),
+                    reason: String::new(),
+                }
+                .encode_to_vec(),
+            ),
+        ];
+        for (msg_type, payload) in requests {
+            bob.send_frame(msg_type, &payload).await.unwrap();
+            let resp: aura_protocol::AdminResponse = bob.expect(msg_type).await.unwrap();
+            assert!(!resp.success, "0x{msg_type:02x} succeeded");
+            assert_eq!(resp.error_message, "Permission denied");
+        }
+        assert!(!state.db.is_admin(&bob.auth.user_uuid).unwrap());
+        assert!(
+            !state
+                .db
+                .find_user_by_uuid(&root_uuid)
+                .unwrap()
+                .unwrap()
+                .banned
+        );
+
+        // Root is still connected and an admin.
+        root.sync(7).await.unwrap();
+        bob.close();
+        root.close();
+    }
+
+    #[tokio::test]
+    async fn admin_lists_verifies_and_grants() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, _) = moderation_state(&root_id);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let mut root = TestClient::login(&server, &root_id, "Root").await.unwrap();
+        assert!(root.auth.is_admin);
+        let bob_id = aura_identity::IdentitySecret::generate();
+        let bob = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        let bob_uuid = bob.auth.user_uuid.clone();
+
+        root.send_proto(MSG_LIST_USERS, aura_protocol::ListUsersRequest::default())
+            .await
+            .unwrap();
+        let list: aura_protocol::ListUsersResponse = root.expect(MSG_LIST_USERS).await.unwrap();
+        assert!(list.success, "{}", list.error_message);
+        assert_eq!(list.total_count, 2);
+        let names: Vec<(&str, bool)> = list
+            .users
+            .iter()
+            .map(|u| (u.display_name.as_str(), u.is_admin))
+            .collect();
+        assert_eq!(names, [("Root", true), ("Bob", false)]);
+
+        let resp = root
+            .admin_request(
+                MSG_VERIFY_USER,
+                aura_protocol::VerifyUserRequest {
+                    target_user_uuid: bob_uuid.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+        assert!(
+            state
+                .db
+                .find_user_by_uuid(&bob_uuid)
+                .unwrap()
+                .unwrap()
+                .verified
+        );
+
+        let resp = root
+            .admin_request(
+                MSG_GRANT_ADMIN,
+                aura_protocol::GrantAdminRequest {
+                    target_user_uuid: bob_uuid.clone(),
+                    manage_channels: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+        let perms = state.db.get_admin_permissions(&bob_uuid).unwrap().unwrap();
+        assert!(perms.manage_channels && !perms.ban_users && !perms.grant_admin);
+
+        // Root can't change its own permissions.
+        let resp = root
+            .admin_request(
+                MSG_GRANT_ADMIN,
+                aura_protocol::GrantAdminRequest {
+                    target_user_uuid: root.auth.user_uuid.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!resp.success);
+        assert!(state.db.is_admin(&root.auth.user_uuid).unwrap());
+
+        bob.close();
+        root.close();
+    }
+
+    #[tokio::test]
+    async fn kick_moves_the_target_to_the_lobby() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, lobby) = moderation_state(&root_id);
+        let room = add_channel(&state, "Room", false);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let mut root = TestClient::login(&server, &root_id, "Root").await.unwrap();
+        let bob_id = aura_identity::IdentitySecret::generate();
+        let mut bob = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+
+        bob.send_proto(
+            MSG_JOIN_CHANNEL,
+            aura_protocol::JoinChannelRequest {
+                channel_id: room.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        bob.sync(1).await.unwrap();
+
+        let resp = root
+            .admin_request(
+                MSG_KICK_USER,
+                aura_protocol::KickUserRequest {
+                    target_user_uuid: bob.auth.user_uuid.clone(),
+                    reason: "cool off".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+
+        let notice: aura_protocol::ChannelDeleted = bob.expect(MSG_CHANNEL_DELETED).await.unwrap();
+        assert_eq!(notice.channel_id, room);
+        assert_eq!(notice.fallback_channel_id, lobby);
+        assert_eq!(notice.reason(), aura_protocol::ChannelRemovalReason::Kicked);
+        assert_eq!(notice.detail, "cool off");
+
+        // Root sees Bob leave the room, and the server has him in no channel.
+        let left: aura_protocol::UserLeft = root.expect(0x12).await.unwrap();
+        assert_eq!(
+            (left.channel_id.as_str(), left.session_id),
+            (room.as_str(), bob.auth.session_id)
+        );
+        let session = state.sessions.get(&bob.auth.session_id).unwrap();
+        assert!(session.voice_group_id.is_none() && session.text_group_id.is_none());
+        drop(session);
+
+        // Kicking him again finds nothing to kick.
+        let resp = root
+            .admin_request(
+                MSG_KICK_USER,
+                aura_protocol::KickUserRequest {
+                    target_user_uuid: bob.auth.user_uuid.clone(),
+                    reason: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!resp.success);
+
+        bob.close();
+        root.close();
+    }
+
+    #[tokio::test]
+    async fn ban_drops_the_target_and_refuses_its_logins() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, _) = moderation_state(&root_id);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let mut root = TestClient::login(&server, &root_id, "Root").await.unwrap();
+        let bob_id = aura_identity::IdentitySecret::generate();
+        let bob = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        let bob_uuid = bob.auth.user_uuid.clone();
+
+        // Root can't ban itself.
+        let resp = root
+            .admin_request(
+                MSG_BAN_USER,
+                aura_protocol::BanUserRequest {
+                    target_user_uuid: root.auth.user_uuid.clone(),
+                    banned: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!resp.success);
+
+        let resp = root
+            .admin_request(
+                MSG_BAN_USER,
+                aura_protocol::BanUserRequest {
+                    target_user_uuid: bob_uuid.clone(),
+                    banned: true,
+                    reason: "spam".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+
+        match bob.closed().await.unwrap() {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(close.error_code, CLOSE_BANNED.into());
+                assert_eq!(&close.reason[..], b"banned");
+            }
+            other => panic!("expected an application close, got {other}"),
+        }
+        bob.close();
+
+        let again = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        assert!(!again.auth.success);
+        assert!(
+            again.auth.error_message.contains("banned"),
+            "{}",
+            again.auth.error_message
+        );
+        again.close();
+
+        // Unbanned, Bob is back.
+        let resp = root
+            .admin_request(
+                MSG_BAN_USER,
+                aura_protocol::BanUserRequest {
+                    target_user_uuid: bob_uuid,
+                    banned: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+        let back = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        assert!(back.auth.success, "{}", back.auth.error_message);
+        back.close();
+        root.close();
+    }
+
+    /// Channel management needs `manage_channels`, not merely being an
+    /// admin. Non-admins still get the "Admin required" the macOS client
+    /// looks for.
+    #[tokio::test]
+    async fn channel_management_needs_manage_channels() {
+        let _serial = LOGIN_TESTS.lock().await;
+        let root_id = aura_identity::IdentitySecret::generate();
+        let (state, _) = moderation_state(&root_id);
+        let server = start_server(Arc::clone(&state)).unwrap();
+        let bob_id = aura_identity::IdentitySecret::generate();
+        let mut bob = TestClient::login(&server, &bob_id, "Bob").await.unwrap();
+        let create = aura_protocol::CreateChannelRequest {
+            name: "Bob's".into(),
+            ..Default::default()
+        };
+
+        bob.send_proto(MSG_CREATE_CHANNEL, create.clone())
+            .await
+            .unwrap();
+        let resp: aura_protocol::CreateChannelResponse =
+            bob.expect(MSG_CREATE_CHANNEL).await.unwrap();
+        assert_eq!(
+            (resp.success, resp.error_message.as_str()),
+            (false, "Admin required")
+        );
+
+        let moderator = AdminPermissions {
+            ban_users: true,
+            ..Default::default()
+        };
+        state
+            .db
+            .grant_admin(&bob.auth.user_uuid, &moderator, None)
+            .unwrap();
+        bob.send_proto(MSG_CREATE_CHANNEL, create.clone())
+            .await
+            .unwrap();
+        let resp: aura_protocol::CreateChannelResponse =
+            bob.expect(MSG_CREATE_CHANNEL).await.unwrap();
+        assert!(!resp.success);
+        assert_ne!(resp.error_message, "Admin required");
+
+        let channel_admin = AdminPermissions {
+            manage_channels: true,
+            ..Default::default()
+        };
+        state
+            .db
+            .grant_admin(&bob.auth.user_uuid, &channel_admin, None)
+            .unwrap();
+        bob.send_proto(MSG_CREATE_CHANNEL, create).await.unwrap();
+        let resp: aura_protocol::CreateChannelResponse =
+            bob.expect(MSG_CREATE_CHANNEL).await.unwrap();
+        assert!(resp.success, "{}", resp.error_message);
+        assert!(state.channel_exists(&resp.channel_id));
+        bob.close();
     }
 }

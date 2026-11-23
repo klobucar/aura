@@ -58,6 +58,11 @@ impl AdminPermissions {
             manage_channels: true,
         }
     }
+
+    /// Whether this grants nothing at all.
+    pub fn is_empty(&self) -> bool {
+        !(self.verify_users || self.ban_users || self.grant_admin || self.manage_channels)
+    }
 }
 
 /// Admin record from the database.
@@ -406,12 +411,13 @@ impl Database {
         Ok(())
     }
 
-    /// List users with pagination.
+    /// List users with pagination, oldest first. Accounts created in the same
+    /// second keep their creation order (rowid), so pages never overlap.
     pub fn list_users(&self, offset: u32, limit: u32) -> Result<Vec<User>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT user_uuid, ed25519_public_key, display_name, created_at, verified, banned, identity_public_key
-             FROM users ORDER BY created_at LIMIT ? OFFSET ?",
+             FROM users ORDER BY created_at, rowid LIMIT ? OFFSET ?",
         )?;
 
         let users = stmt
@@ -454,6 +460,16 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// The ids of every admin, for marking admins in a user listing.
+    pub fn admin_user_uuids(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT user_uuid FROM admins")?;
+        let uuids = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(uuids)
     }
 
     /// Get admin permissions for a user.

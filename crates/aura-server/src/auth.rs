@@ -47,6 +47,14 @@ pub enum AuthError {
     #[error("Permission denied")]
     PermissionDenied,
 
+    /// An admin action aimed at the caller's own account.
+    #[error("You can't do this to your own account")]
+    SelfTarget,
+
+    /// An action against another admin by someone without `grant_admin`.
+    #[error("Acting on another admin requires the grant_admin permission")]
+    TargetIsAdmin,
+
     #[error("User not found")]
     UserNotFound,
 
@@ -69,11 +77,28 @@ impl AuthError {
             AuthError::VerificationRequired => "verification_required",
             AuthError::InvalidSession => "invalid_session",
             AuthError::PermissionDenied => "permission_denied",
+            AuthError::SelfTarget => "self_target",
+            AuthError::TargetIsAdmin => "target_is_admin",
             AuthError::UserNotFound => "user_not_found",
             AuthError::DatabaseError(_) => "internal_error",
         }
     }
+
+    /// The error as told to the client: the message itself, except for
+    /// internal failures, whose details stay in the server log.
+    pub fn client_message(&self) -> String {
+        match self {
+            AuthError::DatabaseError(_) => "Internal server error".to_string(),
+            other => other.to_string(),
+        }
+    }
 }
+
+/// Users per page when a `ListUsersRequest` asks for 0.
+pub const LIST_USERS_DEFAULT_LIMIT: u32 = 100;
+/// Most users one `ListUsersRequest` returns. A `UserInfo` is ~100 bytes, so
+/// a full page stays far below the clients' 256 KiB frame limit.
+pub const LIST_USERS_MAX_LIMIT: u32 = 500;
 
 /// Session information stored in memory.
 #[derive(Debug, Clone)]
@@ -326,19 +351,60 @@ impl AuthService {
 
     // =========================================================================
     // Admin Operations
+    //
+    // Each takes the id of the account acting: the identity its connection
+    // logged in as, not a session token. Permissions are read from the
+    // database on every call, so a grant or revocation applies at once, even
+    // to admins who are already connected.
     // =========================================================================
 
-    /// Verify a user (admin only).
-    pub fn verify_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
-        let session = self.validate_session(admin_token)?;
+    /// The acting account's admin permissions. `PermissionDenied` unless it
+    /// is an admin in good standing (a banned or deleted admin whose request
+    /// was already in flight gets nothing).
+    fn admin_permissions(&self, actor_uuid: &str) -> Result<AdminPermissions, AuthError> {
+        match self.db.find_user_by_uuid(actor_uuid)? {
+            Some(actor) if !actor.banned => {}
+            _ => return Err(AuthError::PermissionDenied),
+        }
+        self.db
+            .get_admin_permissions(actor_uuid)?
+            .ok_or(AuthError::PermissionDenied)
+    }
 
-        // Check admin permissions
-        let perms = self
-            .db
-            .get_admin_permissions(&session.user_uuid)?
-            .ok_or(AuthError::PermissionDenied)?;
+    /// Rules for every action one admin takes against another account (ban,
+    /// unban, kick, changing admin rights, deleting it):
+    ///
+    /// - nobody acts on their own account;
+    /// - the target must exist;
+    /// - acting on another admin needs `grant_admin`, so someone who couldn't
+    ///   revoke an admin can't ban, kick or delete them either.
+    ///
+    /// Together these keep the server from locking itself out: whoever bans,
+    /// deletes or demotes an admin holds `grant_admin` and is never their own
+    /// target, so at least one admin who can manage admins always remains
+    /// (starting with the bootstrap admin, the only one at first), unless the
+    /// last of them deletes their own account.
+    fn check_target(
+        &self,
+        actor_uuid: &str,
+        actor: &AdminPermissions,
+        target_uuid: &str,
+    ) -> Result<(), AuthError> {
+        if actor_uuid == target_uuid {
+            return Err(AuthError::SelfTarget);
+        }
+        if self.db.find_user_by_uuid(target_uuid)?.is_none() {
+            return Err(AuthError::UserNotFound);
+        }
+        if !actor.grant_admin && self.db.is_admin(target_uuid)? {
+            return Err(AuthError::TargetIsAdmin);
+        }
+        Ok(())
+    }
 
-        if !perms.verify_users {
+    /// Verify a user (needs `verify_users`).
+    pub fn verify_user(&self, actor_uuid: &str, target_user_uuid: &str) -> Result<(), AuthError> {
+        if !self.admin_permissions(actor_uuid)?.verify_users {
             return Err(AuthError::PermissionDenied);
         }
 
@@ -351,29 +417,15 @@ impl AuthService {
         Ok(())
     }
 
-    /// Ban a user (admin only).
-    pub fn ban_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
-        let session = self.validate_session(admin_token)?;
-
-        // Check admin permissions
-        let perms = self
-            .db
-            .get_admin_permissions(&session.user_uuid)?
-            .ok_or(AuthError::PermissionDenied)?;
-
+    /// Ban a user (needs `ban_users`). Their logins are refused from now on;
+    /// dropping their live connections is up to the caller (see
+    /// `ServerState::set_user_banned`).
+    pub fn ban_user(&self, actor_uuid: &str, target_user_uuid: &str) -> Result<(), AuthError> {
+        let perms = self.admin_permissions(actor_uuid)?;
         if !perms.ban_users {
             return Err(AuthError::PermissionDenied);
         }
-
-        // Prevent self-ban
-        if session.user_uuid == target_user_uuid {
-            return Err(AuthError::PermissionDenied);
-        }
-
-        // Verify the target user exists
-        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
-            return Err(AuthError::UserNotFound);
-        }
+        self.check_target(actor_uuid, &perms, target_user_uuid)?;
 
         self.db.set_user_banned(target_user_uuid, true)?;
 
@@ -383,95 +435,95 @@ impl AuthService {
         Ok(())
     }
 
-    /// Unban a user (admin only).
-    pub fn unban_user(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
-        let session = self.validate_session(admin_token)?;
-
-        let perms = self
-            .db
-            .get_admin_permissions(&session.user_uuid)?
-            .ok_or(AuthError::PermissionDenied)?;
-
+    /// Unban a user (needs `ban_users`, under the same rules as a ban).
+    pub fn unban_user(&self, actor_uuid: &str, target_user_uuid: &str) -> Result<(), AuthError> {
+        let perms = self.admin_permissions(actor_uuid)?;
         if !perms.ban_users {
             return Err(AuthError::PermissionDenied);
         }
-
-        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
-            return Err(AuthError::UserNotFound);
-        }
+        self.check_target(actor_uuid, &perms, target_user_uuid)?;
 
         self.db.set_user_banned(target_user_uuid, false)?;
         Ok(())
     }
 
-    /// Grant admin privileges to a user (admin only).
+    /// Check that `actor_uuid` may kick `target_user_uuid` (needs
+    /// `ban_users`, under the same rules as a ban). Moving the target is up
+    /// to the caller (see `ServerState::kick_user`).
+    pub fn authorize_kick(
+        &self,
+        actor_uuid: &str,
+        target_user_uuid: &str,
+    ) -> Result<(), AuthError> {
+        let perms = self.admin_permissions(actor_uuid)?;
+        if !perms.ban_users {
+            return Err(AuthError::PermissionDenied);
+        }
+        self.check_target(actor_uuid, &perms, target_user_uuid)
+    }
+
+    /// Check that `actor_uuid` may delete the account `target_user_uuid`.
+    /// Anyone may delete their own; deleting someone else's needs
+    /// `ban_users`, under the same rules as a ban.
+    pub fn authorize_delete_user(
+        &self,
+        actor_uuid: &str,
+        target_user_uuid: &str,
+    ) -> Result<(), AuthError> {
+        if actor_uuid == target_user_uuid {
+            return Ok(());
+        }
+        let perms = self.admin_permissions(actor_uuid)?;
+        if !perms.ban_users {
+            return Err(AuthError::PermissionDenied);
+        }
+        self.check_target(actor_uuid, &perms, target_user_uuid)
+    }
+
+    /// Set a user's admin permissions (needs `grant_admin`). They replace
+    /// whatever the user held; granting none revokes admin status.
     pub fn grant_admin(
         &self,
-        admin_token: &str,
+        actor_uuid: &str,
         target_user_uuid: &str,
         permissions: &AdminPermissions,
     ) -> Result<(), AuthError> {
-        let session = self.validate_session(admin_token)?;
-
-        let perms = self
-            .db
-            .get_admin_permissions(&session.user_uuid)?
-            .ok_or(AuthError::PermissionDenied)?;
-
+        let perms = self.admin_permissions(actor_uuid)?;
         if !perms.grant_admin {
             return Err(AuthError::PermissionDenied);
         }
+        // Includes the self check: no admin changes their own permissions.
+        self.check_target(actor_uuid, &perms, target_user_uuid)?;
 
-        // Prevent self-promotion (already admin if here, but prevent changing own perms)
-        if session.user_uuid == target_user_uuid {
-            return Err(AuthError::PermissionDenied);
+        if permissions.is_empty() {
+            self.db.revoke_admin(target_user_uuid)?;
+        } else {
+            self.db
+                .grant_admin(target_user_uuid, permissions, Some(actor_uuid))?;
         }
-
-        if self.db.find_user_by_uuid(target_user_uuid)?.is_none() {
-            return Err(AuthError::UserNotFound);
-        }
-
-        self.db
-            .grant_admin(target_user_uuid, permissions, Some(&session.user_uuid))?;
         Ok(())
     }
 
-    /// Revoke admin privileges (admin only).
-    pub fn revoke_admin(&self, admin_token: &str, target_user_uuid: &str) -> Result<(), AuthError> {
-        let session = self.validate_session(admin_token)?;
-
-        let perms = self
-            .db
-            .get_admin_permissions(&session.user_uuid)?
-            .ok_or(AuthError::PermissionDenied)?;
-
-        if !perms.grant_admin {
-            return Err(AuthError::PermissionDenied);
-        }
-
-        // Prevent self-revocation
-        if session.user_uuid == target_user_uuid {
-            return Err(AuthError::PermissionDenied);
-        }
-
-        self.db.revoke_admin(target_user_uuid)?;
-        Ok(())
+    /// Revoke admin privileges (needs `grant_admin`).
+    pub fn revoke_admin(&self, actor_uuid: &str, target_user_uuid: &str) -> Result<(), AuthError> {
+        self.grant_admin(actor_uuid, target_user_uuid, &AdminPermissions::default())
     }
 
-    /// List users (admin only).
+    /// List users, oldest first (any admin). A `limit` of 0 means
+    /// [`LIST_USERS_DEFAULT_LIMIT`]; larger ones are capped at
+    /// [`LIST_USERS_MAX_LIMIT`].
     pub fn list_users(
         &self,
-        admin_token: &str,
+        actor_uuid: &str,
         offset: u32,
         limit: u32,
     ) -> Result<Vec<User>, AuthError> {
-        let session = self.validate_session(admin_token)?;
+        self.admin_permissions(actor_uuid)?;
 
-        // Any admin can list users
-        if !session.is_admin {
-            return Err(AuthError::PermissionDenied);
-        }
-
+        let limit = match limit {
+            0 => LIST_USERS_DEFAULT_LIMIT,
+            n => n.min(LIST_USERS_MAX_LIMIT),
+        };
         let users = self.db.list_users(offset, limit)?;
         Ok(users)
     }
@@ -731,5 +783,255 @@ mod tests {
         let ed_only = id.public_key().ed25519_bytes();
         let result = auth.authenticate(&ed_only, "Alice", &sig, &challenge, None);
         assert!(matches!(result, Err(AuthError::InvalidPublicKey)));
+    }
+
+    // --- Admin operations ---
+
+    /// A user created straight in the database (as if they had logged in
+    /// once). `n` keeps each one's Ed25519 key distinct.
+    fn add_user(auth: &AuthService, n: u8, name: &str) -> String {
+        auth.db.create_user(&[n; 32], None, name).unwrap()
+    }
+
+    /// A user holding `perms`, granted by nobody in particular.
+    fn add_admin(auth: &AuthService, n: u8, name: &str, perms: AdminPermissions) -> String {
+        let uuid = add_user(auth, n, name);
+        auth.db.grant_admin(&uuid, &perms, None).unwrap();
+        uuid
+    }
+
+    /// A server with a bootstrap admin, as `main` creates one.
+    fn with_root() -> (AuthService, String) {
+        let (auth, _) = create_test_auth_service();
+        let root = auth.db.create_bootstrap_admin(&[0xAA; 32], "Root").unwrap();
+        (auth, root)
+    }
+
+    fn only_ban() -> AdminPermissions {
+        AdminPermissions {
+            ban_users: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn admin_ops_refuse_non_admins() {
+        let (auth, root) = with_root();
+        let alice = add_user(&auth, 1, "Alice");
+        let bob = add_user(&auth, 2, "Bob");
+
+        let results = [
+            auth.verify_user(&alice, &bob),
+            auth.ban_user(&alice, &bob),
+            auth.unban_user(&alice, &bob),
+            auth.authorize_kick(&alice, &bob),
+            auth.authorize_delete_user(&alice, &bob),
+            auth.grant_admin(&alice, &alice, &AdminPermissions::full()),
+            auth.revoke_admin(&alice, &root),
+            auth.list_users(&alice, 0, 0).map(|_| ()),
+        ];
+        for result in results {
+            assert!(
+                matches!(result, Err(AuthError::PermissionDenied)),
+                "{result:?}"
+            );
+        }
+        assert!(!auth.db.find_user_by_uuid(&bob).unwrap().unwrap().banned);
+        assert!(!auth.db.is_admin(&alice).unwrap());
+    }
+
+    #[test]
+    fn admin_ops_need_the_matching_permission() {
+        let (auth, _) = with_root();
+        let verifier = add_admin(
+            &auth,
+            1,
+            "Verifier",
+            AdminPermissions {
+                verify_users: true,
+                ..Default::default()
+            },
+        );
+        let moderator = add_admin(&auth, 2, "Moderator", only_ban());
+        let carol = add_user(&auth, 3, "Carol");
+
+        // The verifier can verify and list, but not moderate or grant.
+        auth.verify_user(&verifier, &carol).unwrap();
+        auth.list_users(&verifier, 0, 0).unwrap();
+        for result in [
+            auth.ban_user(&verifier, &carol),
+            auth.authorize_kick(&verifier, &carol),
+            auth.authorize_delete_user(&verifier, &carol),
+            auth.grant_admin(&verifier, &carol, &only_ban()),
+        ] {
+            assert!(
+                matches!(result, Err(AuthError::PermissionDenied)),
+                "{result:?}"
+            );
+        }
+
+        // The moderator can moderate, but not verify or grant.
+        assert!(matches!(
+            auth.verify_user(&moderator, &carol),
+            Err(AuthError::PermissionDenied)
+        ));
+        assert!(matches!(
+            auth.grant_admin(&moderator, &carol, &only_ban()),
+            Err(AuthError::PermissionDenied)
+        ));
+        auth.authorize_kick(&moderator, &carol).unwrap();
+        auth.ban_user(&moderator, &carol).unwrap();
+        assert!(auth.db.find_user_by_uuid(&carol).unwrap().unwrap().banned);
+        auth.unban_user(&moderator, &carol).unwrap();
+        assert!(!auth.db.find_user_by_uuid(&carol).unwrap().unwrap().banned);
+    }
+
+    #[test]
+    fn admins_cannot_act_on_their_own_account() {
+        let (auth, root) = with_root();
+        for result in [
+            auth.ban_user(&root, &root),
+            auth.unban_user(&root, &root),
+            auth.authorize_kick(&root, &root),
+            auth.grant_admin(&root, &root, &only_ban()),
+            auth.revoke_admin(&root, &root),
+        ] {
+            assert!(matches!(result, Err(AuthError::SelfTarget)), "{result:?}");
+        }
+        assert!(!auth.db.find_user_by_uuid(&root).unwrap().unwrap().banned);
+        assert!(
+            auth.db
+                .get_admin_permissions(&root)
+                .unwrap()
+                .unwrap()
+                .grant_admin
+        );
+
+        // Deleting your own account is not moderation.
+        auth.authorize_delete_user(&root, &root).unwrap();
+    }
+
+    #[test]
+    fn unknown_targets_are_reported() {
+        let (auth, root) = with_root();
+        for result in [
+            auth.verify_user(&root, "U_nobody"),
+            auth.ban_user(&root, "U_nobody"),
+            auth.unban_user(&root, "U_nobody"),
+            auth.authorize_kick(&root, "U_nobody"),
+            auth.grant_admin(&root, "U_nobody", &only_ban()),
+        ] {
+            assert!(matches!(result, Err(AuthError::UserNotFound)), "{result:?}");
+        }
+    }
+
+    /// Someone who couldn't revoke an admin can't ban, kick or delete them
+    /// either, so a moderator can't lock out the bootstrap admin.
+    #[test]
+    fn acting_on_an_admin_needs_grant_admin() {
+        let (auth, root) = with_root();
+        let moderator = add_admin(&auth, 1, "Moderator", only_ban());
+        let other_moderator = add_admin(&auth, 2, "Other", only_ban());
+
+        for target in [&root, &other_moderator] {
+            for result in [
+                auth.ban_user(&moderator, target),
+                auth.unban_user(&moderator, target),
+                auth.authorize_kick(&moderator, target),
+                auth.authorize_delete_user(&moderator, target),
+            ] {
+                assert!(
+                    matches!(result, Err(AuthError::TargetIsAdmin)),
+                    "{result:?}"
+                );
+            }
+        }
+        assert!(!auth.db.find_user_by_uuid(&root).unwrap().unwrap().banned);
+
+        // The bootstrap admin can act on the moderator.
+        auth.authorize_kick(&root, &moderator).unwrap();
+        auth.ban_user(&root, &moderator).unwrap();
+        assert!(
+            auth.db
+                .find_user_by_uuid(&moderator)
+                .unwrap()
+                .unwrap()
+                .banned
+        );
+    }
+
+    /// A banned admin's requests, if any were in flight, carry no weight.
+    #[test]
+    fn banned_admins_lose_their_powers() {
+        let (auth, root) = with_root();
+        let co_root = add_admin(&auth, 1, "CoRoot", AdminPermissions::full());
+        let carol = add_user(&auth, 2, "Carol");
+
+        auth.ban_user(&root, &co_root).unwrap();
+        assert!(matches!(
+            auth.ban_user(&co_root, &carol),
+            Err(AuthError::PermissionDenied)
+        ));
+        assert!(matches!(
+            auth.list_users(&co_root, 0, 0),
+            Err(AuthError::PermissionDenied)
+        ));
+    }
+
+    #[test]
+    fn grant_sets_permissions_and_granting_none_revokes() {
+        let (auth, root) = with_root();
+        let bob = add_user(&auth, 1, "Bob");
+
+        auth.grant_admin(&root, &bob, &only_ban()).unwrap();
+        let perms = auth.db.get_admin_permissions(&bob).unwrap().unwrap();
+        assert!(perms.ban_users && !perms.grant_admin && !perms.manage_channels);
+
+        auth.grant_admin(&root, &bob, &AdminPermissions::default())
+            .unwrap();
+        assert!(!auth.db.is_admin(&bob).unwrap());
+    }
+
+    #[test]
+    fn ban_refuses_login_until_unbanned() {
+        let (auth, id) = create_test_auth_service();
+        let root = auth.db.create_bootstrap_admin(&[0xAA; 32], "Root").unwrap();
+        let challenge = AuthService::generate_challenge();
+        let (pk, sig) = login(&id, "Alice", &challenge);
+        let alice = auth
+            .authenticate(&pk, "Alice", &sig, &challenge, None)
+            .unwrap();
+
+        auth.ban_user(&root, &alice.user_uuid).unwrap();
+        assert!(auth.validate_session(&alice.session_token).is_err());
+        let challenge = AuthService::generate_challenge();
+        let (_, sig) = login(&id, "Alice", &challenge);
+        assert!(matches!(
+            auth.authenticate(&pk, "Alice", &sig, &challenge, None),
+            Err(AuthError::UserBanned)
+        ));
+
+        auth.unban_user(&root, &alice.user_uuid).unwrap();
+        let challenge = AuthService::generate_challenge();
+        let (_, sig) = login(&id, "Alice", &challenge);
+        auth.authenticate(&pk, "Alice", &sig, &challenge, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn list_users_pages_through_every_account() {
+        let (auth, root) = with_root();
+        for n in 1..=4 {
+            add_user(&auth, n, &format!("User{n}"));
+        }
+        // 0 means the default page size, which holds all five.
+        assert_eq!(auth.list_users(&root, 0, 0).unwrap().len(), 5);
+        let page = auth.list_users(&root, 1, 2).unwrap();
+        assert_eq!(
+            page.iter()
+                .map(|u| u.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["User1", "User2"]
+        );
     }
 }

@@ -552,3 +552,151 @@ async fn test_user_status_sync_and_enforcement() {
         _ = tokio::time::sleep(tokio::time::Duration::from_millis(50)) => {}
     }
 }
+
+// --- Moderation ---
+
+/// A channel in the DB and in memory, as `main` and `create_channel_persistent`
+/// make them. `lobby` makes it the lobby.
+fn add_channel(state: &ServerState, name: &str, lobby: bool) -> String {
+    let channel_type = i32::from(lobby);
+    let id = state
+        .db
+        .upsert_channel(None, name, "", 0, &[], 0, channel_type)
+        .unwrap();
+    state.channel_metadata.insert(
+        id.clone(),
+        aura_server::state::ChannelMetadata {
+            id: id.clone(),
+            name: name.into(),
+            comment: String::new(),
+            icon_type: 0,
+            icon_data: vec![],
+            position: 0,
+            channel_type,
+        },
+    );
+    state.create_channel(id.clone());
+    id
+}
+
+/// Register an online session for `user_uuid`.
+fn connect(
+    state: &ServerState,
+    user_uuid: &str,
+) -> (u32, tokio::sync::mpsc::UnboundedReceiver<ServiceMessage>) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    (state.register_session(user_uuid.into(), addr, tx), rx)
+}
+
+fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServiceMessage>) -> Vec<ServiceMessage> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+#[tokio::test]
+async fn kick_moves_the_target_out_of_its_channel_toward_the_lobby() {
+    use aura_server::state::ModerationError;
+
+    let state = create_test_state();
+    let root = state
+        .db
+        .create_bootstrap_admin(&[0xAA; 32], "Root")
+        .unwrap();
+    let bob = state.db.create_user(&[0x01; 32], None, "Bob").unwrap();
+    let lobby = add_channel(&state, "Lobby", true);
+    let room = add_channel(&state, "Room", false);
+    assert_eq!(state.lobby_channel_id().as_deref(), Some(lobby.as_str()));
+
+    // Offline: nothing to kick.
+    assert!(matches!(
+        state.kick_user(&root, &bob, "bye"),
+        Err(ModerationError::NotOnline)
+    ));
+
+    // Online in the lobby: nowhere to move him.
+    let (bob_session, mut bob_rx) = connect(&state, &bob);
+    state.add_to_voice_group(lobby.clone(), bob_session).await;
+    assert!(matches!(
+        state.kick_user(&root, &bob, "bye"),
+        Err(ModerationError::NotInChannel)
+    ));
+
+    // In a room: his connection is told to leave it for the lobby.
+    state.add_to_voice_group(room.clone(), bob_session).await;
+    drain(&mut bob_rx);
+    assert_eq!(state.kick_user(&root, &bob, "be nice").unwrap(), 1);
+    match drain(&mut bob_rx).as_slice() {
+        [ServiceMessage::Kicked {
+            channel_id,
+            fallback_channel_id,
+            reason,
+        }] => {
+            assert_eq!(channel_id, &room);
+            assert_eq!(fallback_channel_id, &lobby);
+            assert_eq!(reason, "be nice");
+        }
+        other => panic!("expected one Kicked, got {other:?}"),
+    }
+
+    // Bob can't kick anyone, and nobody kicks themselves.
+    assert!(matches!(
+        state.kick_user(&bob, &root, "no"),
+        Err(ModerationError::Auth(
+            aura_server::auth::AuthError::PermissionDenied
+        ))
+    ));
+    assert!(matches!(
+        state.kick_user(&root, &root, "no"),
+        Err(ModerationError::Auth(
+            aura_server::auth::AuthError::SelfTarget
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn ban_closes_every_session_of_the_target() {
+    let state = create_test_state();
+    let root = state
+        .db
+        .create_bootstrap_admin(&[0xAA; 32], "Root")
+        .unwrap();
+    let bob = state.db.create_user(&[0x01; 32], None, "Bob").unwrap();
+    let (_, mut laptop) = connect(&state, &bob);
+    let (_, mut phone) = connect(&state, &bob);
+    let (_, mut root_rx) = connect(&state, &root);
+    drain(&mut root_rx);
+
+    state.set_user_banned(&root, &bob, true).unwrap();
+    for rx in [&mut laptop, &mut phone] {
+        assert!(matches!(drain(rx).as_slice(), [ServiceMessage::Banned]));
+    }
+    assert!(drain(&mut root_rx).is_empty());
+    assert!(state.db.find_user_by_uuid(&bob).unwrap().unwrap().banned);
+
+    // Unbanning closes nothing.
+    state.set_user_banned(&root, &bob, false).unwrap();
+    assert!(drain(&mut laptop).is_empty());
+    assert!(!state.db.find_user_by_uuid(&bob).unwrap().unwrap().banned);
+}
+
+#[tokio::test]
+async fn list_users_marks_admins_and_counts_everyone() {
+    let state = create_test_state();
+    let root = state
+        .db
+        .create_bootstrap_admin(&[0xAA; 32], "Root")
+        .unwrap();
+    let bob = state.db.create_user(&[0x01; 32], None, "Bob").unwrap();
+
+    let resp = state.list_users(&root, 0, 0).unwrap();
+    assert!(resp.success);
+    assert_eq!(resp.total_count, 2);
+    let admin_flags: Vec<(&str, bool)> = resp
+        .users
+        .iter()
+        .map(|u| (u.display_name.as_str(), u.is_admin))
+        .collect();
+    assert_eq!(admin_flags, [("Root", true), ("Bob", false)]);
+
+    assert!(state.list_users(&bob, 0, 0).is_err());
+}
