@@ -40,11 +40,11 @@ implementation falls short of it.
 
 | ID | Severity | Component | Finding | Status |
 |---|---|---|---|---|
-| A1 | High | server, core, clients | [Leaving a channel does not remove you from its MLS group](#a1-high-leaving-a-channel-does-not-remove-you-from-its-mls-group) | Fix in review |
-| A2 | Medium | server | [Any session can inject a commit into any group](#a2-medium-any-session-can-inject-a-commit-into-any-group) | Fix in review (with A1) |
+| A1 | High | server, core, clients | [Leaving a channel does not remove you from its MLS group](#a1-high-leaving-a-channel-does-not-remove-you-from-its-mls-group) | Fix in review (#64) |
+| A2 | Medium | server | [Any session can inject a commit into any group](#a2-medium-any-session-can-inject-a-commit-into-any-group) | Fix in review (#64) |
 | A3 | Medium | macOS, desktop | [Debug builds accept any server certificate](#a3-medium-debug-builds-accept-any-server-certificate) | Open; release builds unaffected |
-| A4 | Medium | server | No wire messages reach the existing verify / ban / grant-admin logic, and there is no kick, so abuse can't be handled on a live server | In progress |
-| A5 | Low | server | A join to a channel id that doesn't exist is accepted and creates a phantom group (e.g. rejoining a deleted channel after a reconnect) | In progress (with A4) |
+| A4 | Medium | server | No wire messages reach the existing verify / ban / grant-admin logic, and there is no kick, so abuse can't be handled on a live server | Fix in review (#65) |
+| A5 | Low | server | A join to a channel id that doesn't exist is accepted and creates a phantom group (e.g. rejoining a deleted channel after a reconnect) | Fix in review (#65) |
 | A6 | Low | core, clients | Profiles are signed but nothing verifies the signatures (`verify_profile` exists in core; no caller) | Open |
 | A7 | Low | macOS | Profile exports made before #61 hold the identity secret as **plaintext JSON**. The app now writes passphrase-encrypted `.aura-identity` backups, but old files on disk are still plaintext | Delete old exports; re-export |
 
@@ -72,7 +72,7 @@ consequences:
 channel's group set their sending key. That prevents audio from being encrypted
 for the wrong room, but does not remove anyone from a group.
 
-**Fix (in review).**
+**Fix (in review, #64).**
 - The server tracks who is actually in each MLS tree, in join order.
 - After any departure it sends the founder `MlsSyncMembers` (0x58), the account
   ids that should remain. The founder commits Removes for every other leaf.
@@ -97,7 +97,7 @@ the founder can commit alongside the founder and fork the group's epoch, and
 anyone can make every member process junk and desynchronise the server's epoch
 counter.
 
-**Fix (in review, with A1).** Only the group's founder may commit; the server
+**Fix (in review, #64).** Only the group's founder may commit; the server
 drops anyone else's commit, and its Welcome, before sending anything.
 
 ### A3. [MEDIUM] Debug builds accept any server certificate
