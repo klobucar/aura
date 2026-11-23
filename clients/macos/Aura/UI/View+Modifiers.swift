@@ -146,43 +146,60 @@ extension View {
         self.modifier(AuraFluidHoverModifier(scale: scale, brightness: brightness))
     }
     
-    /// Specialized modifier for chat message bubbles.
-    func auraMessageBubble(isOutgoing: Bool) -> some View {
-        let content = self
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                Group {
-                    if isOutgoing {
-                        AuraTheme.Gradients.lushIndigo
-                    } else {
-                        VisualEffectBlur(auraMaterial: .thin, blendingMode: .withinWindow)
+    /// Chat bubble surface (handoff §2): incoming is a panel-glass fill with
+    /// a rim, outgoing the `primary→secondary` gradient at 92%. Padding is the
+    /// caller's, since the wide and narrow columns pad differently.
+    /// A message that mentions you takes a caution tint: caution @10% over
+    /// the panel fill, caution @38% for the border.
+    func auraMessageBubble(isOutgoing: Bool, isMention: Bool = false, cornerRadius: CGFloat = AuraTheme.Radii.r20) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return self
+            .background {
+                if isOutgoing {
+                    shape.fill(AuraTheme.Gradients.outgoingBubble)
+                } else {
+                    ZStack {
+                        shape.fill(AuraTheme.Gradients.panel)
+                        if isMention {
+                            shape.fill(AuraTheme.Colors.caution.opacity(0.10))
+                        }
                     }
                 }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
             .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                isOutgoing ? Color.white.opacity(0.2) : AuraTheme.Colors.glassBorder,
-                                .clear
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.5
-                    )
+                shape.strokeBorder(
+                    isOutgoing
+                        ? Color.white.opacity(0.18)
+                        : (isMention ? AuraTheme.Colors.caution.opacity(0.38) : AuraTheme.Colors.panelBorder),
+                    lineWidth: isMention && !isOutgoing ? 1 : 0.5
+                )
             }
-        
-        return Group {
-            if isOutgoing {
-                content.modifier(AuraTheme.Shadows.soft())
-            } else {
-                content.modifier(AuraTheme.Shadows.glass())
+            // Specular top rim.
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(isOutgoing ? 0.30 : 0.35), .clear],
+                        startPoint: .top,
+                        endPoint: UnitPoint(x: 0.5, y: 0.25)
+                    ),
+                    lineWidth: 1
+                )
             }
-        }
+            .shadow(
+                color: isOutgoing ? AuraTheme.Colors.primary.opacity(0.25) : .black.opacity(0.18),
+                radius: isOutgoing ? 10 : 8,
+                x: 0,
+                y: 4
+            )
+    }
+
+    /// Flat panel-glass card (no blur) for cards that sit on a vibrancy
+    /// layer: the channel comment card, banners.
+    func auraPanel(cornerRadius: CGFloat = AuraTheme.Radii.r18) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return self
+            .background(shape.fill(AuraTheme.Gradients.panel))
+            .overlay(shape.strokeBorder(AuraTheme.Colors.panelBorder, lineWidth: 0.5))
     }
     
     /// Standardized premium card style.

@@ -78,6 +78,12 @@ public class ProfileManager: ObservableObject {
     
     // MARK: - Persistence
     
+    /// Re-read the saved profiles, e.g. after another ProfileManager (a sheet's)
+    /// added or removed one.
+    public func reload() {
+        loadProfiles()
+    }
+
     private func loadProfiles() {
         guard let data = UserDefaults.standard.data(forKey: storageKey) else {
             print("[ProfileManager] No saved profiles found")

@@ -13,6 +13,9 @@ struct VoiceRailView: View {
     let context: VoiceRailContext
     let actions: VoiceRailActions
     let mode: AuraLayoutMode
+    /// In Voice-focus the stage is the wide column, so it carries the channel
+    /// title and E2EE pill (mock 3a) and the narrow chat column is just "Chat".
+    var stageTitle: AnyView? = nil
 
     private var metrics: VoiceMetrics { VoiceMetrics.forMode(mode) }
 
@@ -77,9 +80,17 @@ struct VoiceRailView: View {
 
     private var header: some View {
         HStack {
-            Text("Voice")
-                .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
-                .foregroundStyle(AuraTheme.Colors.text)
+            Group {
+                if mode == .voiceFocus, let stageTitle {
+                    stageTitle
+                } else {
+                    Text("Voice")
+                        .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
+                        .foregroundStyle(AuraTheme.Colors.text)
+                }
+            }
+            .transition(.opacity)
+            .animation(AuraTheme.Motion.crossFade, value: mode)
             Spacer()
             // Hidden when alone: a round-trip to nobody is not a measurement.
             if !isAlone {
@@ -104,7 +115,36 @@ struct VoiceRailView: View {
         }
     }
 
+    @ViewBuilder
     private func silentRow(_ participant: VoiceParticipant) -> some View {
+        if participant.needsKeyCheck, let uuid = participant.userUuid {
+            // Caution row, clickable straight into the trust sheet (§3c).
+            Button { actions.verifyKey(uuid) } label: {
+                silentRowContent(participant)
+                    .background {
+                        RoundedRectangle(cornerRadius: AuraTheme.Radii.r16)
+                            .fill(AuraTheme.Colors.caution.opacity(0.12))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: AuraTheme.Radii.r16)
+                            .strokeBorder(AuraTheme.Colors.caution.opacity(0.30), lineWidth: 1)
+                    }
+                    .contentShape(RoundedRectangle(cornerRadius: AuraTheme.Radii.r16))
+            }
+            .buttonStyle(.plain)
+            .auraFluidHover(scale: 1.01)
+            .help("Compare safety words with \(participant.displayName)")
+        } else {
+            silentRowContent(participant)
+                .background {
+                    RoundedRectangle(cornerRadius: AuraTheme.Radii.r16)
+                        .fill(Color.white.opacity(0.04))
+                }
+                .auraFluidHover(scale: 1.01)
+        }
+    }
+
+    private func silentRowContent(_ participant: VoiceParticipant) -> some View {
         HStack(spacing: AuraTheme.Spacing.s9) {
             VoiceAvatar(participant: participant, size: 22)
 
@@ -119,14 +159,14 @@ struct VoiceRailView: View {
                 VoiceStatePill(text: "deafened", color: AuraTheme.Colors.warn)
             } else if participant.isMuted {
                 VoiceStatePill(text: "muted", color: AuraTheme.Colors.warn)
+            } else if participant.needsKeyCheck {
+                VoiceStatePill(
+                    text: participant.trust == .keyChanged ? "key changed" : "verify key",
+                    color: AuraTheme.Colors.cautionText
+                )
             }
         }
         .padding(.horizontal, AuraTheme.Spacing.s12)
         .padding(.vertical, AuraTheme.Spacing.s8)
-        .background {
-            RoundedRectangle(cornerRadius: AuraTheme.Radii.r16)
-                .fill(Color.white.opacity(0.04))
-        }
-        .auraFluidHover(scale: 1.01)
     }
 }

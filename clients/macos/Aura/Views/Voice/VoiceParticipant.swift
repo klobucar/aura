@@ -13,6 +13,18 @@ struct VoiceParticipant: Identifiable, Equatable {
     let isMuted: Bool
     let isDeafened: Bool
     let isDisconnected: Bool
+    /// Stable account id, when known — what the trust sheet is keyed on.
+    var userUuid: String? = nil
+    /// From the current channel's MLS group via `RosterTrustModel`; `nil`
+    /// until the member's key has arrived, and always `nil` for the local user.
+    var trust: TrustState? = nil
+
+    /// Silent-row state, same rule as the desktop client: mute outranks an
+    /// unchecked key, and a key we have not seen yet makes no claim at all.
+    var needsKeyCheck: Bool {
+        guard !isLocal, !isMuted, !isDeafened, let trust else { return false }
+        return trust != .verified
+    }
 
     var initial: String {
         String(displayName.prefix(1)).uppercased()
@@ -66,6 +78,8 @@ struct VoiceRailActions {
     var toggleDeafen: () -> Void
     var localVolume: (UInt32) -> Float
     var setLocalVolume: (UInt32, Float) -> Void
+    /// Opens the trust sheet focused on this account (silent `verify key` row).
+    var verifyKey: (String) -> Void = { _ in }
 }
 
 // MARK: - Shared pieces

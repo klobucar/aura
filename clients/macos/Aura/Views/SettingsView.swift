@@ -6,6 +6,12 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var settings: AudioSettings
     @ObservedObject var ttsManager: TtsManager
+    /// The login identity, for Settings → Identity.
+    var identity: UserIdentity? = nil
+    /// The server this window is connected to; offers "Leave server…" when set.
+    var serverHost: String? = nil
+    /// Delete the account on `serverHost` (after the confirmation here).
+    var onLeaveServer: (() -> Void)? = nil
     @StateObject private var appSettings = AppSettings.shared
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @StateObject private var deviceManager = AudioDeviceManager()
@@ -16,7 +22,25 @@ struct SettingsView: View {
     @AppStorage("webrtcNsEnabled") private var webrtcNsEnabled = false
     @AppStorage("webrtcAgcEnabled") private var webrtcAgcEnabled = true
     @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
-    
+    /// Same key and notification the network client already reads at connect
+    /// (`QuicNetworkClient.applyAudioSettings`).
+    @AppStorage("masterVolume") private var masterVolume = 1.0
+
+    // Notifications — keys shared with the desktop client.
+    @AppStorage(NotificationPrefs.levelKey) private var notifyLevel = NotificationLevel.mentions
+    @AppStorage(NotificationPrefs.keywordsKey) private var notifyKeywords = ""
+    @AppStorage(NotificationPrefs.showTextKey) private var notifyShowText = true
+    @AppStorage(NotificationPrefs.badgeKey) private var notifyBadge = true
+    @AppStorage(NotificationPrefs.joinLeaveKey) private var notifyJoinLeave = false
+
+    // Identity
+    /// Seconds since 1970; 0 until the first backup.
+    @AppStorage(IdentityBackup.backedUpAtKey) private var backedUpAt: Double = 0
+    @StateObject private var profileManager = ProfileManager()
+    @State private var pendingRestore: PendingBackup?
+    @State private var restoreError: String?
+    @State private var confirmingLeave = false
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -75,7 +99,12 @@ struct SettingsView: View {
                         )
                     }
                     .auraGlassSection(title: "Audio Devices", icon: "hifispeaker.2.fill")
-                    
+
+                    // Output Volume Section — master playback gain. Per-person
+                    // volume lives on each roster member's profile card.
+                    outputVolume
+                        .auraGlassSection(title: "Output", icon: "speaker.wave.3.fill")
+
                     // Transmission Mode Section
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(AudioSettings.TransmissionMode.allCases, id: \.self) { mode in
@@ -229,6 +258,14 @@ struct SettingsView: View {
                     // TTS Settings Section
                     ttsSettings
                         .auraGlassSection(title: "Text-to-Speech", icon: "bubble.left.and.exclamationmark.bubble.right.fill")
+
+                    notificationSettings
+                        .auraGlassSection(title: "Notifications", icon: "bell.badge.fill")
+
+                    if let identity {
+                        identitySettings(identity)
+                            .auraGlassSection(title: "Identity", icon: "person.badge.key.fill")
+                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 24)
@@ -254,10 +291,162 @@ struct SettingsView: View {
         }
         .frame(width: 550, height: 750)
         .auraGlass(material: .hudWindow)
+        .sheet(item: $pendingRestore) { backup in
+            RestoreBackupSheet(
+                profileManager: profileManager,
+                backup: backup,
+                loginIdentityKeyHex: identity?.publicKeyHex,
+                loginIdentityName: identity?.displayName
+            )
+        }
+        .alert(
+            "Couldn't open the backup",
+            isPresented: Binding(get: { restoreError != nil }, set: { if !$0 { restoreError = nil } }),
+            presenting: restoreError
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { message in
+            Text(message)
+        }
+        .leaveServerAlert(
+            isPresented: $confirmingLeave,
+            host: serverHost ?? "",
+            name: identity?.displayName ?? ""
+        ) {
+            dismiss()
+            onLeaveServer?()
+        }
     }
-    
+
+    // MARK: - Notifications
+
+    private var notificationSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Notify me about")
+                    .font(.system(size: 14, weight: .medium))
+                Picker("Notify me about", selection: $notifyLevel) {
+                    ForEach(NotificationLevel.allCases) { level in
+                        Text(level.title).tag(level)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Also notify on these words")
+                    .font(.system(size: 14, weight: .medium))
+                TextField("deploy, standup", text: $notifyKeywords)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Also notify on these words")
+            }
+
+            Divider().opacity(0.1)
+
+            Toggle(isOn: $notifyShowText) {
+                Text("Show message text in banners")
+                    .font(.system(size: 14, weight: .medium))
+            }
+            .toggleStyle(.switch)
+
+            Toggle(isOn: $notifyBadge) {
+                Text("Count mentions on the app icon")
+                    .font(.system(size: 14, weight: .medium))
+            }
+            .toggleStyle(.switch)
+            .onChange(of: notifyBadge) { _, counts in
+                if !counts { MessageNotifier.shared.clearBadge() }
+            }
+
+            Toggle(isOn: $notifyJoinLeave) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Join and leave banners")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("Today macOS sends one for every disconnect")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+    }
+
+    // MARK: - Identity
+
+    private func identitySettings(_ identity: UserIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            IdentitySummaryCard(
+                name: identity.displayName,
+                identityKey: identity.identityKey,
+                lastBackup: backedUpAt > 0 ? Date(timeIntervalSince1970: backedUpAt) : nil
+            )
+
+            Divider().opacity(0.1)
+
+            IdentityBackupForm(
+                displayName: identity.displayName,
+                secret: { identity.secretForBackup() },
+                onSaved: { date in backedUpAt = date.timeIntervalSince1970 }
+            )
+
+            Button("Restore from backup…") {
+                do {
+                    pendingRestore = try pickIdentityBackup()
+                } catch {
+                    restoreError = "The file couldn't be read."
+                }
+            }
+            .buttonStyle(.bordered)
+
+            if serverHost != nil, onLeaveServer != nil {
+                Divider().opacity(0.1)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Leave server…", role: .destructive) { confirmingLeave = true }
+                        .buttonStyle(.bordered)
+                        .tint(AuraTheme.Colors.danger)
+                    Text("Deletes your account on \(serverHost ?? "this server"). Your key stays on this device.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     // MARK: - Components
     
+    private var outputVolume: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("OUTPUT VOLUME")
+                    .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10))
+                    .kerning(AuraTheme.Typography.monoLabelKerning)
+                    .foregroundStyle(AuraTheme.Colors.textDim)
+                Spacer()
+                Text("\(Int((masterVolume * 100).rounded()))%")
+                    .font(AuraTheme.Typography.mono(AuraTheme.Typography.t11))
+                    .foregroundStyle(AuraTheme.Colors.accent)
+            }
+
+            HStack(spacing: 10) {
+                Image(systemName: "speaker.fill")
+                    .foregroundStyle(.secondary)
+                Slider(value: $masterVolume, in: 0...1)
+                    .tint(AuraTheme.Colors.accent)
+                    .accessibilityLabel("Output volume")
+                    .onChange(of: masterVolume) { _, newValue in
+                        NotificationCenter.default.post(
+                            name: .audioSettingsChanged,
+                            object: ["masterVolume": Float(newValue)]
+                        )
+                    }
+                Image(systemName: "speaker.wave.3.fill")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func settingsSection<Content: View>(_ title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         content()
             .auraGlassSection(title: title, icon: icon)

@@ -604,7 +604,11 @@ pub struct ChannelUserStatusRecord {
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UserProfileRecord {
-    pub user_id: u32,
+    /// The account's server-assigned id (`U_…`), as carried on the wire. It
+    /// was a `u32` once, which turned every id into 0 on decode and sent the
+    /// session number on encode — and the server refuses a profile whose id
+    /// is not the caller's account.
+    pub user_id: String,
     pub display_name: String,
     pub bio: String,
     pub avatar_data: Vec<u8>,
@@ -761,7 +765,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
         .profiles
         .into_iter()
         .map(|p| UserProfileRecord {
-            user_id: p.user_id.parse().unwrap_or(0),
+            user_id: p.user_id,
             display_name: p.display_name,
             bio: p.bio,
             avatar_data: p.avatar_data.to_vec(),
@@ -777,7 +781,7 @@ pub fn decode_server_state(data: Vec<u8>) -> Result<ServerStateRecord, AudioErro
 pub fn encode_update_profile(profile: UserProfileRecord) -> Vec<u8> {
     use prost::Message;
     let proto_profile = ProtoProfile {
-        user_id: profile.user_id.to_string(),
+        user_id: profile.user_id,
         display_name: profile.display_name,
         bio: profile.bio,
         avatar_data: profile.avatar_data,
@@ -800,7 +804,7 @@ pub fn decode_user_profile(data: Vec<u8>) -> Result<UserProfileRecord, AudioErro
     use prost::Message;
     let proto = ProtoProfile::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
     Ok(UserProfileRecord {
-        user_id: proto.user_id.parse().unwrap_or(0),
+        user_id: proto.user_id,
         display_name: proto.display_name,
         bio: proto.bio,
         avatar_data: proto.avatar_data.to_vec(),

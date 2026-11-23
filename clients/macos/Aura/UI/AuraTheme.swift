@@ -188,6 +188,39 @@ struct AuraTheme {
             themed(zenith: (0x27C93F, 0x1A8C2E))
         }
 
+        // MARK: Panel glass (handoff "Glass / material")
+        //
+        // A tinted fill rather than a blur: chat bubbles and cards sit on the
+        // window's single vibrancy layer, and the handoff's rule is one
+        // translucent layer per depth level — never glass on glass.
+
+        /// Top of the 160° panel gradient: white @ 13% dark / 72% light.
+        static var panelFillTop: Color {
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(white: 1.0, alpha: 0.13)
+                    : NSColor(white: 1.0, alpha: 0.72)
+            })
+        }
+
+        /// Bottom of the panel gradient: white @ 5% dark / 42% light.
+        static var panelFillBottom: Color {
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(white: 1.0, alpha: 0.05)
+                    : NSColor(white: 1.0, alpha: 0.42)
+            })
+        }
+
+        /// Panel border: white @ 15% dark / 55% light.
+        static var panelBorder: Color {
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(white: 1.0, alpha: 0.15)
+                    : NSColor(white: 1.0, alpha: 0.55)
+            })
+        }
+
         // Materials
         static var glassBorder: Color {
             Color(nsColor: NSColor(name: nil) { appearance in
@@ -295,6 +328,24 @@ struct AuraTheme {
             )
         }
         
+        /// Panel glass fill at the handoff's 160° angle.
+        static var panel: LinearGradient {
+            LinearGradient(
+                colors: [Colors.panelFillTop, Colors.panelFillBottom],
+                startPoint: UnitPoint(x: 0.33, y: 0),
+                endPoint: UnitPoint(x: 0.67, y: 1)
+            )
+        }
+
+        /// Outgoing chat bubble: `primary→secondary` at 92%.
+        static var outgoingBubble: LinearGradient {
+            LinearGradient(
+                colors: [Colors.primary.opacity(0.92), Colors.secondary.opacity(0.92)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+
         static let surface = LinearGradient(
             colors: [Color.white.opacity(0.08), Color.clear],
             startPoint: .topLeading,

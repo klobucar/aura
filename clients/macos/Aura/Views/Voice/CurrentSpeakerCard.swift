@@ -99,6 +99,8 @@ struct CurrentSpeakerCard: View {
 
             if speaker.isLocal {
                 VoiceStatePill(text: "you", color: AuraTheme.Colors.textDim, filled: true)
+            } else if speaker.trust == .verified {
+                VoiceStatePill(text: "verified", color: AuraTheme.Colors.accent, filled: true)
             }
         }
     }
