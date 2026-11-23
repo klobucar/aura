@@ -47,7 +47,7 @@ A distributed or single high-throughput attacker continuously initiating TLS han
 - Implement a leaky bucket or token bucket rate limiter per IP address for incoming QUIC handshake attempts.
 
 ### 3. [LOW] Cosmetic Spoofing in TOFU Identity Registration
-**Status:** ⚠️ Partially fixed — reserved-name list (`admin`, `system`, `server`, `aura`, `root`, `moderator`) is now enforced in `auth.rs`. Homoglyph / non-ASCII normalization is still open.
+**Status:** ✅ Fixed — `auth.rs` now enforces printable ASCII, rejects control/zero-width/whitespace-padded usernames, and strips non-alphanumeric characters before checking the reserved-name list (`admin`, `system`, `server`, `aura`, `root`, `moderator`).
 
 **Location:** `crates/aura-server/src/auth.rs`
 
@@ -62,9 +62,9 @@ An attacker could register a display name like `System`, `admin`, or use Cyrilli
 - Strip non-ASCII/special characters to prevent spoofing.
 
 ### 4. [INFORMATIONAL] Forward Secrecy in Low-Churn Voice Groups
-**Status:** ❌ Open — no MLS commit timer is in place; long sessions with stable membership reuse the same epoch.
+**Status:** ✅ Fixed — `aura-server` now runs a 60-second background timer (`request_due_voice_ratchets`) that prompts voice group founders to issue an empty MLS `Commit` (`MlsRatchetRequest`, `is_voice: true`) once a group has gone 15 minutes (`VOICE_RATCHET_TIME_THRESHOLD_SECS = 900`) without a ratchet commit.
 
-**Location:** `crates/aura-core/src/crypto.rs` / `state.rs`
+**Location:** `crates/aura-server/src/state.rs` / `crates/aura-server/src/main.rs`
 
 **Description:**
 OpenMLS enforces Post-Compromise Security (PCS) and Forward Secrecy by rotating key material whenever the group membership updates (a `Commit`). However, "Voice Groups" are classified as Low Churn. If a call lasts for 3 hours with the exact same members, the `current_epoch` never increments, and the same DAVE key is used for the entire duration.
