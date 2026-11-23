@@ -306,14 +306,11 @@ public class AuraNetworkClient : IAsyncDisposable
             encodedPacket = _audioManager.ProcessCapture(pcmData);
         }
         
-        if (encodedPacket == null)
-        {
-            // Fallback: Send raw PCM if AudioManager not available
-            var rawPacket = new byte[pcmData.Length * 2];
-            Buffer.BlockCopy(pcmData, 0, rawPacket, 0, rawPacket.Length);
-            encodedPacket = rawPacket;
-        }
-        
+        // No packet means no encryption: the sender isn't set up, it has no
+        // key, or encoding failed. Send nothing. Falling back to the raw PCM
+        // put plaintext voice on the wire, and the server relayed it.
+        if (encodedPacket == null) return;
+
         // Send as 0x20 Audio Message
         // [type 0x20][len 4][packet]
         var frame = new byte[1 + 4 + encodedPacket.Length];
