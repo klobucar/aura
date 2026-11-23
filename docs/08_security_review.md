@@ -47,6 +47,8 @@ implementation falls short of it.
 | A5 | Low | server | A join to a channel id that doesn't exist is accepted and creates a phantom group (e.g. rejoining a deleted channel after a reconnect) | Fix in review (#65) |
 | A6 | Low | core, clients | Profiles are signed but nothing verifies the signatures (`verify_profile` exists in core; no caller) | Open |
 | A7 | Low | macOS | Profile exports made before #61 hold the identity secret as **plaintext JSON**. The app now writes passphrase-encrypted `.aura-identity` backups, but old files on disk are still plaintext | Delete old exports; re-export |
+| A8 | Medium | server | Any admin could delete any account, including the bootstrap admin's, with no permission or target checks | Fix in review (#65) |
+| A9 | Low | server | For an unknown control-frame type the server skipped only the type byte, so the payload was parsed as further commands on the sender's own stream | Fix in review (#65) |
 
 ### A1. [HIGH] Leaving a channel does not remove you from its MLS group
 
