@@ -1,78 +1,189 @@
-# Aura Server Security Review 
-*Conducted in the spirit of Trail of Bits*
+---
+title: Security Review
+description: What has been reviewed in Aura, what is still open, and what was fixed, with links to the fixes.
+---
+# Aura Security Review
 
-This document outlines the findings of a vulnerability and architecture review of the Aura Server, specifically focusing on its Rust implementation (`aura-core`, `aura-server`, `aura-protocol`).
+**Status as of 22 November 2026.** This is a living document. It is updated
+when a finding is opened or closed, so it reflects the code on `main`, not a
+point-in-time snapshot.
 
-## Executive Summary
-The Aura server demonstrates a strong foundation in modern cryptographic practices. The use of QUIC, the DAVE protocol (XChaCha20-Poly1305 with zero-padding commitments), and OpenMLS ensure that payload confidentiality and integrity are robust by design. Furthermore, the server operates on a genuine **zero-trust** basis regarding payload data—acting purely as an encrypted relay without accessing plaintext content.
+**What this is, and isn't.** These are the results of the maintainer's own
+reviews of the server, core library and both clients, done with AI-assisted
+code review and adversarial testing. **Aura has not had an external
+security audit.** Treat it as pre-alpha and keep sensitive conversations off
+it. To report a vulnerability, see [`SECURITY.md`](../SECURITY.md).
 
-However, several **Availability (Denial of Service)** and **Authentication** vulnerabilities were identified, primarily stemming from unchecked resource allocation and the optimistic nature of the TOFU (Trust On First Use) implementation.
+For what Aura is designed to protect against, and its known structural limits,
+read the [threat model](THREAT_MODEL.md) first. This document tracks where the
+implementation falls short of it.
 
-## Vulnerability Findings
+---
 
-### 1. [CRITICAL] Memory Exhaustion via Pre-allocated QUIC Streams (Slowloris Vector)
-**Status:** ✅ Fixed in `6772991b1` — control-frame reader now grows incrementally with a hard cap instead of pre-allocating from the length prefix.
+## At a glance
 
-**Location:** `crates/aura-server/src/connection.rs`
+- **End-to-end encryption of voice and text holds on `main`,** with one open
+  gap: a member who leaves a channel stays in its MLS group until the fix below
+  lands ([A1](#a1-high-leaving-a-channel-does-not-remove-you-from-its-mls-group)).
+- **The desktop client sent voice unencrypted from April to November 2026**
+  ([F1](#f1-critical-desktop-voice-was-sent-unencrypted)). Fixed in #59 and #62.
+  If you used the desktop client in that window, assume the server operator,
+  and anyone able to read the server's memory, could have heard your voice.
+- **Never use a Debug build of either client** for real conversations: Debug
+  builds accept any server certificate ([A3](#a3-medium-debug-builds-accept-any-server-certificate)).
+- **No moderation over the wire yet.** An admin cannot ban or kick an abusive
+  user from a running server (A4).
 
-**Description:**
-The server accepts messages over reliable QUIC control streams (e.g., `MSG_AUDIO_STREAM` and `MSG_TEXT_PACKET`). The protocol specifies a `u32` length prefix, which the server uses to pre-allocate a memory buffer up to `MAX_PACKET_SIZE` (currently 2MB).
-```rust
-let packet_len = u32::from_le_bytes(len_buf) as usize;
-if packet_len > MAX_PACKET_SIZE { return; }
-let mut packet_buf = vec![0u8; packet_len]; // DANGER: Unbounded eager allocation
-self.recv.read_exact(&mut packet_buf).await?;
-```
-Because the server pre-allocates the vector before the data has arrived, an attacker can open multiple connections and send a message header claiming a 2MB payload, but then stop transmitting data (or drip-feed 1 byte every 29 seconds to bypass the idle timeout). 
+---
 
-**Impact:**
-With the default configuration of `max_connections = 1000`, an attacker can trivially force the server to allocate **2GB of RAM**, immediately crashing the 512MB Fly.io VM with an Out-of-Memory (OOM) panic.
+## Open findings
 
-**Remediation:**
-- Reduce `MAX_PACKET_SIZE` to a sensible limit (`65536` bytes for text, audio shouldn't be on the reliable stream anyway, but capped to `2048` bytes if so).
-- Avoid eager allocation. Read from the stream into an incrementally growing `BytesMut` with a capacity limit.
+| ID | Severity | Component | Finding | Status |
+|---|---|---|---|---|
+| A1 | High | server, core, clients | [Leaving a channel does not remove you from its MLS group](#a1-high-leaving-a-channel-does-not-remove-you-from-its-mls-group) | Fix in review |
+| A2 | Medium | server | [Any session can inject a commit into any group](#a2-medium-any-session-can-inject-a-commit-into-any-group) | Fix in review (with A1) |
+| A3 | Medium | macOS, desktop | [Debug builds accept any server certificate](#a3-medium-debug-builds-accept-any-server-certificate) | Open; release builds unaffected |
+| A4 | Medium | server | No wire messages reach the existing verify / ban / grant-admin logic, and there is no kick, so abuse can't be handled on a live server | In progress |
+| A5 | Low | server | A join to a channel id that doesn't exist is accepted and creates a phantom group (e.g. rejoining a deleted channel after a reconnect) | In progress (with A4) |
+| A6 | Low | core, clients | Profiles are signed but nothing verifies the signatures (`verify_profile` exists in core; no caller) | Open |
+| A7 | Low | macOS | Profile exports made before #61 hold the identity secret as **plaintext JSON**. The app now writes passphrase-encrypted `.aura-identity` backups, but old files on disk are still plaintext | Delete old exports; re-export |
 
-### 2. [MEDIUM] Unbounded CPU Exhaustion via Ed25519 Handshake Spam
-**Status:** ✅ Fixed in `960517e50` — per-source-IP token-bucket rate limit on incoming QUIC handshakes.
+### A1. [HIGH] Leaving a channel does not remove you from its MLS group
 
-**Location:** `crates/aura-server/src/connection.rs`
+**Where:** `crates/aura-server/src/state.rs` (`remove_from_voice_group`,
+`remove_from_text_group`, the founder logic in the MLS join handlers).
 
-**Description:**
-The server requires clients to sign a challenge during the `authenticate_client` handshake. While the challenge generation mitigates replay attacks perfectly, signature verification is computationally expensive. There is no IP-based rate limiting on new QUIC connection attempts.
+**What happens.** Leaving a channel, by switching away or disconnecting, only
+removes the session from the server's routing set. Nobody commits an MLS
+Remove, so the leaver stays a leaf of the channel's voice and text groups. Two
+consequences:
 
-**Impact:**
-A distributed or single high-throughput attacker continuously initiating TLS handshakes and submitting invalid AuthRequests will force the server to perform thousands of Ed25519 signature validations per second, starving the CPU and inducing significant jitter or dropped packets for active voice calls.
+1. The [threat model](THREAT_MODEL.md)'s first goal, *only current members can
+   decrypt*, then rests on the server routing correctly. A malicious server can
+   keep forwarding the group's commits to a departed member, who can keep
+   deriving every future epoch's keys.
+2. If the group's founder is the one who left, the server keeps treating them
+   as founder: every newcomer's KeyPackage goes to them, and their client keeps
+   up with the group they left. If the founder disconnects instead, the next
+   joiner creates a *new* group while the people already in the room stay in
+   the old one, and they can no longer hear each other.
 
-**Remediation:**
-- Implement a leaky bucket or token bucket rate limiter per IP address for incoming QUIC handshake attempts.
+**Mitigation on `main`.** Since #61 and #62, both clients refuse to let another
+channel's group set their sending key. That prevents audio from being encrypted
+for the wrong room, but does not remove anyone from a group.
 
-### 3. [LOW] Cosmetic Spoofing in TOFU Identity Registration
-**Status:** ✅ Fixed — `auth.rs` now enforces printable ASCII, rejects control/zero-width/whitespace-padded usernames, and strips non-alphanumeric characters before checking the reserved-name list (`admin`, `system`, `server`, `aura`, `root`, `moderator`).
+**Fix (in review).**
+- The server tracks who is actually in each MLS tree, in join order.
+- After any departure it sends the founder `MlsSyncMembers` (0x58), the account
+  ids that should remain. The founder commits Removes for every other leaf.
+  This message can only shrink a group, never grow it.
+- The founder role passes to the next-longest member when the founder leaves.
+- A group with nobody left restarts with the first waiting joiner instead of
+  splitting.
+- Clients delete a channel's group state when they leave it.
 
-**Location:** `crates/aura-server/src/auth.rs`
+Design: [`MLS_SECURITY.md`](MLS_SECURITY.md) and
+[`05_dave_protocol_deviations.md`](05_dave_protocol_deviations.md) §6.
 
-**Description:**
-The Trust On First Use (TOFU) system allows any new key to claim any available `display_name`. While usernames must be unique (enforced case-insensitively in the database), there is no mechanism to protect reserved names or prevent homoglyph attacks.
+### A2. [MEDIUM] Any session can inject a commit into any group
 
-**Impact:**
-An attacker could register a display name like `System`, `admin`, or use Cyrillic characters to impersonate authority figures.
+**Where:** `crates/aura-server/src/state.rs`, `handle_mls_ratchet_commit`
+(0x57) and `handle_mls_commit_welcome` (0x51).
 
-**Remediation:**
-- Implement a restricted word list (e.g., blocking `admin`, `system`, `server`, `aura`).
-- Strip non-ASCII/special characters to prevent spoofing.
+**What happens.** The server distributes a commit, and advances its epoch
+counter, without checking who sent it. Clients reject a commit signed by a
+non-member, so a stranger can't change a group's keys. But a *member* who isn't
+the founder can commit alongside the founder and fork the group's epoch, and
+anyone can make every member process junk and desynchronise the server's epoch
+counter.
 
-### 4. [INFORMATIONAL] Forward Secrecy in Low-Churn Voice Groups
-**Status:** ✅ Fixed — `aura-server` now runs a 60-second background timer (`request_due_voice_ratchets`) that prompts voice group founders to issue an empty MLS `Commit` (`MlsRatchetRequest`, `is_voice: true`) once a group has gone 15 minutes (`VOICE_RATCHET_TIME_THRESHOLD_SECS = 900`) without a ratchet commit.
+**Fix (in review, with A1).** Only the group's founder may commit; the server
+drops anyone else's commit, and its Welcome, before sending anything.
 
-**Location:** `crates/aura-server/src/state.rs` / `crates/aura-server/src/main.rs`
+### A3. [MEDIUM] Debug builds accept any server certificate
 
-**Description:**
-OpenMLS enforces Post-Compromise Security (PCS) and Forward Secrecy by rotating key material whenever the group membership updates (a `Commit`). However, "Voice Groups" are classified as Low Churn. If a call lasts for 3 hours with the exact same members, the `current_epoch` never increments, and the same DAVE key is used for the entire duration.
+**Where:** `clients/desktop/Services/AuraNetworkClient.cs` (`#if DEBUG … return true`)
+and `clients/macos/Aura/Services/QuicNetworkClient.swift` (`#if DEBUG … completeHandler(true)`).
 
-**Remediation:**
-The system would benefit from forcing an MLS `Commit` on a timer (e.g., every 15 minutes) even if membership has not changed.
+**What happens.** In Debug builds, server certificates are not checked at all:
+no WebPKI validation, no trust-on-first-use pin. A network attacker can then
+impersonate the server at the transport layer and see control-plane metadata
+(who is online, channel membership, display names). Voice and text stay
+end-to-end encrypted under MLS, but TOFU's protection of first contact is gone.
 
-## Positive Observations
-1. **Challenge-Response Authenticity:** `auth.rs` dynamically generates challenges per connection state rather than globally. This securely prevents malicious clients from recording and reusing authentication packages.
-2. **Key Commitment:** The implementation of a 16-byte zero-padding commitment in `dave_crypto.encrypt()` correctly adheres to the DAVE protocol specification, effectively neutralizing partitioning oracle attacks.
-3. **Database Parameterization:** All SQLite queries rely strictly on `rusqlite::params![]`. No string interpolation is used for SQL generation, neutralizing injection risks.
+**Status.** Release builds keep full validation. An invite link's certificate
+fingerprint is enforced in every build configuration (#61, #62). Don't
+distribute Debug builds; the release runbook builds Release only.
+
+---
+
+## Fixed findings
+
+Newest first. "Since" is when the problem entered `main`, where known.
+
+| ID | Severity | Component | Finding | Fixed in |
+|---|---|---|---|---|
+| F1 | Critical | desktop | [Voice was sent unencrypted](#f1-critical-desktop-voice-was-sent-unencrypted) (since 2fbf9c85, Apr 2026) | #59 (stop), #62 (encrypt) |
+| F2 | Medium | desktop | Unhandled control frames desynchronised the stream; anyone editing their profile (0x46) broke every desktop client's connection | #62 |
+| F3 | Medium | desktop | Inline markdown parsing was quadratic; one long hostile message could freeze every desktop client in the channel | #62 |
+| F4 | Medium | macOS, desktop | Commits from a channel you'd left could set your *sending* key, so your audio was encrypted for the wrong room | #61, #62 |
+| F5 | Low | desktop | A reply quote could be taken from the server-visible `reply_to_id` instead of the encrypted message, so a server could forge "reply to" | #62 |
+| F6 | Low | macOS | Profile export wrote the identity secret as plaintext JSON (see A7 for old files) | #60 (format), #61 |
+| F7 | Low | server | Deleting an account always failed (a foreign key from `tofu_identities`), so users couldn't remove their data or release their name | #60 |
+| F8 | Low | server | Display names allowed look-alike and padded names, and reserved names could be dodged with punctuation | #58 |
+| F9 | Info | server | Voice groups with stable membership never ratcheted, so one media key could last for hours | #58 (15-minute ratchet) |
+| F10 | High | server | Control-frame reader pre-allocated from an attacker-chosen length prefix; idle connections could exhaust memory | `704cfd73` |
+| F11 | Medium | server | No rate limit on handshakes; signature-verification spam could starve live calls of CPU | `0f7c6f03` |
+
+### F1. [CRITICAL] Desktop voice was sent unencrypted
+
+**Where:** `clients/desktop/Services/AuraNetworkClient.cs`, `SendAudioFrameAsync`.
+
+**What happened.** 2fbf9c85 (10 April 2026) removed the only call that set up
+the desktop client's audio sender. With no sender, encoding returned nothing,
+and a fallback then sent the **raw PCM** on the control stream. The server
+relayed it to the channel. Desktop voice was not end-to-end encrypted, or even
+compressed, until November 2026. macOS was not affected.
+
+**Fix.**
+- #59 removed the fallback, so desktop voice went silent instead of plaintext.
+- #62 sets the sender up after login and blocks sending until the channel's MLS
+  voice key arrives. The block resets on every channel switch and disconnect.
+
+**Lesson.** A "send it anyway" fallback on a crypto path turns any setup bug
+into a confidentiality failure. Fail closed.
+
+---
+
+## Checked and found sound
+
+- **Challenge-response login.** Challenges are per connection, so a recorded
+  login can't be replayed. Login, MLS credentials and profiles use the hybrid
+  Ed25519 + ML-DSA-65 signature, and both halves must verify.
+- **Key commitment.** DAVE frames carry the 16-byte zero-padding commitment,
+  which defeats partitioning-oracle attacks on XChaCha20-Poly1305.
+- **Ciphersuite pinning.** Clients refuse KeyPackages and Welcomes for any MLS
+  suite but the hybrid post-quantum one, so a server can't downgrade a group.
+- **Credential checks.** Every leaf in a Welcome, every added KeyPackage and
+  every leaf a commit touches has its credential verified before it is used.
+- **Fail-closed audio on both clients** (since #62 on desktop). Nothing is sent
+  before a group key exists, and there is no plaintext path.
+- **Invite pinning.** An `aura://` link's certificate fingerprint is checked in
+  every build configuration, a mismatch is refused outright, and the pin is
+  saved only after a successful connection (#61, #62).
+- **Identity backups.** The format uses scrypt (N = 2^17) and
+  XChaCha20-Poly1305 with the header as associated data, so the KDF parameters
+  can't be lowered undetected, and crafted files can't demand unbounded memory
+  (#60).
+- **SQL.** Every query uses bound parameters.
+- **Replay protection.** The server keeps a bounded set of seen text message
+  ids.
+
+## Not yet reviewed
+
+- The `aura-identity` crate's hybrid signature construction in depth (beyond
+  its tests), and the draft post-quantum MLS ciphersuite itself.
+- Windows-specific code paths: the global push-to-talk hook and the
+  `aura://` scheme registration were written but have never run on Windows.
+- Fuzzing coverage of the client-side protobuf and MLS parsing (see
+  [`FUZZING.md`](FUZZING.md) for what is fuzzed today).
