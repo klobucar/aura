@@ -1407,6 +1407,14 @@ pub fn encode_update_channel(
     req.encode_to_vec()
 }
 
+/// Payload of `DeleteUserRequest` (0x44). The server honours it for the
+/// caller's own account, or any account when the caller is an admin, and
+/// answers with an `AdminResponse` (see [`decode_admin_response`]).
+#[uniffi::export]
+pub fn encode_delete_user_request(user_uuid: String) -> Vec<u8> {
+    aura_protocol::DeleteUserRequest { user_uuid }.encode_to_vec()
+}
+
 // ============================================================================
 // Identity verification — safety words and fingerprints
 //
