@@ -137,7 +137,9 @@ final class MessageNotifier {
         case .unknown:
             queued.append(request)
             authorization = .requesting
-            UNUserNotificationCenter.current().getNotificationSettings { settings in
+            // The completion handlers run on a background queue; @Sendable
+            // keeps them from inheriting this type's main-actor isolation.
+            UNUserNotificationCenter.current().getNotificationSettings { @Sendable settings in
                 let status = settings.authorizationStatus
                 Task { @MainActor in self.settled(status) }
             }
@@ -149,7 +151,7 @@ final class MessageNotifier {
         case .authorized, .provisional:
             finish(granted: true)
         case .notDetermined:
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { @Sendable granted, _ in
                 Task { @MainActor in self.finish(granted: granted) }
             }
         default:

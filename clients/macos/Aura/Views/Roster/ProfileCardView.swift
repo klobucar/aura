@@ -1,3 +1,4 @@
+import AuraCore
 import SwiftUI
 
 /// Who a profile card is about — a snapshot taken when the roster row is

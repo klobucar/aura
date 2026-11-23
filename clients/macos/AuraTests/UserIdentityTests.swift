@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import AuraCore
 @testable import Aura
 
 @MainActor

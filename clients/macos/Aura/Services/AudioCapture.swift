@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AVFoundation
+import os
 
 /// Audio capture service using AVAudioEngine.
 /// Captures 48kHz, 16-bit, mono PCM audio.
@@ -9,33 +10,45 @@ public class AudioCapture: ObservableObject {
     
     // MARK: - Constants
     
-    public static let sampleRate: Double = 48000
-    public static let channelCount: AVAudioChannelCount = 1
-    public static let bufferMilliseconds: UInt32 = 20
-    public static let samplesPerFrame = UInt32(sampleRate * Double(bufferMilliseconds) / 1000) // 960
+    nonisolated public static let sampleRate: Double = 48000
+    nonisolated public static let channelCount: AVAudioChannelCount = 1
+    nonisolated public static let bufferMilliseconds: UInt32 = 20
+    nonisolated public static let samplesPerFrame = UInt32(sampleRate * Double(bufferMilliseconds) / 1000) // 960
     
     // MARK: - Published State
     
     @Published public var isRunning = false
-    @Published public var packetsSent: UInt64 = 0
     @Published public var errorMessage: String?
+
+    /// 20 ms frames handed to the handler. Counted on the tap's thread.
+    public nonisolated var packetsSent: UInt64 { sentFrames.withLock { $0 } }
     
     // MARK: - Private Properties
     
     private var audioEngine: AVAudioEngine?
     private var inputNode: AVAudioInputNode?
-    private var onAudioData: (([Float]) -> Void)?
+
+    /// The running capture's handler, read by the tap for every buffer.
+    /// `stop()` clears it first, so frames the tap produces after a stop are
+    /// dropped rather than sent.
+    private nonisolated let frameHandler = OSAllocatedUnfairLock<(@Sendable ([Float]) -> Void)?>(initialState: nil)
+    private nonisolated let sentFrames = OSAllocatedUnfairLock(initialState: UInt64(0))
     
     public init() {}
+
+    deinit {
+        frameHandler.withLock { $0 = nil }
+    }
     
     // MARK: - Public API
     
     /// Start capturing audio from the default microphone.
-    /// - Parameter handler: Callback with Float PCM audio data.
-    public func start(handler: @escaping ([Float]) -> Void) {
+    /// - Parameter handler: Called with each 20 ms Float PCM frame, on the
+    ///   capture tap's thread — never the main actor.
+    public func start(handler: @escaping @Sendable ([Float]) -> Void) {
         guard !isRunning else { return }
         
-        onAudioData = handler
+        frameHandler.withLock { $0 = handler }
         
         do {
             audioEngine = AVAudioEngine()
@@ -57,11 +70,15 @@ public class AudioCapture: ObservableObject {
             )!
             
             let bufferSize = AVAudioFrameCount(Self.samplesPerFrame)
+            let frameHandler = self.frameHandler
+            let sentFrames = self.sentFrames
             
-            // Install tap with input format, we'll convert if needed
-            input.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, time in
-                guard let self = self else { return }
-                
+            // Install tap with input format, we'll convert if needed. The tap
+            // runs on an audio thread: @Sendable keeps it off the main actor
+            // (AVAudioNodeTapBlock isn't Sendable, so it would inherit it).
+            input.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { @Sendable buffer, time in
+                guard frameHandler.withLock({ $0 }) != nil else { return }
+
                 let convertedBuffer: AVAudioPCMBuffer
                 if inputFormat.sampleRate != Self.sampleRate || inputFormat.channelCount != Self.channelCount {
                     guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { return }
@@ -89,13 +106,13 @@ public class AudioCapture: ObservableObject {
                     return Array(samples[startIndex..<endIndex])
                 }
                 
-                Task { @MainActor in
-                    for chunk in chunks {
-                        if chunk.count == samplesPerFrame {
-                            self.packetsSent += 1
-                            self.onAudioData?(chunk)
-                        }
-                    }
+                // Straight to the handler, on this thread: a frame must not
+                // wait for the main actor. Re-read per frame so none goes out
+                // once `stop()` has run.
+                for chunk in chunks where chunk.count == samplesPerFrame {
+                    guard let handler = frameHandler.withLock({ $0 }) else { return }
+                    sentFrames.withLock { $0 += 1 }
+                    handler(chunk)
                 }
             }
             
@@ -115,12 +132,12 @@ public class AudioCapture: ObservableObject {
     public func stop() {
         guard isRunning else { return }
         
+        frameHandler.withLock { $0 = nil }
         inputNode?.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
         inputNode = nil
         isRunning = false
-        onAudioData = nil
         print("[AudioCapture] Stopped - \(packetsSent) packets sent")
     }
 }

@@ -159,14 +159,15 @@ final class TalkSegmentStore: ObservableObject {
         start()
     }
 
-    deinit {
-        timer?.invalidate()
-    }
-
     private func start() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: Self.levelInterval, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
+        // The timer stops itself on the first tick after the store is gone. A
+        // deinit can't do it: deinit is nonisolated and `Timer` isn't Sendable.
+        timer = Timer.scheduledTimer(withTimeInterval: Self.levelInterval, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
             Task { @MainActor in self.tick() }
         }
     }

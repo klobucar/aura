@@ -7,6 +7,7 @@
 
 import Foundation
 import Testing
+import AuraCore
 @testable import Aura
 
 struct MlsProtocolTests {
