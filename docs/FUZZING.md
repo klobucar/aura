@@ -1,413 +1,94 @@
 ---
 title: Fuzzing Guide
-description: Documentation for protocol fuzzing using libfuzzer.
+description: How Aura's cargo-fuzz targets are laid out, how to run them, and what they cover.
 ---
-# Fuzzing Aura Protocol
+# Fuzzing Aura
 
-## Overview
+The `fuzz/` directory is a standalone [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)
+crate (`aura-fuzz`). It has its own `[workspace]` and `Cargo.lock`, and the root
+`Cargo.toml` lists it under `exclude`, so `cargo build --workspace` and
+`cargo test --workspace` never touch it.
 
-Fuzzing is critical for finding edge cases, security vulnerabilities, and crashes in the Aura codebase. This document outlines a comprehensive fuzzing strategy for both Rust and Swift components.
+Each target feeds attacker-controlled bytes into code that parses or acts on
+untrusted input: network messages, key and identity files, MLS messages, and
+decrypted audio.
 
-## Rust Fuzzing with cargo-fuzz
-
-### Setup
-
-```bash
-cargo install cargo-fuzz
-```
-
-### Targets to Fuzz
-
-#### 1. Protocol Parsing (High Priority)
-**Target**: Message deserialization from network
-- **Input**: Raw bytes from QUIC streams
-- **Why**: Untrusted network data, potential for crashes/exploits
-- **Fuzz**: Protobuf parsing, packet headers, malformed data
-
-```rust
-// fuzz/fuzz_targets/parse_server_message.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    // Try to parse as ServerMessage
-    let _ = ServerMessage::decode(data);
-});
-```
-
-#### 2. Audio Pipeline (High Priority)
-**Target**: Opus decoding, jitter buffer, audio processing
-- **Input**: Opus-encoded audio frames
-- **Why**: Audio data from network, potential for buffer overflows
-- **Fuzz**: Invalid Opus frames, extreme packet loss, out-of-order packets
-
-```rust
-// fuzz/fuzz_targets/audio_decode.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    let mut decoder = OpusDecoder::new();
-    let _ = decoder.decode(data);
-});
-```
-
-#### 3. MLS Protocol (Critical)
-**Target**: MLS message processing, key derivation
-- **Input**: MLS Welcome, Commit, Proposal messages
-- **Why**: Cryptographic operations, security-critical
-- **Fuzz**: Malformed MLS messages, invalid epochs, corrupted ciphertexts
-
-```rust
-// fuzz/fuzz_targets/mls_process.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    let mut group = MlsGroup::new();
-    let _ = group.process_message(data);
-});
-```
-
-#### 4. DAVE Protocol (Critical)
-**Target**: Per-sender key derivation, nonce generation
-- **Input**: Session IDs, sequence numbers, key material
-- **Why**: Encryption security depends on correct implementation
-- **Fuzz**: Duplicate nonces, key reuse, invalid session IDs
-
-```rust
-// fuzz/fuzz_targets/dave_crypto.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    if data.len() >= 40 {
-        let session_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let seq = u64::from_le_bytes([data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11]]);
-        let key = &data[12..44]; // 32 bytes
-        
-        let _ = derive_per_sender_key(session_id, seq, key);
-    }
-});
-```
-
-#### 5. Text Encryption (High Priority)
-**Target**: ChaCha20-Poly1305 encryption/decryption
-- **Input**: Plaintext, ciphertext, keys, nonces
-- **Why**: Security-critical, potential for timing attacks
-- **Fuzz**: Invalid nonces, corrupted ciphertexts, wrong key lengths
-
-#### 6. Server State Management (Medium Priority)
-**Target**: Channel/user state updates
-- **Input**: State update messages
-- **Why**: Potential for race conditions, inconsistent state
-- **Fuzz**: Concurrent updates, invalid user IDs, duplicate channels
-
-### Fuzzing Configuration
-
-Create `fuzz/Cargo.toml`:
-```toml
-[package]
-name = "aura-fuzz"
-version = "0.0.0"
-publish = false
-edition = "2021"
-
-[package.metadata]
-cargo-fuzz = true
-
-[dependencies]
-libfuzzer-sys = "0.4"
-aura-core = { path = "../crates/aura-core" }
-
-[[bin]]
-name = "parse_server_message"
-path = "fuzz_targets/parse_server_message.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "audio_decode"
-path = "fuzz_targets/audio_decode.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "mls_process"
-path = "fuzz_targets/mls_process.rs"
-test = false
-doc = false
-```
-
-### Running Fuzz Tests
+## Running
 
 ```bash
-# Run specific target
-cargo fuzz run parse_server_message
+cargo install cargo-fuzz --locked --version 0.13.1
 
-# Run with corpus
-cargo fuzz run parse_server_message corpus/
+# Build every target (AddressSanitizer + libFuzzer coverage).
+cargo fuzz build
 
-# Run for specific duration
-cargo fuzz run parse_server_message -- -max_total_time=3600
-
-# Minimize corpus
-cargo fuzz cmin parse_server_message
-
-# Triage crashes
-cargo fuzz tmin parse_server_message crash-file
+# Run one target for 60 seconds.
+cargo fuzz run protocol_decode fuzz/corpus/protocol_decode fuzz/seeds/protocol_decode \
+    -- -max_total_time=60 -max_len=4096 -rss_limit_mb=4096
 ```
 
-### Continuous Fuzzing
+Requirements:
 
-Set up OSS-Fuzz integration for continuous fuzzing:
-```yaml
-# .github/workflows/fuzz.yml
-name: Continuous Fuzzing
-on:
-  schedule:
-    - cron: '0 0 * * *'  # Daily
-jobs:
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - run: cargo install cargo-fuzz
-      - run: |
-          for target in parse_server_message audio_decode mls_process; do
-            cargo fuzz run $target -- -max_total_time=3600
-          done
-```
+- A nightly toolchain. CI pins `nightly-2026-09-01`; use the same one locally
+  (`rustup toolchain install nightly-2026-09-01`, then `cargo +nightly-2026-09-01 fuzz ...`).
+  Older nightlies have hit compiler crashes in tokio under `-Zsanitizer=address`.
+- The same build dependencies as the main workspace (`protoc`, a C toolchain,
+  and the Opus DNN model data; see `ci.yml`).
+- Several GB of disk for the sanitizer build in `fuzz/target`.
 
-## Swift Fuzzing
+`fuzz/corpus/` (libFuzzer's working corpus) and `fuzz/artifacts/` (crashes,
+timeouts, OOMs) are not committed. `fuzz/seeds/<target>/` holds small committed
+seed inputs that are passed as read-only extra corpus directories.
 
-### Approach 1: XCTest with Random Data
+`aura-core` is built with `default-features = false`, which leaves out the
+native audio backend (cpal/ALSA). Nothing fuzzed uses it.
 
-```swift
-// AuraTests/FuzzTests.swift
-import XCTest
-@testable import Aura
+## Targets
 
-final class FuzzTests: XCTestCase {
-    
-    func testServerProfileFuzzing() {
-        for _ in 0..<1000 {
-            let randomName = randomString(length: Int.random(in: 0...1000))
-            let randomHost = randomString(length: Int.random(in: 0...255))
-            let randomPort = UInt16.random(in: 0...65535)
-            
-            let server = ServerProfile(
-                name: randomName,
-                host: randomHost,
-                port: randomPort
-            )
-            
-            let manager = ServerManager()
-            manager.addServer(server)
-            
-            // Should not crash
-            XCTAssertTrue(true)
-        }
-    }
-    
-    func testProfileImportFuzzing() {
-        for _ in 0..<1000 {
-            let randomData = randomData(length: Int.random(in: 0...10000))
-            
-            // Should handle gracefully
-            let result = UserIdentity.importProfile(from: randomData)
-            // Most should fail, but shouldn't crash
-        }
-    }
-    
-    private func randomString(length: Int) -> String {
-        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !@#$%^&*()"
-        return String((0..<length).map { _ in letters.randomElement()! })
-    }
-    
-    private func randomData(length: Int) -> Data {
-        var data = Data(count: length)
-        data.withUnsafeMutableBytes { ptr in
-            arc4random_buf(ptr.baseAddress, length)
-        }
-        return data
-    }
-}
-```
+| Target | What it exercises |
+| --- | --- |
+| `protocol_decode` | Decodes about 38 `aura-protocol` message types (selected by the first input byte), checks that re-encoding is stable, and round-trips the `FastAudioPacket` header. |
+| `server_control` | Builds an in-memory `ServerState` with one admin and two plain-user sessions, then replays a control frame (`[wire type][actor][payload]`) through the same decode and `ServerState`/`AuthService` calls that `connection.rs` makes: join, audio route, text, channel create/update/delete, profile, delete-user, status, list-users, verify, ban, grant-admin, kick, and the MLS handlers. Not covered: the QUIC frame reader, which needs a live `RecvStream`. |
+| `server_auth` | Raw `AuthRequest` bytes into `authenticate`; correctly signed logins with fuzzed display names (so name validation is reached past the signature check); corrupted signatures and short challenges; re-login. |
+| `core_decode` | All the UniFFI `decode_*` functions that the Swift/Kotlin clients call. |
+| `text_decrypt` | `decrypt_text` with a fixed key, given raw protobuf and structured packets. |
+| `audio_receive` | `AudioReceiver` driven by a stream of operations: packets encrypted under the real sender key with arbitrary payloads (so they reach the Opus decoder), epoch keys, gain and mute, mixing. |
+| `jitter_buffer` | Arbitrary configuration plus push/pop/reset sequences. Sequence numbers are limited to the u16 range that production uses. |
+| `identity_backup` | `decrypt_identity_backup` with an arbitrary file and passphrase. If the header asks for scrypt parameters the importer accepts, they are lowered to the cheapest accepted values so the target stays fast. |
+| `identity_parse` | Public key, signature, member credential and secret parsing, and `verify_profile`. |
+| `mls_process` | A fresh `MlsClient` with a created group receives arbitrary commit, welcome and key-package bytes. |
 
-### Approach 2: Property-Based Testing with SwiftCheck
+## CI
 
-```swift
-import SwiftCheck
-@testable import Aura
+`.github/workflows/fuzz.yml`:
 
-class PropertyTests: XCTestCase {
-    func testServerProfileRoundTrip() {
-        property("Server profile encode/decode round-trip") <- forAll { (name: String, host: String, port: UInt16) in
-            let server = ServerProfile(name: name, host: host, port: port)
-            let encoded = try? JSONEncoder().encode(server)
-            let decoded = try? JSONDecoder().decode(ServerProfile.self, from: encoded!)
-            return decoded?.name == name && decoded?.host == host && decoded?.port == port
-        }
-    }
-}
-```
+- Pull requests that touch `crates/`, `fuzz/`, `Cargo.toml`, `Cargo.lock` or the
+  workflow run `cargo fuzz build` only, to catch API changes that break a target.
+- A weekly schedule (Mondays) and manual `workflow_dispatch` run every target
+  for 60 seconds each (the dispatch form takes a different number of seconds).
+- A failing target uploads `fuzz/artifacts/<target>/` as the
+  `fuzz-crash-<target>` workflow artifact.
 
-## Coverage-Guided Fuzzing
+## When a target crashes
 
-### libFuzzer Integration
+1. Download the artifact (or take the file from `fuzz/artifacts/<target>/`).
+2. Reproduce: `cargo fuzz run <target> fuzz/artifacts/<target>/crash-<hash>`.
+3. Minimise: `cargo fuzz tmin <target> fuzz/artifacts/<target>/crash-<hash>`.
+4. Turn the minimised input into a regression `#[test]` in the crate that owns
+   the bug, with the bytes inlined, then fix the bug.
 
-For Rust, use libFuzzer with sanitizers:
+## Adding a target
 
-```bash
-# Address Sanitizer (memory safety)
-RUSTFLAGS="-Z sanitizer=address" cargo fuzz run parse_server_message
+1. Add `fuzz/fuzz_targets/<name>.rs` (`#![no_main]`, `fuzz_target!`) and a
+   matching `[[bin]]` entry in `fuzz/Cargo.toml`.
+2. Add the name to the matrix in `.github/workflows/fuzz.yml`.
+3. Add a few seed inputs under `fuzz/seeds/<name>/`.
+4. Prefer structured input (`arbitrary::Arbitrary`) when the code under test
+   checks a signature, MAC or checksum first, so the fuzzer can reach the code
+   behind the check.
 
-# Memory Sanitizer (uninitialized memory)
-RUSTFLAGS="-Z sanitizer=memory" cargo fuzz run parse_server_message
+## Not covered
 
-# Thread Sanitizer (data races)
-RUSTFLAGS="-Z sanitizer=thread" cargo fuzz run parse_server_message
-
-# Undefined Behavior Sanitizer
-RUSTFLAGS="-Z sanitizer=undefined" cargo fuzz run parse_server_message
-```
-
-## Differential Fuzzing
-
-Compare implementations across platforms:
-
-```rust
-// Test that Swift and Rust produce same results
-fuzz_target!(|data: &[u8]| {
-    let rust_result = rust_parse_message(data);
-    let swift_result = call_swift_parse_message(data);
-    assert_eq!(rust_result, swift_result);
-});
-```
-
-## Security-Focused Fuzzing
-
-### Timing Attack Detection
-
-```rust
-use std::time::Instant;
-
-fuzz_target!(|data: &[u8]| {
-    let start = Instant::now();
-    let _ = constant_time_compare(data);
-    let duration = start.elapsed();
-    
-    // Flag if timing varies significantly
-    assert!(duration.as_micros() < 1000);
-});
-```
-
-### Nonce Reuse Detection
-
-```rust
-use std::collections::HashSet;
-
-fuzz_target!(|data: &[u8]| {
-    static mut NONCES: Option<HashSet<Vec<u8>>> = None;
-    
-    unsafe {
-        if NONCES.is_none() {
-            NONCES = Some(HashSet::new());
-        }
-        
-        let nonce = generate_nonce(data);
-        assert!(!NONCES.as_ref().unwrap().contains(&nonce), "Nonce reuse detected!");
-        NONCES.as_mut().unwrap().insert(nonce);
-    }
-});
-```
-
-## Corpus Management
-
-### Seed Corpus
-
-Create initial corpus from real-world data:
-```bash
-# Capture real network traffic
-tcpdump -i any -w aura-traffic.pcap port 8443
-
-# Extract payloads
-tcpdump -r aura-traffic.pcap -x > corpus/real-traffic-*.bin
-
-# Add hand-crafted edge cases
-echo -n "\x00\x00\x00\x00" > corpus/all-zeros
-echo -n "\xff\xff\xff\xff" > corpus/all-ones
-```
-
-### Corpus Minimization
-
-```bash
-# Reduce corpus to minimal set
-cargo fuzz cmin parse_server_message
-
-# Merge new findings
-cargo fuzz cmin parse_server_message corpus/ new-corpus/
-```
-
-## Crash Triage
-
-When fuzzing finds a crash:
-
-1. **Reproduce**: `cargo fuzz run target crash-file`
-2. **Minimize**: `cargo fuzz tmin target crash-file`
-3. **Debug**: `rust-lldb target/debug/target crash-file`
-4. **Fix**: Create regression test
-5. **Verify**: Re-run fuzzer to ensure fix
-
-## Metrics and Reporting
-
-Track fuzzing effectiveness:
-- **Coverage**: Lines/branches covered
-- **Crashes**: Unique crashes found
-- **Corpus size**: Number of interesting inputs
-- **Executions/sec**: Fuzzing throughput
-
-```bash
-# Generate coverage report
-cargo fuzz coverage parse_server_message
-llvm-cov show target/coverage/parse_server_message -format=html > coverage.html
-```
-
-## Integration with CI/CD
-
-```yaml
-# .github/workflows/fuzz-pr.yml
-name: Fuzz PR Changes
-on: pull_request
-jobs:
-  fuzz:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - run: cargo fuzz run parse_server_message -- -max_total_time=300
-      - run: cargo fuzz run audio_decode -- -max_total_time=300
-```
-
-## Best Practices
-
-1. **Start with high-value targets**: Protocol parsing, crypto, audio
-2. **Use sanitizers**: ASAN, MSAN, TSAN, UBSAN
-3. **Maintain corpus**: Keep successful inputs for regression testing
-4. **Continuous fuzzing**: Run overnight, on CI/CD
-5. **Triage quickly**: Fix crashes as they're found
-6. **Document findings**: Create issues for each unique crash
-7. **Regression tests**: Add crash inputs to test suite
-
-## Expected Findings
-
-Common issues fuzzing typically finds:
-- Buffer overflows
-- Integer overflows
-- Null pointer dereferences
-- Assertion failures
-- Infinite loops
-- Memory leaks
-- Uninitialized memory
-- Race conditions
-- Cryptographic vulnerabilities
+- Swift code (the macOS client). Parsing there goes through the UniFFI
+  functions in `core_decode`, but the Swift side has no fuzzing.
+- The QUIC transport and TLS stack (quinn, rustls) and the live frame reader.
+- Opus itself beyond what `audio_receive` reaches.

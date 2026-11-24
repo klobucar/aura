@@ -30,11 +30,25 @@ enum Op {
         use_key_b: bool,
         payload: Vec<u8>,
     },
-    AddSender { session: u8, epoch: u16 },
-    UpdateKey { session: u8, epoch: u16 },
-    RemoveSender { session: u8 },
-    Gain { session: u8, gain: f32 },
-    Mute { session: u8, muted: bool },
+    AddSender {
+        session: u8,
+        epoch: u16,
+    },
+    UpdateKey {
+        session: u8,
+        epoch: u16,
+    },
+    RemoveSender {
+        session: u8,
+    },
+    Gain {
+        session: u8,
+        gain: f32,
+    },
+    Mute {
+        session: u8,
+        muted: bool,
+    },
     SetJitterMs(u32),
     PopDecoded,
     PopMixed,
