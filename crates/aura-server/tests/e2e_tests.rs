@@ -19,10 +19,14 @@ use tokio::time::sleep;
 
 /// 20 ms of a 440 Hz tone at 48 kHz, mono.
 fn tone(frame: usize) -> Vec<i16> {
+    tone_at(frame, 12_000.0)
+}
+
+fn tone_at(frame: usize, amplitude: f32) -> Vec<i16> {
     (0..960)
         .map(|i| {
             let t = (frame * 960 + i) as f32 / 48_000.0;
-            ((t * 440.0 * std::f32::consts::TAU).sin() * 12_000.0) as i16
+            ((t * 440.0 * std::f32::consts::TAU).sin() * amplitude) as i16
         })
         .collect()
 }
@@ -215,7 +219,6 @@ async fn receiver_rejects_unencrypted_and_wrongly_keyed_audio() {
 /// forged datagram with an arbitrary sequence number may not move the
 /// receiver's replay window.
 #[tokio::test]
-#[ignore = "bug: AudioReceiver::on_packet advances its replay window (last_sequence) before the frame is authenticated, so one forged frame with a sequence number inside the window makes every genuine frame after it look like a replay"]
 async fn forged_frame_does_not_poison_the_replay_window() {
     let server = TestServer::start().await;
     let channel = server.create_channel("Room").await;
@@ -278,9 +281,9 @@ async fn audio_claiming_another_session_is_not_relayed() {
 /// One authentic frame whose header can be re-stamped: the header (session,
 /// epoch hint, sequence) isn't covered by the AEAD, so the same ciphertext
 /// is a valid frame at any sequence number.
-fn restampable_frame(key: &[u8; 32]) -> impl Fn(u16) -> Vec<u8> {
+fn restampable_frame(key: &[u8; 32], amplitude: f32) -> impl Fn(u16) -> Vec<u8> {
     let sender = AudioSenderWrapper::new(9, key).unwrap();
-    let template = sender.process(&tone(0)).unwrap().unwrap();
+    let template = sender.process(&tone_at(0, amplitude)).unwrap().unwrap();
     move |seq| {
         let mut p = template.clone();
         p[6..8].copy_from_slice(&seq.to_be_bytes());
@@ -294,31 +297,39 @@ fn restampable_frame(key: &[u8; 32]) -> impl Fn(u16) -> Vec<u8> {
 #[ignore = "bug: after the u16 sequence number wraps (65535 -> 0) the jitter buffer treats every later frame as late (`seq <= last_played_seq`, JitterBuffer::push) and drops it, so a sender goes silent after ~22 minutes of continuous speech"]
 async fn receiver_keeps_playing_across_sequence_wraparound() {
     let key = DaveCrypto::random_key();
-    let frame_at = restampable_frame(&key);
+    // Quiet before the wrap, loud after: concealment of lost frames can only
+    // fade out the quiet audio, so loud output means the post-wrap frames
+    // really were played.
+    let quiet = restampable_frame(&key, 1_000.0);
+    let loud = restampable_frame(&key, 12_000.0);
     let receiver = aura_core::uniffi_bindings::AudioReceiverWrapper::new();
     receiver.add_sender(9, &key, 0).unwrap();
 
-    let mut played = 0;
+    let mut loudest_after_wrap = 0.0f64;
     for seq in (65_530u16..=65_535).chain(0..6) {
+        let frame = if seq > 100 { quiet(seq) } else { loud(seq) };
         receiver
-            .on_packet(&frame_at(seq))
+            .on_packet(&frame)
             .unwrap_or_else(|e| panic!("frame {seq} refused: {e:?}"));
         sleep(Duration::from_millis(21)).await;
-        played += receiver.pop_decoded().len();
+        for decoded in receiver.pop_decoded() {
+            if seq <= 100 {
+                loudest_after_wrap = loudest_after_wrap.max(rms(&decoded.pcm));
+            }
+        }
     }
     assert!(
-        played >= 12,
-        "only {played} of 12 frames played across the wrap"
+        loudest_after_wrap > 4_000.0,
+        "frames after the wrap were not played (loudest output {loudest_after_wrap:.0})"
     );
 }
 
 /// A listener who joins while someone has been speaking for a while has to
 /// hear them from the first frame they get, whatever its sequence number.
 #[tokio::test]
-#[ignore = "bug: AudioReceiver starts with last_sequence = 0, so a listener whose first frame from a sender has sequence > 32768 (a sender who has talked for more than ~11 minutes) rejects it as a replay"]
 async fn receiver_accepts_a_stream_already_in_progress() {
     let key = DaveCrypto::random_key();
-    let frame_at = restampable_frame(&key);
+    let frame_at = restampable_frame(&key, 12_000.0);
     let receiver = aura_core::uniffi_bindings::AudioReceiverWrapper::new();
     receiver.add_sender(9, &key, 0).unwrap();
     receiver

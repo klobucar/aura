@@ -333,8 +333,10 @@ struct SenderState {
     current_epoch: u16,
     /// Jitter buffer
     jitter: JitterBuffer,
-    /// Last processed sequence number (for replay protection)
-    last_sequence: u16,
+    /// Newest sequence number seen on an authenticated frame (for replay
+    /// protection); `None` until the first one, so a listener who joins a
+    /// stream in progress accepts wherever it is.
+    last_sequence: Option<u16>,
     /// Local playback gain multiplier (1.0 = unchanged, 0.0..4.0 permitted)
     gain: f32,
     /// Local-only mute — audio still decodes (to keep Opus state healthy)
@@ -386,7 +388,7 @@ impl AudioReceiver {
             key_store,
             current_epoch: epoch_hint,
             jitter,
-            last_sequence: 0,
+            last_sequence: None,
             gain: 1.0,
             muted: false,
         };
@@ -466,13 +468,15 @@ impl AudioReceiver {
             .get_mut(&packet.session_id)
             .ok_or(AudioPipelineError::UnknownSender(packet.session_id))?;
 
-        // 3. Replay protection: reject if sequence is too old
-        let seq_diff = packet.sequence.wrapping_sub(state.last_sequence);
-        if seq_diff > 32768 && seq_diff != 0 {
-            // Sequence went backwards by more than half the range - likely replay
-            return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
+        // 3. Replay protection: reject a frame older than the newest
+        //    authenticated one by more than half the sequence range. This only
+        //    reads the window; it moves once the frame has authenticated
+        //    (below), so a forged frame can't push it ahead of the real stream.
+        if let Some(last) = state.last_sequence {
+            if packet.sequence.wrapping_sub(last) > 32768 {
+                return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
+            }
         }
-        state.last_sequence = state.last_sequence.max(packet.sequence);
 
         // 4. Try decryption with epoch_hint key first, then fallback
         let opus_data = if let Some(crypto) = state.key_store.get(&packet.epoch_hint) {
@@ -492,6 +496,14 @@ impl AudioReceiver {
                 crate::crypto::CryptoError::DecryptionFailed,
             ))?
         };
+
+        // Authenticated: the window may move forward (wrapping at 65536).
+        if state
+            .last_sequence
+            .is_none_or(|last| packet.sequence.wrapping_sub(last) <= 32768)
+        {
+            state.last_sequence = Some(packet.sequence);
+        }
 
         // 5. Insert into jitter buffer
         state.jitter.push(
