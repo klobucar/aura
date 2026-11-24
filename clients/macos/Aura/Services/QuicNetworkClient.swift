@@ -494,8 +494,10 @@ public class QuicNetworkClient {
                 return
             }
 
-            if data[0] == 0x01 {  // Audio datagram: straight to the audio domain
+            if data[0] == 0x02 {  // Audio datagram: straight to the audio domain
                 voice.submitReceived(data.subdata(in: 1..<data.count))
+            } else if data[0] == 0x01 {  // Older audio format: reported, never played
+                voice.submitLegacyReceived(data.subdata(in: 1..<data.count))
             } else {
                 print("[QuicClient] Unknown datagram type: 0x\(String(format: "%02X", data[0]))")
             }
@@ -1492,11 +1494,12 @@ public class QuicNetworkClient {
         case Self.MSG_CHANNEL_STATE: // 0x13
             await handleServerState(stream: stream)
             
-        case 0x20: // MSG_AUDIO - audio packet from server
+        case 0x21: // MSG_AUDIO - audio packet from server (v2, header authenticated)
             await handleAudioPacket(stream: stream)
+
+        case 0x20: // MSG_AUDIO_V1 - older audio format: reported, never played
+            await handleAudioPacket(stream: stream, legacy: true)
             
-        case 0x21: // MSG_AUDIO_STREAM - ignore, handled elsewhere
-            break
             
         case Self.MSG_TEXT_PACKET: // 0x30
             await handleTextPacket(stream: stream)
@@ -2453,14 +2456,18 @@ public class QuicNetworkClient {
     }
     
     /// Handle incoming audio packet from server
-    private func handleAudioPacket(stream: NWConnection) async {
+    private func handleAudioPacket(stream: NWConnection, legacy: Bool = false) async {
         do {
             let packetData = try await receiveHardenedPayload(maxLen: Self.MAX_AUDIO_PACKET_SIZE, on: stream)
             
             print("[QuicClient] Received audio packet: \(packetData.count) bytes")
             
             // Decrypt, decode and play in the audio domain.
-            voice.submitReceived(packetData)
+            if legacy {
+                voice.submitLegacyReceived(packetData)
+            } else {
+                voice.submitReceived(packetData)
+            }
         } catch {
             print("[QuicClient] Failed to parse audio packet: \(error)")
         }
