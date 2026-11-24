@@ -488,7 +488,7 @@ impl OpusDred {
     /// Create a new DRED state
     pub fn new() -> Result<Self, Opus16Error> {
         let mut error: c_int = 0;
-        let ptr = unsafe { ffi::opus_dred_create(&mut error) };
+        let ptr = unsafe { ffi::opus_dred_alloc(&mut error) };
 
         check_error(error)?;
         let ptr = NonNull::new(ptr).ok_or(Opus16Error::AllocFail)?;
