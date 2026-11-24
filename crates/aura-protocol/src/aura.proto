@@ -159,9 +159,9 @@ message ChannelIcon {
 // User profile - signed but intentionally plaintext for server searchability
 message UserProfile {
     string user_id = 1;
-    string display_name = 2;
-    string bio = 3;           // Supports Markdown (limit: 512KB)
-    bytes avatar_data = 4;    // Base64 or raw bytes (limit: 128KB)
+    string display_name = 2;  // Server-authoritative: ignored in UpdateProfile; ProfileUpdated always carries the account's name
+    string bio = 3;           // Supports Markdown (limit: 16 KiB of UTF-8)
+    bytes avatar_data = 4;    // Raw PNG or JPEG bytes, or empty for none (limit: 128 KiB)
     bytes signature = 5;      // Ed25519 signature over serialized fields 1-4
     bytes signing_key = 6;    // User's Ed25519 public key for verification
 }

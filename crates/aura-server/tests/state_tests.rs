@@ -700,3 +700,79 @@ async fn list_users_marks_admins_and_counts_everyone() {
 
     assert!(state.list_users(&bob, 0, 0).is_err());
 }
+
+fn png_avatar(len: usize) -> Vec<u8> {
+    let mut v = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    v.resize(len, 0);
+    v
+}
+
+fn profile_for(uuid: &str, name: &str) -> aura_protocol::UserProfile {
+    aura_protocol::UserProfile {
+        user_id: uuid.into(),
+        display_name: name.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn profile_update_ignores_client_display_name_and_broadcasts_account_name() {
+    let state = create_test_state();
+    let uuid = state.db.create_user(&[0x01; 32], None, "Bob").unwrap();
+    let (sid, mut rx) = connect(&state, &uuid);
+    drain(&mut rx);
+
+    let mut p = profile_for(&uuid, "  Admin\u{202e}Root ");
+    p.bio = "hello".into();
+    p.avatar_data = png_avatar(64);
+    state.update_profile_persistent(sid, p).await.unwrap();
+
+    let msgs = drain(&mut rx);
+    let Some(ServiceMessage::ProfileUpdated(got)) = msgs
+        .iter()
+        .find(|m| matches!(m, ServiceMessage::ProfileUpdated(_)))
+    else {
+        panic!("no ProfileUpdated broadcast");
+    };
+    assert_eq!(got.display_name, "Bob");
+    assert_eq!(got.bio, "hello");
+    assert_eq!(state.profiles.get(&uuid).unwrap().display_name, "Bob");
+}
+
+#[tokio::test]
+async fn profile_update_enforces_size_and_format_limits() {
+    let state = create_test_state();
+    let uuid = state.db.create_user(&[0x01; 32], None, "Bob").unwrap();
+    let (sid, _rx) = connect(&state, &uuid);
+
+    let mut p = profile_for(&uuid, "Bob");
+    p.avatar_data = png_avatar(128 * 1024);
+    state.update_profile_persistent(sid, p).await.unwrap();
+    let mut p = profile_for(&uuid, "Bob");
+    p.avatar_data = png_avatar(128 * 1024 + 1);
+    let e = state.update_profile_persistent(sid, p).await.unwrap_err();
+    assert_eq!(e.to_string(), "Avatar is larger than 128 KB");
+
+    let mut p = profile_for(&uuid, "Bob");
+    p.bio = "a".repeat(16 * 1024);
+    state.update_profile_persistent(sid, p).await.unwrap();
+    let mut p = profile_for(&uuid, "Bob");
+    p.bio = "é".repeat(8 * 1024 + 1); // 2 bytes each: bytes, not chars
+    let e = state.update_profile_persistent(sid, p).await.unwrap_err();
+    assert_eq!(e.to_string(), "Bio is longer than 16 KB");
+
+    let mut p = profile_for(&uuid, "Bob");
+    p.avatar_data = b"GIF89a....".to_vec();
+    let e = state.update_profile_persistent(sid, p).await.unwrap_err();
+    assert_eq!(e.to_string(), "Avatar must be a PNG or JPEG image");
+
+    let mut p = profile_for(&uuid, "Bob");
+    p.avatar_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0];
+    state.update_profile_persistent(sid, p).await.unwrap();
+
+    state
+        .update_profile_persistent(sid, profile_for(&uuid, "Bob"))
+        .await
+        .unwrap();
+    assert!(state.profiles.get(&uuid).unwrap().avatar_data.is_empty());
+}

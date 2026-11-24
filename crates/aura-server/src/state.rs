@@ -206,6 +206,30 @@ pub struct MlsRoster {
     members: Vec<(u32, String)>, // (session_id, user_uuid)
 }
 
+/// Maximum avatar size accepted in a profile update.
+pub const MAX_AVATAR_BYTES: usize = 128 * 1024;
+/// Maximum bio size (UTF-8 bytes) accepted in a profile update.
+pub const MAX_BIO_BYTES: usize = 16 * 1024;
+
+const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
+
+/// Check a profile update's bio and avatar. Errors carry the message shown to
+/// the user. An empty avatar means "no avatar".
+pub fn validate_profile_update(profile: &UserProfile) -> Result<()> {
+    if profile.avatar_data.len() > MAX_AVATAR_BYTES {
+        return Err(anyhow!("Avatar is larger than 128 KB"));
+    }
+    if profile.bio.len() > MAX_BIO_BYTES {
+        return Err(anyhow!("Bio is longer than 16 KB"));
+    }
+    let a = &profile.avatar_data;
+    if !a.is_empty() && !a.starts_with(&PNG_MAGIC) && !a.starts_with(&JPEG_MAGIC) {
+        return Err(anyhow!("Avatar must be a PNG or JPEG image"));
+    }
+    Ok(())
+}
+
 impl MlsRoster {
     /// The member that commits, if anyone holds the group.
     pub fn founder(&self) -> Option<u32> {
@@ -1858,10 +1882,15 @@ impl ServerState {
     }
 
     /// Update user profile persistently.
+    ///
+    /// The client-supplied `display_name` is ignored: the account's
+    /// authenticated name (validated at registration) is what gets stored,
+    /// cached and broadcast. Bio and avatar are checked by
+    /// [`validate_profile_update`].
     pub async fn update_profile_persistent(
         &self,
         session_id: u32,
-        profile: UserProfile,
+        mut profile: UserProfile,
     ) -> Result<()> {
         let session = self
             .sessions
@@ -1869,6 +1898,15 @@ impl ServerState {
             .ok_or_else(|| anyhow!("Session not found"))?;
         let user_uuid = session.user_uuid.clone();
         drop(session);
+
+        validate_profile_update(&profile)?;
+
+        let user = self
+            .db
+            .find_user_by_uuid(&user_uuid)?
+            .ok_or_else(|| anyhow!("Account not found"))?;
+        profile.user_id = user_uuid.clone();
+        profile.display_name = user.display_name;
 
         // Update DB
         self.db.upsert_user_profile(
