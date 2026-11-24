@@ -293,7 +293,6 @@ fn restampable_frame(key: &[u8; 32], amplitude: f32) -> impl Fn(u16) -> Vec<u8> 
 /// Frame counters are 16-bit and wrap after about 22 minutes of speech
 /// (65,536 frames of 20 ms). The receiver has to keep playing across it.
 #[tokio::test]
-#[ignore = "bug: after the u16 sequence number wraps (65535 -> 0) the jitter buffer treats every later frame as late (`seq <= last_played_seq`, JitterBuffer::push) and drops it, so a sender goes silent after ~22 minutes of continuous speech"]
 async fn receiver_keeps_playing_across_sequence_wraparound() {
     let key = DaveCrypto::random_key();
     // Quiet before the wrap, loud after: concealment of lost frames can only
