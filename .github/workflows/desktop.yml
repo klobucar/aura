@@ -96,3 +96,70 @@ jobs:
         run: |
           dotnet test --no-restore --verbosity normal \
             --filter "FullyQualifiedName!~TestThreePartyMlsGroup&FullyQualifiedName!~TestMlsJoinMessageFormat&FullyQualifiedName!~TestTwoPartyMlsGroup&FullyQualifiedName!~TestMlsCommitWelcomeMessageFormat"
+
+  windows-publish:
+    # Builds the native core with MSVC and publishes the self-contained win-x64
+    # client, the same steps as a private Windows build. Nothing is uploaded.
+    name: windows publish
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    env:
+      PROTOC_VERSION: '36.2'
+      PROTOC_SHA256: f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: cache opus DNN model data
+        id: opus-dnn-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            crates/opus16-sys/vendor/opus/dnn/*_data.h
+            crates/opus16-sys/vendor/opus/dnn/*_data.c
+          key: opus-dnn-${{ env.OPUS_MODEL_CHECKSUM }}
+      - name: download opus DNN model data
+        if: steps.opus-dnn-cache.outputs.cache-hit != 'true'
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "$OPUS_MODEL_CHECKSUM"
+      - name: install protoc (pinned, checksum-verified)
+        # Windows runners don't ship protoc; prost-build needs it for aura.proto.
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:PROTOC_SHA256) { throw 'protoc checksum mismatch' }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\protoc"
+          "PROTOC=$env:RUNNER_TEMP\protoc\bin\protoc.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: build Rust core
+        run: cargo build --release -p aura-core
+      - name: install uniffi-bindgen-cs
+        run: |
+          if ! uniffi-bindgen-cs --version 2>/dev/null | grep -qF "${UNIFFI_BINDGEN_CS_TAG#v}"; then
+            cargo install --force \
+              --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+              --tag "$UNIFFI_BINDGEN_CS_TAG" \
+              uniffi-bindgen-cs
+          fi
+      - name: generate C# bindings
+        run: |
+          mkdir -p clients/desktop/Generated
+          uniffi-bindgen-cs \
+            --library target/release/aura_core.dll \
+            --out-dir clients/desktop/Generated
+          cp target/release/aura_core.dll clients/desktop/Generated/
+      - name: dotnet publish win-x64
+        run: |
+          dotnet publish clients/desktop/Aura.Desktop.csproj -c Release -r win-x64 \
+            --self-contained true -o dist/aura-desktop-win-x64
+          test -f dist/aura-desktop-win-x64/Aura.Desktop.exe
+          test -f dist/aura-desktop-win-x64/aura_core.dll

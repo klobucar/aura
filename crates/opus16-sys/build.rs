@@ -15,7 +15,15 @@ fn main() {
 
     // Defines
     build.define("OPUS_BUILD", None);
-    build.define("VAR_ARRAYS", None);
+    // Opus needs a stack-allocation mode (celt/stack_alloc.h). MSVC has no
+    // variable-length arrays, so it gets _alloca, as in upstream's CMake build.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build.define("USE_ALLOCA", None);
+        build.define("_CRT_SECURE_NO_WARNINGS", None);
+        build.flag_if_supported("/std:c11");
+    } else {
+        build.define("VAR_ARRAYS", None);
+    }
     build.define("HAVE_LRINTF", None);
     build.define("HAVE_LRINT", None);
     build.define("FLOAT_APPROX", None);
