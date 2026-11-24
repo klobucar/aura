@@ -43,6 +43,10 @@ struct ContentView: View {
 
     // Management views
     @State private var showingServerManagement = false
+    @State private var showingModeration = false
+    @State private var moderationFocusUuid: String?
+    /// Account the admin chose "Move to Lobby…" for, awaiting a reason.
+    @State private var moderationPendingKick: String?
     @State private var showingProfileManagement = false
 
     /// Identity verification (§7) and the roster's view of the same trust
@@ -121,6 +125,7 @@ struct ContentView: View {
         } message: { channel in
             Text("This permanently deletes \"\(channel.name)\" and removes everyone from it. This cannot be undone.")
         }
+        .moveToLobbyAlert(pendingUuid: $moderationPendingKick, client: client)
         // aura:// invite links. Preferring every event keeps an open window
         // handling the link instead of SwiftUI opening a second one.
         .onOpenURL(perform: handleOpenURL)
@@ -310,6 +315,9 @@ struct ContentView: View {
         .sheet(isPresented: $showingChannelEditor) {
             ChannelEditView(client: client, channel: editingChannel)
         }
+        .sheet(isPresented: $showingModeration, onDismiss: { moderationFocusUuid = nil }) {
+            ModerationView(client: client, initialSelection: moderationFocusUuid)
+        }
         .sheet(isPresented: $showingServerManagement) {
             ServerListView()
         }
@@ -339,7 +347,14 @@ struct ContentView: View {
             },
             deleteChannel: { channelPendingDeletion = $0 },
             compareKeys: { openTrustSheet(focusUuid: $0) },
-            leaveServer: { confirmingLeave = true }
+            leaveServer: { confirmingLeave = true },
+            openModeration: { uuid in
+                moderationFocusUuid = uuid
+                showingModeration = true
+            },
+            moveToLobby: { uuid in
+                moderationPendingKick = uuid
+            }
         )
     }
 
@@ -473,6 +488,7 @@ struct ContentView: View {
                             ConnectionBanner(
                                 isRetrying: client.isRetrying,
                                 status: client.connectionStatus,
+                                isBanned: client.wasBanned,
                                 onRetry: { client.retryConnectionNow() }
                             )
                             .transition(.move(edge: .top).combined(with: .opacity))

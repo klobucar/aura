@@ -59,7 +59,7 @@ public class CertificateMismatchException : Exception
 /// <summary>
 /// QUIC-based client for Aura server communication.
 /// </summary>
-public class AuraNetworkClient : IAsyncDisposable
+public class AuraNetworkClient : IAsyncDisposable, IModerationApi
 {
     // Protocol message types
     private const byte MSG_KEEPALIVE = 0x00;
@@ -78,6 +78,11 @@ public class AuraNetworkClient : IAsyncDisposable
     private const byte MSG_TEXT_PACKET = 0x30;
     private const byte MSG_UPDATE_STATUS = 0x45;
     private const byte MSG_CHANNEL_DELETED = 0x47;
+    private const byte MSG_LIST_USERS = 0x48;
+    private const byte MSG_VERIFY_USER = 0x49;
+    private const byte MSG_BAN_USER = 0x4A;
+    private const byte MSG_GRANT_ADMIN = 0x4B;
+    private const byte MSG_KICK_USER = 0x4C;
     private const byte MSG_MLS_RATCHET_REQUEST = 0x56;
     private const byte MSG_MLS_RATCHET_COMMIT = 0x57; // a commit with no Welcome: ratchet or removals
     private const byte MSG_MLS_SYNC_MEMBERS = 0x58;   // server tells us (founder) who should remain
@@ -632,6 +637,99 @@ public class AuraNetworkClient : IAsyncDisposable
         return WriteControlAsync(ControlFrames.Frame(MSG_DELETE_USER, AuraCoreMethods.EncodeDeleteUserRequest(uuid)), ct);
     }
 
+    // ------------------------------------------------------------------------
+    // Moderation (0x48-0x4C). Each reply is framed with its request's own type
+    // and carries no correlation id, so replies are matched to requests in
+    // order, per type: the server answers one control stream in sequence.
+    // ------------------------------------------------------------------------
+
+    private readonly ConcurrentDictionary<byte, ConcurrentQueue<TaskCompletionSource<byte[]>>> _pendingModeration = new();
+
+    private async Task<byte[]> ModerationRequestAsync<T>(byte msgType, T request, CancellationToken ct) where T : IMessage<T>
+    {
+        var stream = _controlStream ?? throw new InvalidOperationException("Not connected");
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queue = _pendingModeration.GetOrAdd(msgType, _ => new ConcurrentQueue<TaskCompletionSource<byte[]>>());
+        var frame = ControlFrames.Frame(msgType, request.ToByteArray());
+
+        // Enqueue under the write lock, immediately before the write, so the
+        // queue holds requests in the order they went out on the wire. A
+        // request that never got the lock is never queued.
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            queue.Enqueue(tcs);
+            await stream.WriteAsync(frame, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // The write failed mid-frame, so the stream is dead and the
+            // receive loop will fail every pending request.
+            tcs.TrySetException(ex);
+            throw;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(ModerationReplyTimeout);
+        await using (timeout.Token.Register(() => tcs.TrySetCanceled()))
+        {
+            return await tcs.Task;
+        }
+    }
+
+    private static readonly TimeSpan ModerationReplyTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>A reply arrived: hand it to the oldest request still waiting for that type.</summary>
+    private void CompleteModeration(byte msgType, byte[] packet)
+    {
+        // Exactly one reply per queued request, in order. If that request
+        // already timed out, TrySetResult fails and the late reply is dropped:
+        // it must never be handed to the request queued after it.
+        if (_pendingModeration.TryGetValue(msgType, out var queue) && queue.TryDequeue(out var tcs))
+        {
+            tcs.TrySetResult(packet);
+        }
+    }
+
+    private void FailPendingModeration()
+    {
+        foreach (var queue in _pendingModeration.Values)
+        {
+            while (queue.TryDequeue(out var tcs)) tcs.TrySetException(new IOException("The connection closed before the server replied"));
+        }
+    }
+
+    public async Task<ListUsersResponse> ListUsersAsync(uint offset, uint limit, CancellationToken ct = default) =>
+        ListUsersResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_LIST_USERS,
+            new ListUsersRequest { Offset = offset, Limit = limit }, ct));
+
+    public async Task<AdminResponse> VerifyUserAsync(string userUuid, CancellationToken ct = default) =>
+        AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_VERIFY_USER,
+            new VerifyUserRequest { TargetUserUuid = userUuid }, ct));
+
+    public async Task<AdminResponse> BanUserAsync(string userUuid, bool banned, string reason, CancellationToken ct = default) =>
+        AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_BAN_USER,
+            new BanUserRequest { TargetUserUuid = userUuid, Banned = banned, Reason = reason }, ct));
+
+    public async Task<AdminResponse> GrantAdminAsync(string userUuid, AdminPermissions permissions, CancellationToken ct = default) =>
+        AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_GRANT_ADMIN,
+            new GrantAdminRequest
+            {
+                TargetUserUuid = userUuid,
+                VerifyUsers = permissions.VerifyUsers,
+                BanUsers = permissions.BanUsers,
+                GrantAdmin = permissions.GrantAdmin,
+                ManageChannels = permissions.ManageChannels,
+            }, ct));
+
+    public async Task<AdminResponse> KickUserAsync(string userUuid, string reason, CancellationToken ct = default) =>
+        AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_KICK_USER,
+            new KickUserRequest { TargetUserUuid = userUuid, Reason = reason }, ct));
+
     /// <summary>
     /// Update our own profile comment. The server only accepts a profile whose
     /// <c>user_id</c> is our account UUID, and broadcasts it back to everyone
@@ -691,6 +789,7 @@ public class AuraNetworkClient : IAsyncDisposable
         // Mark first: tearing the stream down makes the receive loop fail, and
         // that failure must not be reported as an unexpected connection loss.
         _disposed = true;
+        FailPendingModeration();
         _keepaliveCts?.Cancel();
         _listenCts?.Cancel();
 
@@ -730,7 +829,13 @@ public class AuraNetworkClient : IAsyncDisposable
     public event Action<string, uint, string>? OnUserJoined; // channelId, sessionId, name
     public event Action<string, uint>? OnUserLeft;           // channelId, sessionId
     public event Action<ServerState>? OnServerSnapshot;
-    public event Action<string, string>? OnChannelDeleted; // deletedChannelId, fallbackChannelId
+    public event Action<ChannelRemoval>? OnChannelDeleted;
+
+    /// <summary>
+    /// The server closed the connection because the account was banned (QUIC
+    /// application error 0x01), so reconnecting would only be refused.
+    /// </summary>
+    public event Action? OnBanned;
 
     private CancellationTokenSource? _listenCts;
 
@@ -956,6 +1061,14 @@ public class AuraNetworkClient : IAsyncDisposable
                         await HandleProfileUpdatedAsync(ct);
                         break;
 
+                    case MSG_LIST_USERS:   // 0x48 - ListUsersResponse
+                    case MSG_VERIFY_USER:  // 0x49 - AdminResponse
+                    case MSG_BAN_USER:     // 0x4A - AdminResponse
+                    case MSG_GRANT_ADMIN:  // 0x4B - AdminResponse
+                    case MSG_KICK_USER:    // 0x4C - AdminResponse
+                        CompleteModeration(msgType, await ReadHardenedPayloadAsync(MaxControlPacketSize, ct));
+                        break;
+
                     case MSG_CREATE_CHANNEL: // 0x40 - CreateChannelResponse
                     case MSG_UPDATE_CHANNEL: // 0x41 - MetadataUpdateResponse
                     case MSG_UPDATE_PROFILE: // 0x42 - MetadataUpdateResponse
@@ -974,6 +1087,7 @@ public class AuraNetworkClient : IAsyncDisposable
                 }
             }
 
+            FailPendingModeration();
             if (!ct.IsCancellationRequested && !_disposed)
             {
                 OnConnectionLost?.Invoke("The server closed the connection");
@@ -981,9 +1095,11 @@ public class AuraNetworkClient : IAsyncDisposable
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            FailPendingModeration();
             if (!_disposed)
             {
-                OnConnectionLost?.Invoke(ex is EndOfStreamException ? "The server closed the connection" : ex.Message);
+                if (ModerationLogic.IsBanClose(ex)) OnBanned?.Invoke();
+                else OnConnectionLost?.Invoke(ex is EndOfStreamException ? "The server closed the connection" : ex.Message);
             }
         }
     }
@@ -1148,13 +1264,22 @@ public class AuraNetworkClient : IAsyncDisposable
             _voiceGroupReady.TryRemove(notice.ChannelId, out _);
             ForgetChannelGroups(notice.ChannelId);
 
-            OnChannelDeleted?.Invoke(notice.ChannelId, notice.FallbackChannelId);
+            OnChannelDeleted?.Invoke(new ChannelRemoval(
+                notice.ChannelId, notice.FallbackChannelId, ChannelRemovalKindOf(notice.Reason), notice.Detail));
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[AuraClient] Failed to parse ChannelDeleted: {ex.Message}");
         }
     }
+
+    // Fully qualified: uniffi.aura_core has a ChannelRemovalReason too.
+    private static ChannelRemovalKind ChannelRemovalKindOf(Aura.V1Alpha1.ChannelRemovalReason reason) => reason switch
+    {
+        Aura.V1Alpha1.ChannelRemovalReason.NotFound => ChannelRemovalKind.NotFound,
+        Aura.V1Alpha1.ChannelRemovalReason.Kicked => ChannelRemovalKind.Kicked,
+        _ => ChannelRemovalKind.Deleted,
+    };
 
     private async Task HandleChannelStateAsync(CancellationToken ct)
     {
