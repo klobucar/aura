@@ -1273,10 +1273,11 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         }
     }
 
-    private static ChannelRemovalKind ChannelRemovalKindOf(ChannelRemovalReason reason) => reason switch
+    // Fully qualified: uniffi.aura_core has a ChannelRemovalReason too.
+    private static ChannelRemovalKind ChannelRemovalKindOf(Aura.V1Alpha1.ChannelRemovalReason reason) => reason switch
     {
-        ChannelRemovalReason.NotFound => ChannelRemovalKind.NotFound,
-        ChannelRemovalReason.Kicked => ChannelRemovalKind.Kicked,
+        Aura.V1Alpha1.ChannelRemovalReason.NotFound => ChannelRemovalKind.NotFound,
+        Aura.V1Alpha1.ChannelRemovalReason.Kicked => ChannelRemovalKind.Kicked,
         _ => ChannelRemovalKind.Deleted,
     };
 
