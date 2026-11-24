@@ -1,0 +1,13 @@
+# CodeQL configuration for the Rust analysis only (see codeql.yml).
+#
+# Test and fuzz code is excluded: it never ships, and it has to use fixed
+# keys, nonces and ids (known-answer vectors, deterministic fixtures), which
+# rust/hard-coded-cryptographic-value reports as critical on every line.
+# Production code under crates/*/src is still analysed in full.
+name: aura-rust
+
+paths-ignore:
+  - crates/*/tests/**
+  - crates/*/src/**/tests/**
+  - crates/*/src/tests_*.rs
+  - fuzz/**
