@@ -1,0 +1,96 @@
+[package]
+name = "aura-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+aura-protocol = { path = "../crates/aura-protocol" }
+aura-identity = { path = "../crates/aura-identity" }
+aura-server = { path = "../crates/aura-server" }
+# No native-audio: cpal needs ALSA headers and nothing fuzzed touches it.
+aura-core = { path = "../crates/aura-core", default-features = false }
+prost = "0.14.3"
+bytes = "1.11"
+tokio = { version = "1.51.1", features = ["rt", "sync"] }
+
+# Not part of the main workspace.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "protocol_decode"
+path = "fuzz_targets/protocol_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_control"
+path = "fuzz_targets/server_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_auth"
+path = "fuzz_targets/server_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_decode"
+path = "fuzz_targets/core_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_decrypt"
+path = "fuzz_targets/text_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audio_receive"
+path = "fuzz_targets/audio_receive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jitter_buffer"
+path = "fuzz_targets/jitter_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_backup"
+path = "fuzz_targets/identity_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity_parse"
+path = "fuzz_targets/identity_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_process"
+path = "fuzz_targets/mls_process.rs"
+test = false
+doc = false
+bench = false

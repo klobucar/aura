@@ -7,6 +7,8 @@ members = [
     "crates/aura-core",
     "crates/opus16-sys",
 ]
+# cargo-fuzz crate: nightly-only, built on its own (see docs/FUZZING.md).
+exclude = ["fuzz"]
 resolver = "2"
 
 [profile.release]
