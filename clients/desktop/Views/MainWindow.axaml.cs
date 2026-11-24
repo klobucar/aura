@@ -107,6 +107,7 @@ public partial class MainWindow : Window
             Clipboard is { } clipboard ? await clipboard.TryGetTextAsync() : null;
         _vm.SaveBackupPicker = PickBackupDestinationAsync;
         _vm.OpenBackupPicker = PickBackupSourceAsync;
+        _vm.AvatarPicker = PickAvatarSourceAsync;
         ObserveMessages(_vm.Messages);
     }
 
@@ -206,6 +207,25 @@ public partial class MainWindow : Window
         await using var stream = await files[0].OpenReadAsync();
         // A backup is a few KB; refuse anything absurd rather than reading it all.
         if (stream.CanSeek && stream.Length > 1024 * 1024) return Array.Empty<byte>();
+        using var buffer = new System.IO.MemoryStream();
+        await stream.CopyToAsync(buffer);
+        return buffer.ToArray();
+    }
+
+    private async System.Threading.Tasks.Task<byte[]?> PickAvatarSourceAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose an avatar",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { FilePickerFileTypes.ImageAll },
+        });
+        if (files.Count == 0) return null;
+
+        await using var stream = await files[0].OpenReadAsync();
+        // Photos can be large, but not unbounded: past the cap, hand back an
+        // empty array so the caller reports "couldn't read" instead of loading it.
+        if (stream.CanSeek && stream.Length > MainWindowViewModel.MaxAvatarSourceBytes) return Array.Empty<byte>();
         using var buffer = new System.IO.MemoryStream();
         await stream.CopyToAsync(buffer);
         return buffer.ToArray();

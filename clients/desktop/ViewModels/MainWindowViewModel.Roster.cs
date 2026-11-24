@@ -105,6 +105,7 @@ public partial class MainWindowViewModel
         if (SelfUser == null) return;
         SelfUser.Name = string.IsNullOrWhiteSpace(DisplayName) ? "you" : DisplayName;
         SelfUser.Comment = MyBio;
+        SelfUser.Avatar = MyAvatarImage;
         SelfUser.IsDeafened = IsDeafened;
         SelfUser.IsMuted = !IsMicEnabled && !IsPushToTalkMode;
     }
@@ -151,6 +152,8 @@ public partial class MainWindowViewModel
             _ = OpenTrustSheet(card.Uuid);
         };
         card.SaveBio = SaveBioAsync;
+        card.ChangeAvatar = ChangeAvatarAsync;
+        card.RemoveAvatar = RemoveAvatarAsync;
         card.IsOpen = true;
     }
 
@@ -339,6 +342,7 @@ public partial class ProfileCardViewModel : ObservableObject
     {
         Name = user.IsSelf ? $"{user.Name} (you)" : user.Name;
         Bio = user.Comment;
+        Avatar = user.Avatar;
     }
 
     public void SetTrust(TrustState trust, string fingerprint)
@@ -362,7 +366,11 @@ public partial class ProfileCardViewModel : ObservableObject
         OnPropertyChanged(nameof(HasFingerprint));
         OnPropertyChanged(nameof(FingerprintOrHint));
     }
-    partial void OnIsSelfChanged(bool value) => OnPropertyChanged(nameof(CanAdjust));
+    partial void OnIsSelfChanged(bool value)
+    {
+        OnPropertyChanged(nameof(CanAdjust));
+        OnPropertyChanged(nameof(CanRemoveAvatar));
+    }
     partial void OnIsLocallyMutedChanged(bool value) => OnPropertyChanged(nameof(LocalMuteLabel));
     partial void OnBioDraftChanged(string value)
     {

@@ -519,7 +519,9 @@ public partial class MainWindowViewModel
         var channel = GetOrCreateChannel(channelId);
         if (channel.Users.Any(u => !u.IsSelf && u.Id == sessionId)) return;
 
-        channel.Users.Add(NewUser(sessionId, name, ""));
+        var joined = NewUser(sessionId, name, "");
+        joined.Avatar = _avatars.Get(_client?.UuidForSession(sessionId));
+        channel.Users.Add(joined);
         OnPropertyChanged(nameof(RosterLabel));
         AddNotice(channelId, $"{name} joined");
         if (channelId == SelectedChannel?.Id) NotifyForPresence($"{name} joined {channel.Name}");
@@ -545,6 +547,7 @@ public partial class MainWindowViewModel
         var profiles = snapshot.Profiles
             .GroupBy(p => p.UserId)
             .ToDictionary(g => g.Key, g => g.Last());
+        foreach (var (uuid, p) in profiles) _avatars.Update(uuid, p.AvatarData.ToByteArray());
 
         var previousSelectedId = SelectedChannel?.Id;
         var ownId = _client?.UserId;
@@ -568,6 +571,7 @@ public partial class MainWindowViewModel
                     : $"User {status.SessionId}";
 
                 var user = NewUser(status.SessionId, name, profile?.Bio ?? "");
+                user.Avatar = _avatars.Get(status.UserUuid);
                 user.IsMuted = status.IsMuted;
                 user.IsDeafened = status.IsDeafened;
                 channel.Users.Add(user);
@@ -579,6 +583,7 @@ public partial class MainWindowViewModel
         {
             MyBio = own.Bio;
             _myAvatar = own.AvatarData.ToByteArray();
+            MyAvatarImage = _avatars.Get(ownUuid);
         }
 
         var current = selfChannelId ?? previousSelectedId;
@@ -601,10 +606,12 @@ public partial class MainWindowViewModel
     private void HandleProfileUpdated(Aura.V1Alpha1.UserProfile profile)
     {
         if (_client == null) return;
+        var avatar = _avatars.Update(profile.UserId, profile.AvatarData.ToByteArray());
         if (profile.UserId == _client.UserUuid)
         {
             MyBio = profile.Bio;
             _myAvatar = profile.AvatarData.ToByteArray();
+            MyAvatarImage = avatar;
             return;
         }
 
@@ -613,6 +620,7 @@ public partial class MainWindowViewModel
             if (_client.UuidForSession(user.Id) != profile.UserId) continue;
             if (!string.IsNullOrWhiteSpace(profile.DisplayName)) user.Name = profile.DisplayName;
             user.Comment = profile.Bio;
+            user.Avatar = avatar;
             if (ProfileCard.IsOpen && ProfileCard.SessionId == user.Id) ProfileCard.Refresh(user);
         }
     }
