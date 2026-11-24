@@ -10,6 +10,8 @@ struct ProfileView: View {
     @State private var bio: String = ""
     @State private var avatarData: Data = Data()
     @State private var isAnimating = false
+    @State private var isSaving = false
+    @State private var errorMessage: String?
     
     init(client: QuicNetworkClient) {
         self.client = client
@@ -90,6 +92,13 @@ struct ProfileView: View {
                         Text("Personalize your appearance")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
+
+                        if !avatarData.isEmpty {
+                            Button("Remove avatar") { avatarData = Data() }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.red)
+                        }
                     }
                     .padding(.top, 10)
                     
@@ -136,8 +145,15 @@ struct ProfileView: View {
                 
                 Spacer()
                 
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+
                 Button(action: saveProfile) {
-                    Text("Save Changes")
+                    Text(isSaving ? "Saving…" : "Save Changes")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.white)
                         .padding(.vertical, 10)
@@ -147,6 +163,7 @@ struct ProfileView: View {
                         .modifier(AuraTheme.Shadows.soft())
                 }
                 .buttonStyle(.plain)
+                .disabled(isSaving)
                 .auraFluidHover()
             }
             .padding(24)
@@ -182,15 +199,27 @@ struct ProfileView: View {
         
         if panel.runModal() == .OK {
             if let url = panel.url, let data = try? Data(contentsOf: url) {
-                self.avatarData = data
+                if let avatar = AvatarImage.encode(data) {
+                    self.avatarData = avatar
+                    self.errorMessage = nil
+                } else {
+                    self.errorMessage = "That file couldn't be read as an image."
+                }
             }
         }
     }
-    
+
     private func saveProfile() {
+        isSaving = true
+        errorMessage = nil
         Task {
-            await client.updateProfile(bio: bio, avatarData: avatarData)
-            dismiss()
+            do {
+                try await client.updateProfile(bio: bio, avatarData: avatarData)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+            }
         }
     }
 }
