@@ -169,7 +169,7 @@ impl FileEncryptor {
 
     /// As [`new`](Self::new) with caller-chosen key and id. For tests and
     /// known-answer vectors; production code must use random values.
-    pub fn with_key_and_id(
+    pub(crate) fn with_key_and_id(
         key: [u8; 32],
         file_id: [u8; 16],
         file_name: &str,
