@@ -32,7 +32,7 @@ sequenceDiagram
     Note over User, Other: Real-Time Audio
     User->>Client: Speak (Microphone)
     Client->>Client: Encode (Opus) -> Encrypt (DAVE: Per-Sender Key)
-    Client->>Server: QUIC Datagram (0x01 + Audio Data)
+    Client->>Server: QUIC Datagram (0x02 + Audio Data)
     Server->>Server: Lookup Channel Members
     par Fan-Out
         Server->>Other: QUIC Datagram (Relayed Packet)

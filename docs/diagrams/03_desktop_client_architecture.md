@@ -37,7 +37,7 @@ graph TB
     subgraph Network ["Network Layer (MsQuic)"]
         QUIC["QUIC Connection"]
         STR["Reliable Streams"]
-        DG["Datagrams (Opcode 0x01)"]
+        DG["Datagrams (Opcode 0x02)"]
     end
 
     %% UI to Services
@@ -105,7 +105,7 @@ graph TB
 ## Data Flows
 
 ### Voice Receive Path
-1. **MsQuic** receives an unreliable datagram (0x01).
+1. **MsQuic** receives an unreliable datagram (0x02).
 2. **AuraNetworkClient** routes the payload to the UniFFI `AudioReceiverWrapper`.
 3. **Rust Core** decrypts, decodes, and places the frame in the **Jitter Buffer**.
 4. **AudioManager** periodically calls `popMixed()` on a high-priority audio thread.

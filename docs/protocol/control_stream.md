@@ -38,7 +38,8 @@ Payloads are the protobuf messages in `crates/aura-protocol/src/aura.proto` unle
 | `0x11` | UserJoined | S→C | `UserJoined` | A user joined a channel |
 | `0x12` | UserLeft | S→C | `UserLeft` | A user left a channel |
 | `0x13` | ChannelState | S→C | `ServerState` | Full snapshot of channels and users |
-| `0x20` | AudioPacket | Both | audio packet bytes | Encapsulated audio (fallback) |
+| `0x21` | AudioPacket | Both | audio packet bytes | Encapsulated audio (fallback); header authenticated, see [Codec & Protocol](../development/codec_and_protocol.md#1-fastaudiopacket-wire-format) |
+| `0x20` | AudioPacketV1 | Both | audio packet bytes | Older audio format: relayed, but receivers drop it and report that the peer must update |
 | `0x30` | TextPacket | Both | `EncryptedTextPacket` | End-to-end encrypted text message |
 | `0x40` | CreateChannel | C→S, reply S→C | `CreateChannelRequest` → `CreateChannelResponse` | Create a channel (`manage_channels`) |
 | `0x41` | UpdateChannel | C→S, reply S→C | `UpdateChannelRequest` → `MetadataUpdateResponse` | Edit a channel (`manage_channels`) |

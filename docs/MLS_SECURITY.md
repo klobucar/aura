@@ -146,13 +146,15 @@ MLS epochs advance when:
 ### Packet Format
 
 ```
-[Session ID: 4 bytes][Sequence: 2 bytes][Encrypted Payload]
+[Type: 0x02][Session ID: 4][Epoch hint: 2][Sequence: 2][Nonce: 24][Ciphertext + AEAD Tag (16)]
 ```
 
-**Encrypted Payload:**
-```
-[Opus Frame][AEAD Tag (16 bytes)][Nonce (24 bytes)]
-```
+The ciphertext is the Opus frame behind a 16-byte zero commitment. Session ID,
+epoch hint and sequence (big-endian) are the AEAD's associated data, behind the
+label `"aura-audio-v2"` and the format version `0x02`, so they can't be changed
+or re-stamped in transit. Format version 1 (no associated data, type `0x01`)
+is not accepted; this is a wire-incompatible change. See
+[Codec & Protocol](development/codec_and_protocol.md#header-authentication).
 
 ### Encryption Flow
 
@@ -160,17 +162,20 @@ MLS epochs advance when:
 // Sender
 let key = mls.export_audio_key(channel_id, my_session_id);
 let crypto = DaveCrypto::new(&key);
-let ciphertext = crypto.encrypt(&opus_frame, &nonce);
+let aad = FastAudioPacket::aad_for(my_session_id, epoch_hint, sequence);
+let ciphertext = crypto.encrypt_with_aad(&opus_frame, &nonce, &aad);
 
 // Receiver
 let key = mls.export_audio_key(channel_id, sender_session_id);
 let crypto = DaveCrypto::new(&key);
-let plaintext = crypto.decrypt(&ciphertext, &nonce);
+let aad = FastAudioPacket::aad_for(sender_session_id, epoch_hint, sequence);
+let plaintext = crypto.decrypt_with_aad(&ciphertext, &nonce, &aad);
 ```
 
 **Security properties:**
 - **Confidentiality**: Server cannot decrypt audio
-- **Integrity**: AEAD tag prevents tampering
+- **Integrity**: AEAD tag prevents tampering, including with the packet header
+- **Replay**: a frame can't be replayed under a new sequence number; a verbatim replay is dropped by the receiver's replay window and jitter buffer
 - **Authenticity**: Per-sender key proves sender identity
 - **Forward secrecy**: Keys rotate with MLS epochs
 
