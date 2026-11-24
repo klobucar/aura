@@ -15,6 +15,10 @@ struct RosterActions {
     var compareKeys: (String?) -> Void
     /// Ask to delete this account on the server ("Leave server…").
     var leaveServer: () -> Void
+    /// Admins: open the moderation console, optionally on one account.
+    var openModeration: (String?) -> Void
+    /// Admins: move an account (by user id) out of its channel to the lobby.
+    var moveToLobby: (String) -> Void
 }
 
 /// One occupant row, flattened from `ChannelUser` (or the local user) plus the
@@ -123,6 +127,17 @@ struct RosterSidebar: View {
                 .foregroundStyle(AuraTheme.Colors.textDim)
             Spacer()
             if client.isAdmin {
+                Button { actions.openModeration(nil) } label: {
+                    Image(systemName: "person.2")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AuraTheme.Colors.textDim)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Server members")
+                .accessibilityLabel("Server members")
+
                 Button(action: actions.createChannel) {
                     Image(systemName: "plus")
                         .font(.system(size: 11, weight: .semibold))
@@ -455,6 +470,11 @@ private struct RosterMemberRow: View {
                 if member.trust != nil {
                     Divider()
                     Button("Compare Keys…") { actions.compareKeys(member.uuid) }
+                }
+                if client.isAdmin, let uuid = member.uuid {
+                    Divider()
+                    Button("Move to Lobby…", systemImage: "arrow.uturn.backward") { actions.moveToLobby(uuid) }
+                    Button("Moderate…", systemImage: "shield") { actions.openModeration(uuid) }
                 }
             }
         }

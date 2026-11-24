@@ -9,6 +9,7 @@
 pub mod audio_io;
 pub mod audio_pipeline;
 pub mod crypto;
+pub mod file_transfer;
 pub mod identity_backup;
 pub mod identity_ffi;
 pub mod jitter_buffer;
@@ -174,5 +175,7 @@ pub unsafe extern "C" fn aura_audio_write_playback(
 mod tests_audio;
 #[cfg(test)]
 mod tests_crypto;
+#[cfg(test)]
+mod tests_file_transfer;
 #[cfg(test)]
 mod tests_text_e2e;

@@ -1202,3 +1202,7 @@ index 6f702974473c702804cd1e2594d965da463312fe..ea9751aa557aa5d7b6a9e1179c870fc9
      }
      frame_size += (obu_info.prefix_size + obu_info.payload_size);
 ```
+
+---
+
+Aura extension: end-to-end encrypted file transfer is specified in [protocol/file_transfer.md](protocol/file_transfer.md).

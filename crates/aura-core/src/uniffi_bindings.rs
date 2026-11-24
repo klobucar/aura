@@ -442,6 +442,7 @@ impl From<TextMessageRecord> for TextMessage {
             r#type: r.media_type,
             file_size: r.file_size,
             sha256_hash: r.sha256_hash,
+            attachment: None,
         }
     }
 }

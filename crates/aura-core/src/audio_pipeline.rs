@@ -315,6 +315,30 @@ impl AudioSender {
     }
 }
 
+/// Samples per 20 ms Opus frame at 48 kHz.
+const SAMPLES_PER_FRAME: u64 = 960;
+
+/// How many frames behind the newest authenticated one a frame may arrive and
+/// still be considered reordering rather than a replay (about 5 s).
+const REORDER_WINDOW: u64 = 256;
+
+/// Place a 16-bit wire sequence on the extended (unwrapped) timeline, RTP
+/// style: the signed 16-bit distance from the highest extended sequence seen
+/// so far is added to it, so 65535 -> 0 keeps counting up and a slightly late
+/// frame from before a wrap maps to a slightly smaller value.
+///
+/// The first frame is biased by one full cycle (65536) so a frame reordered
+/// just ahead of it can never underflow.
+fn extend_sequence(highest: Option<u64>, sequence: u16) -> u64 {
+    match highest {
+        None => 0x1_0000 + u64::from(sequence),
+        Some(h) => {
+            let offset = i64::from(sequence.wrapping_sub(h as u16) as i16);
+            h.saturating_add_signed(offset)
+        }
+    }
+}
+
 /// Audio receiver for decrypting and decoding incoming audio
 pub struct AudioReceiver {
     /// Per-sender state
@@ -333,8 +357,10 @@ struct SenderState {
     current_epoch: u16,
     /// Jitter buffer
     jitter: JitterBuffer,
-    /// Last processed sequence number (for replay protection)
-    last_sequence: u16,
+    /// Highest extended (unwrapped) sequence number seen on an authenticated
+    /// frame; `None` until the first one, so a listener who joins a stream in
+    /// progress accepts wherever it is. See `extend_sequence`.
+    highest_sequence: Option<u64>,
     /// Local playback gain multiplier (1.0 = unchanged, 0.0..4.0 permitted)
     gain: f32,
     /// Local-only mute — audio still decodes (to keep Opus state healthy)
@@ -386,7 +412,7 @@ impl AudioReceiver {
             key_store,
             current_epoch: epoch_hint,
             jitter,
-            last_sequence: 0,
+            highest_sequence: None,
             gain: 1.0,
             muted: false,
         };
@@ -466,13 +492,17 @@ impl AudioReceiver {
             .get_mut(&packet.session_id)
             .ok_or(AudioPipelineError::UnknownSender(packet.session_id))?;
 
-        // 3. Replay protection: reject if sequence is too old
-        let seq_diff = packet.sequence.wrapping_sub(state.last_sequence);
-        if seq_diff > 32768 && seq_diff != 0 {
-            // Sequence went backwards by more than half the range - likely replay
-            return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
+        // 3. Replay protection: place the 16-bit sequence on the extended
+        //    (unwrapped) timeline and refuse a frame further behind the newest
+        //    authenticated one than the reorder window. This only reads the
+        //    state; it moves once the frame has authenticated (below), so a
+        //    forged frame can't push it ahead of the real stream.
+        let extended = extend_sequence(state.highest_sequence, packet.sequence);
+        if let Some(highest) = state.highest_sequence {
+            if extended.saturating_add(REORDER_WINDOW) < highest {
+                return Err(AudioPipelineError::PacketParse("Replayed packet".into()));
+            }
         }
-        state.last_sequence = state.last_sequence.max(packet.sequence);
 
         // 4. Try decryption with epoch_hint key first, then fallback
         let opus_data = if let Some(crypto) = state.key_store.get(&packet.epoch_hint) {
@@ -493,10 +523,16 @@ impl AudioReceiver {
             ))?
         };
 
-        // 5. Insert into jitter buffer
+        // Authenticated: the window may move forward.
+        if state.highest_sequence.is_none_or(|h| extended > h) {
+            state.highest_sequence = Some(extended);
+        }
+
+        // 5. Insert into jitter buffer. The RTP-style timestamp is the frame
+        //    count in samples and wraps at 32 bits, as RTP timestamps do.
         state.jitter.push(
-            packet.sequence as u64,
-            packet.sequence as u32 * 960, // Approximate timestamp
+            extended,
+            extended.wrapping_mul(SAMPLES_PER_FRAME) as u32,
             Bytes::from(opus_data),
         );
 
@@ -764,5 +800,189 @@ mod tests {
         let res = sender.process(&silence).expect("Process should not error");
         assert!(res.is_some(), "VAD disabled => packet must emit");
         assert_eq!(sender.sequence(), 2);
+    }
+
+    // --- sequence wraparound -------------------------------------------------
+
+    /// A receiver that plays out whatever it holds immediately (no latency
+    /// target) and keeps frames long enough for a slow test machine.
+    fn eager_receiver(session_id: u32, key: &[u8; 32]) -> AudioReceiver {
+        let receiver = AudioReceiver::with_config(JitterBufferConfig {
+            target_latency_ms: 0,
+            max_packets: 100,
+            max_age_ms: 60_000,
+            frame_duration_ms: 20,
+        });
+        receiver.add_sender(session_id, key, 0).unwrap();
+        receiver
+    }
+
+    /// Authentic frames that can be re-stamped with any sequence number (the
+    /// header isn't covered by the AEAD).
+    fn stamper(session_id: u32, key: &[u8; 32]) -> impl Fn(u16) -> Bytes {
+        let sender = AudioSender::new(session_id, key).unwrap();
+        let template = sender.process(&[1000i16; 960]).unwrap().unwrap();
+        move |seq| {
+            let mut p = template.to_vec();
+            p[6..8].copy_from_slice(&seq.to_be_bytes());
+            Bytes::from(p)
+        }
+    }
+
+    /// Pop everything the jitter buffer will give up, then return its stats.
+    fn drain(receiver: &AudioReceiver, session_id: u32) -> crate::jitter_buffer::JitterBufferStats {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut senders = receiver.senders.write().unwrap();
+        let state = senders.get_mut(&session_id).unwrap();
+        while state.jitter.pop().has_data() {}
+        state.jitter.stats().clone()
+    }
+
+    #[test]
+    fn extend_sequence_unwraps_forward_and_backward() {
+        assert_eq!(extend_sequence(None, 7), 0x1_0000 + 7);
+        let h = 0x1_0000 + 65_535;
+        assert_eq!(extend_sequence(Some(h), 0), 0x2_0000);
+        assert_eq!(extend_sequence(Some(h), 5), 0x2_0005);
+        // Just after the wrap, a frame from before it maps below.
+        assert_eq!(extend_sequence(Some(0x2_0003), 65_534), 0x1_FFFE);
+        // Never underflows, even for a frame reordered ahead of the first.
+        assert_eq!(extend_sequence(Some(0x1_0000), 65_535), 0xFFFF);
+    }
+
+    #[test]
+    fn continuous_stream_plays_across_the_wrap() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in (65_530u16..=65_535).chain(0..6) {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 12);
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(stats.packets_dropped_late, 0);
+    }
+
+    #[test]
+    fn reordering_straddling_the_wrap_is_put_right() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in [65_533u16, 65_534, 0, 65_535, 1, 2] {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 6);
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(stats.packets_dropped_late, 0);
+    }
+
+    #[test]
+    fn loss_across_the_wrap_is_counted_not_fatal() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in [65_533u16, 65_534, 1, 2] {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 4);
+        assert_eq!(stats.packets_lost, 2); // 65535 and 0
+    }
+
+    #[test]
+    fn duplicate_across_the_wrap_is_dropped() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in [65_535u16, 0, 0, 1] {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 3);
+        assert_eq!(stats.packets_dropped_duplicate, 1);
+    }
+
+    #[test]
+    fn late_frame_from_before_the_wrap_is_not_played_as_new() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in (65_530u16..=65_535).chain(0..10) {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        assert_eq!(drain(&receiver, 1).packets_played, 16);
+
+        // Slightly late: inside the reorder window, but already played.
+        receiver.on_packet(frame(65_533)).unwrap();
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 16);
+        assert_eq!(stats.packets_dropped_late, 1);
+
+        // Far too late, however the 16-bit values compare: refused outright.
+        for seq in [60_000u16, 40_000] {
+            assert!(receiver.on_packet(frame(seq)).is_err(), "{seq} accepted");
+        }
+        assert_eq!(drain(&receiver, 1).packets_played, 16);
+
+        // The stream carries on.
+        receiver.on_packet(frame(10)).unwrap();
+        assert_eq!(drain(&receiver, 1).packets_played, 17);
+    }
+
+    #[test]
+    fn listener_joining_just_before_the_wrap_hears_the_sender() {
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in [65_535u16, 0, 1, 2] {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 4);
+        assert_eq!(stats.packets_lost, 0);
+    }
+
+    #[test]
+    fn unauthenticated_frame_near_the_wrap_moves_nothing() {
+        let key = DaveCrypto::random_key();
+        let genuine = stamper(1, &key);
+        let wrong_key = DaveCrypto::random_key();
+        let forged = stamper(1, &wrong_key);
+        let receiver = eager_receiver(1, &key);
+        receiver.on_packet(genuine(65_534)).unwrap();
+        receiver.on_packet(genuine(65_535)).unwrap();
+        // A forged frame "after" the wrap must not carry the window with it.
+        assert!(receiver.on_packet(forged(30_000)).is_err());
+        assert!(receiver.on_packet(forged(3)).is_err());
+        receiver.on_packet(genuine(0)).unwrap();
+        receiver.on_packet(genuine(1)).unwrap();
+        assert_eq!(drain(&receiver, 1).packets_played, 4);
+    }
+
+    #[test]
+    fn sender_that_restarts_is_heard_once_it_is_added_again() {
+        // A sender's counter restarts at 0 only with a new AudioSender, which
+        // clients create per connection under a fresh session id; receivers
+        // learn of a returning sender through add_sender, which starts clean.
+        let key = DaveCrypto::random_key();
+        let frame = stamper(1, &key);
+        let receiver = eager_receiver(1, &key);
+        for seq in 40_000u16..40_005 {
+            receiver.on_packet(frame(seq)).unwrap();
+        }
+        assert_eq!(drain(&receiver, 1).packets_played, 5);
+
+        // Key rotation keeps the stream's state: the sender's counter carries on.
+        assert!(receiver.update_sender_key(1, &key, 1));
+        receiver.on_packet(frame(40_005)).unwrap();
+
+        // Leaving and rejoining (remove + add) forgets the old position.
+        receiver.remove_sender(1);
+        receiver.add_sender(1, &key, 0).unwrap();
+        receiver.on_packet(frame(0)).unwrap();
+        receiver.on_packet(frame(1)).unwrap();
+        assert_eq!(drain(&receiver, 1).packets_played, 2);
     }
 }

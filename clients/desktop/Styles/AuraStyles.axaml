@@ -204,4 +204,24 @@
         </Setter>
     </Style>
 
+    <!-- Filter chip (moderation console): a pill that fills when it is the active filter. -->
+    <Style Selector="Button.chip">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPanelBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusPill}"/>
+        <Setter Property="Padding" Value="10,3"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextDimBrush}"/>
+    </Style>
+    <Style Selector="Button.chip:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+    <Style Selector="Button.chip.on /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+    </Style>
+    <Style Selector="Button.chip.on">
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+    </Style>
+
 </Styles>

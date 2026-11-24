@@ -679,6 +679,12 @@ public partial class User : ObservableObject
     /// <summary>The local user's own row ("you").</summary>
     public bool IsSelf { get; init; }
 
+    /// <summary>Admin items ("Moderate…", "Move to lobby…") are offered in the context menu.</summary>
+    [ObservableProperty] private bool _canModerate;
+
+    /// <summary>Opens the moderation console on this member.</summary>
+    public IRelayCommand? ModerateCommand { get; set; }
+
     /// <summary>
     /// Trust in this user's identity key, from the MLS group of the channel
     /// we're in. Users in other channels stay at TOFU: we hold no key for them.

@@ -158,6 +158,14 @@ impl QuicServer {
         })
     }
 
+    /// The UDP address the QUIC endpoint is bound to (useful when the
+    /// configured port was 0).
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.endpoint
+            .local_addr()
+            .map_err(|e| anyhow!("Failed to get local address: {}", e))
+    }
+
     /// Configure ACME (Let's Encrypt) for automated certificate management.
     fn configure_acme(
         domain: &str,
@@ -332,6 +340,10 @@ impl QuicServer {
         // Enable QUIC datagrams for unreliable audio packets
         transport.datagram_receive_buffer_size(Some(65536));
         transport.datagram_send_buffer_size(65536);
+        // Client-opened bidirectional streams carry file uploads only (the
+        // control stream is opened by the server); a few per user are
+        // allowed (see file_relay), so cap them low.
+        transport.max_concurrent_bidi_streams(16u32.into());
         server_config.transport_config(Arc::new(transport));
 
         Ok(server_config)
@@ -405,6 +417,13 @@ fn message_type_name(msg_type: u8) -> &'static str {
     }
 }
 
+/// Whether an audio packet names `session_id` as its sender (its first four
+/// bytes, big-endian). Fan-out is decided by that field, so a packet may only
+/// be relayed on behalf of the connection that sent it.
+fn names_sender(packet: &[u8], session_id: u32) -> bool {
+    packet.get(..4) == Some(&session_id.to_be_bytes()[..])
+}
+
 /// A login the server refused, as opposed to a broken or malformed
 /// connection. Carries a reason code for telemetry.
 #[derive(Debug, thiserror::Error)]
@@ -457,6 +476,9 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 
     let ping_limiter = PingRateLimiter::new();
 
+    // File transfers are delivered over server-opened streams on this connection.
+    state.file_relay.register(session_id, conn.clone());
+
     // Initialize context
     let mut ctx = ConnectionContext {
         conn, // Move original connection handle
@@ -482,6 +504,10 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             match data[0] {
                                 // Audio. Skip empty audio frames (header only).
                                 0x01 if data.len() > 1 => {
+                                    if !names_sender(&data[1..], session_id) {
+                                        debug!("[{}] Dropped audio naming another session", remote);
+                                        continue;
+                                    }
                                     crate::metrics::METRICS.audio_datagram(data.len() - 1);
                                     ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                 }
@@ -499,6 +525,23 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                     Err(e) => {
                          debug!("[{}] Datagram read error: {}", remote, e);
                     }
+                }
+            }
+
+            // 1b. Client-opened bidirectional streams: encrypted file uploads.
+            upload = datagram_conn.accept_bi() => {
+                match upload {
+                    Ok((send, recv)) => {
+                        last_activity = std::time::Instant::now();
+                        tokio::spawn(crate::file_relay::handle_upload(
+                            Arc::clone(&ctx.state),
+                            session_id,
+                            user_uuid.clone(),
+                            send,
+                            recv,
+                        ));
+                    }
+                    Err(e) => debug!("[{}] accept_bi ended: {}", remote, e),
                 }
             }
 
@@ -577,6 +620,7 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
 
     // Cleanup
     ctx.leave_current_channel().await;
+    state.file_relay.unregister(session_id);
 
     // Log bandwidth before removing session
     if let Some(sess) = state.sessions.get(&session_id) {
@@ -854,6 +898,10 @@ impl ConnectionContext {
                     return Err(anyhow!("Incomplete audio packet received"));
                 }
 
+                if !names_sender(&packet_buf, self.session_id) {
+                    debug!("[{}] Dropped audio naming another session", self.remote);
+                    return Ok(true);
+                }
                 self.state
                     .route_audio_packet(bytes::Bytes::from(packet_buf))
                     .await;
@@ -1310,6 +1358,8 @@ impl ConnectionContext {
     /// channel's voice and text groups and tell everyone it left.
     async fn leave_current_channel(&mut self) {
         if let Some(channel_id) = self.current_channel_id.take() {
+            // A transfer in flight from this session must not outlive its membership.
+            self.state.file_relay.abort_sender(self.session_id);
             self.state
                 .remove_from_voice_group(channel_id.clone(), self.session_id)
                 .await;
@@ -1732,6 +1782,8 @@ mod tests {
     use super::*;
     use rustls::crypto::aws_lc_rs::{self, kx_group};
     use rustls::crypto::{CryptoProvider, SupportedKxGroup};
+
+    mod file_transfer;
 
     /// Complete a real QUIC handshake against the production server config
     /// from a client offering only `groups`. Returns the ALPN it agreed on.

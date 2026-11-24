@@ -467,6 +467,7 @@ struct ChannelCommentCard: View {
 struct ConnectionBanner: View {
     let isRetrying: Bool
     let status: String
+    var isBanned = false
     let onRetry: () -> Void
 
     @State private var pulse = false
@@ -484,7 +485,7 @@ struct ConnectionBanner: View {
                 }
 
             VStack(alignment: .leading, spacing: AuraTheme.Spacing.s2) {
-                Text(isRetrying ? "Reconnecting…" : "Disconnected")
+                Text(isBanned ? "Banned" : isRetrying ? "Reconnecting…" : "Disconnected")
                     .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12, weight: .semibold))
                     .foregroundStyle(isRetrying ? AuraTheme.Colors.cautionText : AuraTheme.Colors.danger)
                 Text(status)
@@ -495,7 +496,9 @@ struct ConnectionBanner: View {
 
             Spacer()
 
-            AuraChipButton(title: isRetrying ? "Retry now" : "Retry", systemImage: "arrow.clockwise", action: onRetry)
+            if !isBanned {
+                AuraChipButton(title: isRetrying ? "Retry now" : "Retry", systemImage: "arrow.clockwise", action: onRetry)
+            }
         }
         .padding(.horizontal, AuraTheme.Spacing.s14)
         .padding(.vertical, 10)

@@ -22,6 +22,23 @@ public class QuicNetworkClient {
         didSet { voice.post(.setAuthenticated(isAuthenticated)) }
     }
     public var isAdmin = false
+    /// True once the server has told us we were banned (a close with
+    /// application error 0x01, or a refused login). Nothing reconnects until
+    /// the next explicit `connect`.
+    public var wasBanned = false
+
+    // Moderation console state (admins only). See `MARK: - Moderation`.
+    var moderationMembers: [ModerationMember] = []
+    var moderationIsLoading = false
+    /// The server's `error_message` for the last refused request.
+    var moderationError: String?
+    /// What the last request that succeeded did, for the panel to show.
+    var moderationNotice: String?
+    /// Requests sent and not yet answered, oldest first.
+    private(set) var moderationQueue: [ModerationAction] = []
+    var moderationBusy: Bool { !moderationQueue.isEmpty }
+    private var moderationListBuffer: [ModerationMember] = []
+    private var moderationRelistQueued = false
     public var connectionStatus = "Disconnected"
     public var userId: UInt32 = 0
     public var sessionToken: String?
@@ -219,6 +236,11 @@ public class QuicNetworkClient {
     private static let MSG_UPDATE_STATUS: UInt8 = 0x45
     private static let MSG_PROFILE_UPDATED: UInt8 = 0x46 // Server → clients broadcast
     private static let MSG_CHANNEL_DELETED: UInt8 = 0x47 // Server → occupants of a deleted channel
+    private static let MSG_LIST_USERS: UInt8 = 0x48
+    private static let MSG_VERIFY_USER: UInt8 = 0x49
+    private static let MSG_BAN_USER: UInt8 = 0x4A
+    private static let MSG_GRANT_ADMIN: UInt8 = 0x4B
+    private static let MSG_KICK_USER: UInt8 = 0x4C
     
     // MLS Protocol message types
     private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
@@ -342,6 +364,7 @@ public class QuicNetworkClient {
     private func performConnect(host: String, port: UInt16) async throws {
         // Clear intentional disconnect flag for fresh connections
         isIntentionalDisconnect = false
+        wasBanned = false
         
         // Save connection parameters for retry
         savedHost = host
@@ -1086,6 +1109,199 @@ public class QuicNetworkClient {
         }
     }
 
+    // MARK: - Moderation
+
+    /// Send one `[type u8][u32 LE length][payload]` control frame.
+    /// Returns false when there is no stream or the send failed.
+    private func sendControlFrame(type: UInt8, payload: Data) async -> Bool {
+        guard let stream = controlStream else { return false }
+        var msg = Data([type])
+        let frameLen = UInt32(payload.count).littleEndian
+        msg.append(Data(withUnsafeBytes(of: frameLen) { Array($0) }))
+        msg.append(payload)
+        do {
+            try await send(data: msg, on: stream)
+            return true
+        } catch {
+            print("[QuicClient] Failed to send control frame 0x\(String(type, radix: 16)): \(error)")
+            return false
+        }
+    }
+
+    /// Send a moderation request and remember it, so the reply (which carries
+    /// no id of its own) can be matched. Replies come back in request order.
+    private func sendModeration(_ action: ModerationAction, payload: Data) async {
+        guard isAdmin else { return }
+        moderationError = nil
+        moderationNotice = nil
+        moderationQueue.append(action)
+        if await !sendControlFrame(type: action.messageType, payload: payload) {
+            if let i = moderationQueue.lastIndex(of: action) { moderationQueue.remove(at: i) }
+            if action == .list { moderationIsLoading = false }
+            moderationError = "Couldn't reach the server."
+        }
+    }
+
+    /// Fetch every account, a page at a time (the server caps a page at 500).
+    func refreshModerationMembers() async {
+        guard isAdmin else { return }
+        if moderationQueue.contains(.list) {
+            // A page is in flight; fetch again once it lands.
+            moderationRelistQueued = true
+            return
+        }
+        moderationListBuffer = []
+        moderationIsLoading = true
+        await requestModerationPage(offset: 0)
+    }
+
+    private func requestModerationPage(offset: Int) async {
+        await sendModeration(.list, payload: encodeListUsersRequest(offset: UInt32(offset), limit: 500))
+    }
+
+    func verifyUser(_ uuid: String) async {
+        await sendModeration(.verify, payload: encodeVerifyUserRequest(targetUserUuid: uuid))
+    }
+
+    /// Ban or unban. `reason` goes to the server log only.
+    func banUser(_ uuid: String, banned: Bool, reason: String) async {
+        await sendModeration(
+            .ban(banned: banned),
+            payload: encodeBanUserRequest(targetUserUuid: uuid, banned: banned, reason: reason))
+    }
+
+    /// Replace the target's admin permissions. All off revokes admin.
+    func grantAdmin(_ uuid: String, permissions: AdminPermissionsRecord) async {
+        await sendModeration(
+            .grant,
+            payload: encodeGrantAdminRequest(targetUserUuid: uuid, permissions: permissions))
+    }
+
+    /// Take the target out of its channel and into the lobby.
+    func kickUser(_ uuid: String, reason: String) async {
+        await sendModeration(.kick, payload: encodeKickUserRequest(targetUserUuid: uuid, reason: reason))
+    }
+
+    /// Where an account is right now, from the roster we already hold.
+    func moderationPresence(of uuid: String) -> ModerationPresence {
+        var occupants: [String: [String]] = [:]
+        for (channelId, users) in usersByChannel {
+            occupants[channelId] = users.compactMap { uuidForSession($0.id) }
+        }
+        var summaries: [String: ChannelSummary] = [:]
+        for channel in channels {
+            summaries[channel.id] = ChannelSummary(name: channel.name, isLobby: channel.isLobby)
+        }
+        return ModerationLogic.presence(
+            of: uuid, occupants: occupants, channels: summaries,
+            selfUuid: userUuid, selfChannelId: currentChannelId)
+    }
+
+    private func popModerationAction(type: UInt8) -> ModerationAction? {
+        guard let i = moderationQueue.firstIndex(where: { $0.messageType == type }) else { return nil }
+        return moderationQueue.remove(at: i)
+    }
+
+    private func handleListUsersResponse(stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeListUsersResponse(data: payload)
+            _ = popModerationAction(type: Self.MSG_LIST_USERS)
+
+            guard response.success else {
+                moderationIsLoading = false
+                moderationError = response.errorMessage.isEmpty ? "The server refused." : response.errorMessage
+                demoteIfAdminRequired(response.errorMessage)
+                return
+            }
+
+            moderationListBuffer.append(contentsOf: response.users.map(ModerationMember.init))
+            // An empty page ends the walk even if the count disagrees, so a
+            // shrinking list can't loop forever.
+            if moderationListBuffer.count < Int(response.totalCount), !response.users.isEmpty {
+                await requestModerationPage(offset: moderationListBuffer.count)
+                return
+            }
+
+            moderationMembers = moderationListBuffer
+            moderationListBuffer = []
+            moderationIsLoading = false
+            if moderationRelistQueued {
+                moderationRelistQueued = false
+                await refreshModerationMembers()
+            }
+        } catch {
+            print("[QuicClient] Failed to parse ListUsersResponse: \(error)")
+            _ = popModerationAction(type: Self.MSG_LIST_USERS)
+            moderationIsLoading = false
+        }
+    }
+
+    private func handleModerationActionResponse(type: UInt8, stream: NWConnection) async {
+        do {
+            let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
+            let response = try decodeAdminResponse(data: payload)
+            let action = popModerationAction(type: type)
+
+            if response.success {
+                moderationError = nil
+                moderationNotice = action?.successNotice
+                // Kicking changes the roster, which arrives on its own;
+                // everything else changes an account's row.
+                if action != .kick { await refreshModerationMembers() }
+            } else {
+                print("[QuicClient] Moderation request 0x\(String(type, radix: 16)) refused: \(response.errorMessage)")
+                moderationNotice = nil
+                moderationError = response.errorMessage.isEmpty ? "The server refused." : response.errorMessage
+                demoteIfAdminRequired(response.errorMessage)
+            }
+        } catch {
+            print("[QuicClient] Failed to parse moderation AdminResponse: \(error)")
+            _ = popModerationAction(type: type)
+        }
+    }
+
+    /// Forget requests that will never be answered (the connection is gone).
+    private func resetModeration() {
+        moderationQueue = []
+        moderationListBuffer = []
+        moderationRelistQueued = false
+        moderationIsLoading = false
+    }
+
+    /// The server closed on us because the account was banned. Reconnecting
+    /// would only be refused, so stop and say why.
+    private func handleBanned() {
+        print("[QuicClient] Banned by the server; not reconnecting")
+        isIntentionalDisconnect = true
+        wasBanned = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        isRetrying = false
+        retryCount = 0
+        stopKeepalive()
+        stopListening()
+        controlStream?.cancel()
+        quicGroup?.cancel()
+        controlStream = nil
+        quicGroup = nil
+        isConnected = false
+        isAuthenticated = false
+        resetModeration()
+        connectionStatus = ModerationLogic.bannedMessage
+    }
+
+    /// Best-effort read of the QUIC application error the peer closed with.
+    /// Network.framework only fills this in on some paths, so a nil here
+    /// doesn't mean "not banned": the refused login on the next attempt is the
+    /// backstop.
+    private func closedWithBanned() -> Bool {
+        let metadata = (quicGroup?.metadata(definition: NWProtocolQUIC.definition)
+            ?? controlStream?.metadata(definition: NWProtocolQUIC.definition)) as? NWProtocolQUIC.Metadata
+        guard let error = metadata?.applicationError else { return false }
+        return ModerationLogic.isBannedClose(code: error.code, reason: error.reason)
+    }
+
     // MARK: - Keepalive
     
     /// Start periodic keepalive pings to prevent session timeout
@@ -1328,6 +1544,13 @@ public class QuicNetworkClient {
         case Self.MSG_DELETE_USER: // 0x44 - Reply to our DeleteUserRequest
             await handleDeleteUserResponse(stream: stream)
 
+        case Self.MSG_LIST_USERS: // 0x48 - Reply to our ListUsersRequest
+            await handleListUsersResponse(stream: stream)
+
+        case Self.MSG_VERIFY_USER, Self.MSG_BAN_USER, Self.MSG_GRANT_ADMIN, Self.MSG_KICK_USER:
+            // 0x49-0x4C - AdminResponse, framed with the request's type
+            await handleModerationActionResponse(type: type, stream: stream)
+
         default:
             // Every control frame is [type][u32 LE length][payload]. Consume
             // the payload of a type we don't know, or its bytes would be read
@@ -1493,26 +1716,31 @@ public class QuicNetworkClient {
         }
     }
 
-    /// Handle notification that the channel we were in has been deleted.
+    /// Handle notification that we are no longer in a channel: it was deleted,
+    /// it never existed, or an admin moved us out of it.
     ///
     /// The server has already torn down our MLS groups and told everyone we
-    /// left, so all that remains is to drop the local state and move somewhere
+    /// left, so all that remains is to say why, drop local state for a channel
+    /// that is gone (not for one we were only kicked from), and move somewhere
     /// that still exists.
     private func handleChannelDeleted(stream: NWConnection) async {
         do {
             let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
             let notice = try decodeChannelDeleted(data: payload)
             let deletedId = notice.channelId
+            let stillExists = ChannelRemovalNotice.channelStillExists(notice.reason)
 
-            print("[QuicClient] Channel \(deletedId) was deleted")
+            print("[QuicClient] Removed from channel \(deletedId) (\(notice.reason))")
 
             let wasCurrent = await MainActor.run { () -> Bool in
                 let wasCurrent = self.currentChannelId == deletedId
 
-                // Drop everything scoped to the dead channel.
-                self.usersByChannel.removeValue(forKey: deletedId)
-                self.receivedMessages.removeAll { $0.channelId == deletedId }
-                self.systemEvents.removeAll { $0.channelId == deletedId }
+                if !stillExists {
+                    // Drop everything scoped to the dead channel.
+                    self.usersByChannel.removeValue(forKey: deletedId)
+                    self.receivedMessages.removeAll { $0.channelId == deletedId }
+                    self.systemEvents.removeAll { $0.channelId == deletedId }
+                }
 
                 if wasCurrent {
                     self.forgetChannelGroups(deletedId)
@@ -1520,7 +1748,9 @@ public class QuicNetworkClient {
                     self.currentVoiceChannelId = nil
                     self.connectionStatus = "Connected"
                     self.systemEvents.append(
-                        SystemEvent(content: "This channel was deleted", channelId: "0"))
+                        SystemEvent(
+                            content: ChannelRemovalNotice.text(reason: notice.reason, detail: notice.detail),
+                            channelId: "0"))
                 }
                 return wasCurrent
             }
@@ -1528,7 +1758,8 @@ public class QuicNetworkClient {
             guard wasCurrent else { return }
 
             // Fall back to the server's suggestion, else the lobby, else the
-            // first channel that still exists.
+            // first channel that still exists (other than the one we were
+            // just removed from).
             let fallback = await MainActor.run { () -> String? in
                 if !notice.fallbackChannelId.isEmpty,
                    self.channels.contains(where: { $0.id == notice.fallbackChannelId }) {
@@ -2604,6 +2835,7 @@ public class QuicNetworkClient {
         isAuthenticated = false
         currentChannelId = nil
         usersByChannel = [:]
+        resetModeration()
         
         // Cancel any pending retry
         reconnectTask?.cancel()
@@ -2714,6 +2946,11 @@ public class QuicNetworkClient {
             }
         } catch {
             print("[QuicClient] Reconnect attempt failed: \(error)")
+            if case QuicClientError.authenticationFailed(let message) = error,
+               ModerationLogic.isBannedRefusal(message) {
+                handleBanned()
+                return
+            }
             // Schedule next retry
             scheduleReconnect()
         }
@@ -2732,6 +2969,11 @@ public class QuicNetworkClient {
             return
         }
         
+        if closedWithBanned() {
+            handleBanned()
+            return
+        }
+
         print("[QuicClient] Connection lost, cleaning up...")
 
         // Mid-deletion, a reconnect would sign this key up again as a fresh
@@ -2747,6 +2989,7 @@ public class QuicNetworkClient {
         quicGroup = nil
         isConnected = false
         isAuthenticated = false
+        resetModeration()
         
         connectionStatus = "Disconnected"
 

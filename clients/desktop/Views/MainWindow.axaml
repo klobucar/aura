@@ -3,6 +3,7 @@
         xmlns:vm="using:Aura.Desktop.ViewModels"
         xmlns:converters="using:Aura.Desktop.Converters"
         xmlns:controls="using:Aura.Desktop.Controls"
+        xmlns:svc="using:Aura.Desktop.Services"
         x:Class="Aura.Desktop.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="{Binding WindowTitle}"
@@ -252,13 +253,20 @@
                                 <TextBlock Grid.Column="0" Classes="monoLabel"
                                            Text="{Binding RosterLabel}"
                                            VerticalAlignment="Center"/>
-                                <Button Grid.Column="1" Classes="icon"
-                                        Padding="6,0"
-                                        Command="{Binding NewChannelCommand}"
-                                        IsVisible="{Binding IsAdmin}"
-                                        ToolTip.Tip="Create channel">
-                                    <TextBlock Text="+" FontSize="{StaticResource AuraFont14}"/>
-                                </Button>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" IsVisible="{Binding IsAdmin}">
+                                    <Button Classes="icon"
+                                            Padding="6,0"
+                                            Command="{Binding OpenModerationCommand}"
+                                            ToolTip.Tip="Moderate server members">
+                                        <TextBlock Text="MODERATE" Classes="monoLabel"/>
+                                    </Button>
+                                    <Button Classes="icon"
+                                            Padding="6,0"
+                                            Command="{Binding NewChannelCommand}"
+                                            ToolTip.Tip="Create channel">
+                                        <TextBlock Text="+" FontSize="{StaticResource AuraFont14}"/>
+                                    </Button>
+                                </StackPanel>
                             </Grid>
 
                             <ItemsControl ItemsSource="{Binding Channels}">
@@ -343,6 +351,9 @@
                                                                     <MenuItem Header="200%" Command="{Binding SetVolumeCommand}" CommandParameter="200"/>
                                                                 </MenuItem>
                                                                 <MenuItem Header="Profile…" Command="{Binding OpenProfileCommand}"/>
+                                                                <Separator IsVisible="{Binding CanModerate}"/>
+                                                                <MenuItem Header="Move to lobby…" Command="{Binding ModerateCommand}" IsVisible="{Binding CanModerate}"/>
+                                                                <MenuItem Header="Moderate…" Command="{Binding ModerateCommand}" IsVisible="{Binding CanModerate}"/>
                                                             </ContextMenu>
                                                         </Button.ContextMenu>
                                                         <Border CornerRadius="{StaticResource AuraRadiusControl}"
@@ -1500,6 +1511,321 @@
                             </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Border>
+
+        <!-- ================================================================
+             Moderation console (admins). Same scrim-over-the-room sheet as the
+             trust sheet: a searchable member table on the left, the selected
+             member's actions on the right.
+             ================================================================ -->
+        <Border IsVisible="{Binding Moderation.IsOpen}" Background="#99000000">
+            <Border Width="900" Height="600"
+                    MaxHeight="720"
+                    VerticalAlignment="Center" HorizontalAlignment="Center"
+                    Background="{DynamicResource AuraPanelFillBrush}"
+                    BorderBrush="{DynamicResource AuraPanelBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource AuraRadiusTile}"
+                    Padding="18">
+                <DockPanel LastChildFill="True">
+
+                    <!-- Header -->
+                    <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
+                        <StackPanel Grid.Column="0" Spacing="{StaticResource AuraSpace2}">
+                            <TextBlock Text="{Binding Moderation.HostLabel}"
+                                       Classes="monoLabel"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"/>
+                            <TextBlock Text="Server members" Classes="title"/>
+                        </StackPanel>
+                        <Button Grid.Column="1" Classes="icon" Content="✕"
+                                Command="{Binding Moderation.CloseCommand}"
+                                VerticalAlignment="Top"
+                                ToolTip.Tip="Close (Esc)"/>
+                    </Grid>
+
+                    <Grid ColumnDefinitions="*,16,300">
+
+                        <!-- Left: search, filters, table -->
+                        <DockPanel Grid.Column="0" LastChildFill="True">
+                            <TextBox DockPanel.Dock="Top" Classes="aura"
+                                     Text="{Binding Moderation.Search}"
+                                     PlaceholderText="Search by name or user id (U_…)"
+                                     Margin="0,0,0,10"/>
+
+                            <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                                <Button Classes="chip" Classes.on="{Binding Moderation.FilterIsAll}"
+                                        Command="{Binding Moderation.SetFilterCommand}"
+                                        CommandParameter="{x:Static svc:MemberFilter.All}"
+                                        Margin="0,0,6,6" FontSize="{StaticResource AuraFont11}"
+                                        Content="{Binding Moderation.AllLabel}"/>
+                                <Button Classes="chip" Classes.on="{Binding Moderation.FilterIsOnline}"
+                                        Command="{Binding Moderation.SetFilterCommand}"
+                                        CommandParameter="{x:Static svc:MemberFilter.Online}"
+                                        Margin="0,0,6,6" FontSize="{StaticResource AuraFont11}"
+                                        Content="{Binding Moderation.OnlineLabel}"/>
+                                <Button Classes="chip" Classes.on="{Binding Moderation.FilterIsAwaiting}"
+                                        Command="{Binding Moderation.SetFilterCommand}"
+                                        CommandParameter="{x:Static svc:MemberFilter.Awaiting}"
+                                        Margin="0,0,6,6" FontSize="{StaticResource AuraFont11}"
+                                        Content="{Binding Moderation.AwaitingLabel}"/>
+                                <Button Classes="chip" Classes.on="{Binding Moderation.FilterIsBanned}"
+                                        Command="{Binding Moderation.SetFilterCommand}"
+                                        CommandParameter="{x:Static svc:MemberFilter.Banned}"
+                                        Margin="0,0,6,6" FontSize="{StaticResource AuraFont11}"
+                                        Content="{Binding Moderation.BannedLabel}"/>
+                            </WrapPanel>
+
+                            <Grid DockPanel.Dock="Top" ColumnDefinitions="*,90,110" Margin="11,0,11,4">
+                                <TextBlock Grid.Column="0" Text="MEMBER" Classes="monoLabel"/>
+                                <TextBlock Grid.Column="1" Text="STANDING" Classes="monoLabel"/>
+                                <TextBlock Grid.Column="2" Text="STATUS" Classes="monoLabel"/>
+                            </Grid>
+
+                            <Border DockPanel.Dock="Top" Background="{DynamicResource AuraDangerFillBrush}"
+                                    BorderBrush="{DynamicResource AuraDangerBorderBrush}" BorderThickness="1"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="10,8"
+                                    IsVisible="{Binding Moderation.HasListError}">
+                                <TextBlock Text="{Binding Moderation.ListError}"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraDangerBrush}"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+
+                            <TextBlock DockPanel.Dock="Top" Text="Loading…"
+                                       IsVisible="{Binding Moderation.IsLoading}"
+                                       FontSize="{StaticResource AuraFont12}"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                       Margin="11,6"/>
+                            <TextBlock DockPanel.Dock="Top" Text="{Binding Moderation.EmptyText}"
+                                       IsVisible="{Binding Moderation.ShowEmpty}"
+                                       FontSize="{StaticResource AuraFont12}"
+                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                       Margin="11,6"/>
+
+                            <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+                                <ItemsControl ItemsSource="{Binding Moderation.Rows}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:ModerationRowViewModel">
+                                            <Button Classes="row"
+                                                    Padding="11,7"
+                                                    HorizontalAlignment="Stretch"
+                                                    HorizontalContentAlignment="Stretch"
+                                                    Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).Moderation.SelectCommand}"
+                                                    CommandParameter="{Binding}">
+                                                <Grid ColumnDefinitions="3,*,90,110">
+                                                    <Border Grid.Column="0" Width="3" Height="26"
+                                                            CornerRadius="2" Margin="0,0,8,0"
+                                                            Background="{DynamicResource AuraAccentBrush}"
+                                                            IsVisible="{Binding IsSelected}"/>
+
+                                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
+                                                        <Border Width="26" Height="26"
+                                                                CornerRadius="{StaticResource AuraRadiusAvatarSmall}"
+                                                                Background="{DynamicResource AuraWellBrush}">
+                                                            <TextBlock Text="{Binding Initial}"
+                                                                       FontSize="{StaticResource AuraFont12}"
+                                                                       FontWeight="Bold"
+                                                                       Foreground="{DynamicResource AuraTextBrush}"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Center"/>
+                                                        </Border>
+                                                        <StackPanel VerticalAlignment="Center">
+                                                            <TextBlock Text="{Binding Name}"
+                                                                       FontSize="{StaticResource AuraFont13}"
+                                                                       Foreground="{DynamicResource AuraTextBrush}"
+                                                                       TextTrimming="CharacterEllipsis"/>
+                                                            <TextBlock Text="{Binding ShortId}"
+                                                                       Classes="mono"
+                                                                       FontSize="{StaticResource AuraMono10}"
+                                                                       Foreground="{DynamicResource AuraTextFaintBrush}"/>
+                                                        </StackPanel>
+                                                    </StackPanel>
+
+                                                    <Panel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Left">
+                                                        <TextBlock Text="{Binding StandingLabel}" Classes="mono"
+                                                                   FontSize="{StaticResource AuraMono10}"
+                                                                   Foreground="{DynamicResource AuraLinkBrush}"
+                                                                   IsVisible="{Binding IsAdminStanding}"/>
+                                                        <TextBlock Text="{Binding StandingLabel}" Classes="mono"
+                                                                   FontSize="{StaticResource AuraMono10}"
+                                                                   Foreground="{DynamicResource AuraGoodBrush}"
+                                                                   IsVisible="{Binding IsVerifiedStanding}"/>
+                                                        <TextBlock Text="{Binding StandingLabel}" Classes="mono"
+                                                                   FontSize="{StaticResource AuraMono10}"
+                                                                   Foreground="{DynamicResource AuraCautionTextBrush}"
+                                                                   IsVisible="{Binding IsUnverifiedStanding}"/>
+                                                        <TextBlock Text="{Binding StandingLabel}" Classes="mono"
+                                                                   FontSize="{StaticResource AuraMono10}"
+                                                                   Foreground="{DynamicResource AuraDangerBrush}"
+                                                                   IsVisible="{Binding IsBanned}"/>
+                                                    </Panel>
+
+                                                    <TextBlock Grid.Column="3" Text="{Binding Status}"
+                                                               FontSize="{StaticResource AuraFont12}"
+                                                               Foreground="{DynamicResource AuraTextDimBrush}"
+                                                               VerticalAlignment="Center"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                </Grid>
+                                            </Button>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </DockPanel>
+
+                        <!-- Right: the selected member -->
+                        <Border Grid.Column="2"
+                                Classes="well"
+                                Padding="14">
+                            <Panel>
+                                <TextBlock Text="Select a member to see what you can do."
+                                           IsVisible="{Binding !Moderation.HasSelection}"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextDimBrush}"
+                                           TextWrapping="Wrap"/>
+
+                                <ScrollViewer IsVisible="{Binding Moderation.HasSelection}"
+                                              HorizontalScrollBarVisibility="Disabled">
+                                    <StackPanel Spacing="{StaticResource AuraSpace9}">
+                                        <StackPanel Spacing="{StaticResource AuraSpace2}">
+                                            <TextBlock Text="{Binding Moderation.SelectedName}"
+                                                       FontSize="{StaticResource AuraFont14}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource AuraTextBrush}"
+                                                       TextWrapping="Wrap"/>
+                                            <TextBlock Text="{Binding Moderation.SelectedShortId}"
+                                                       Classes="mono"
+                                                       FontSize="{StaticResource AuraMono10}"
+                                                       Foreground="{DynamicResource AuraTextFaintBrush}"/>
+                                            <TextBlock FontSize="{StaticResource AuraFont12}"
+                                                       Foreground="{DynamicResource AuraTextDimBrush}">
+                                                <Run Text="{Binding Moderation.SelectedStandingLabel, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding Moderation.SelectedJoined, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding Moderation.SelectedStatus, Mode=OneWay}"/>
+                                            </TextBlock>
+                                        </StackPanel>
+
+                                        <TextBlock Text="Verifying marks the account as known to this server. It is separate from comparing safety words, which checks a person's encryption key."
+                                                   FontSize="{StaticResource AuraFont11}"
+                                                   Foreground="{DynamicResource AuraTextDimBrush}"
+                                                   TextWrapping="Wrap"/>
+
+                                        <!-- The server's refusal / confirmation of the last action -->
+                                        <Border IsVisible="{Binding Moderation.HasActionError}"
+                                                Background="{DynamicResource AuraDangerFillBrush}"
+                                                BorderBrush="{DynamicResource AuraDangerBorderBrush}" BorderThickness="1"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="8,6">
+                                            <TextBlock Text="{Binding Moderation.ActionError}"
+                                                       FontSize="{StaticResource AuraFont11}"
+                                                       Foreground="{DynamicResource AuraDangerBrush}"
+                                                       TextWrapping="Wrap"/>
+                                        </Border>
+                                        <TextBlock Text="{Binding Moderation.ActionStatus}"
+                                                   IsVisible="{Binding Moderation.HasActionStatus}"
+                                                   FontSize="{StaticResource AuraFont11}"
+                                                   Foreground="{DynamicResource AuraGoodBrush}"/>
+
+                                        <Button Content="Verify account"
+                                                Command="{Binding Moderation.VerifyCommand}"
+                                                IsEnabled="{Binding Moderation.CanVerify}"
+                                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                FontSize="{StaticResource AuraFont12}"/>
+
+                                        <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+
+                                        <TextBox Classes="aura"
+                                                 Text="{Binding Moderation.KickReason}"
+                                                 PlaceholderText="Message to them (optional)"
+                                                 MaxLength="200"/>
+                                        <Button Content="Move to lobby"
+                                                Command="{Binding Moderation.MoveToLobbyCommand}"
+                                                IsEnabled="{Binding Moderation.CanMoveToLobby}"
+                                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                FontSize="{StaticResource AuraFont12}"/>
+                                        <TextBlock Text="{Binding Moderation.MoveToLobbyHint}"
+                                                   FontSize="{StaticResource AuraFont11}"
+                                                   Foreground="{DynamicResource AuraTextFaintBrush}"/>
+
+                                        <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+
+                                        <TextBox Classes="aura"
+                                                 Text="{Binding Moderation.BanReason}"
+                                                 PlaceholderText="Reason (server log only)"
+                                                 MaxLength="200"/>
+
+                                        <!-- Ban asks twice; unban doesn't. -->
+                                        <Button Content="{Binding Moderation.BanButtonLabel}"
+                                                Command="{Binding Moderation.BanCommand}"
+                                                IsVisible="{Binding !Moderation.ConfirmingBan}"
+                                                IsEnabled="{Binding Moderation.CanBan}"
+                                                Background="{DynamicResource AuraDangerFillBrush}"
+                                                Foreground="{DynamicResource AuraDangerBrush}"
+                                                BorderBrush="{DynamicResource AuraDangerBorderBrush}" BorderThickness="1"
+                                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                FontSize="{StaticResource AuraFont12}"/>
+                                        <StackPanel IsVisible="{Binding Moderation.ConfirmingBan}" Spacing="{StaticResource AuraSpace5}">
+                                            <TextBlock Text="Ban this account? They are disconnected now and refused at login until unbanned."
+                                                       FontSize="{StaticResource AuraFont11}"
+                                                       Foreground="{DynamicResource AuraDangerBrush}"
+                                                       TextWrapping="Wrap"/>
+                                            <Grid ColumnDefinitions="*,8,*">
+                                                <Button Grid.Column="0" Content="Cancel"
+                                                        Command="{Binding Moderation.CancelBanCommand}"
+                                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                        CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                        FontSize="{StaticResource AuraFont12}"/>
+                                                <Button Grid.Column="2" Content="Confirm ban"
+                                                        Command="{Binding Moderation.BanCommand}"
+                                                        IsEnabled="{Binding Moderation.CanBan}"
+                                                        Background="{DynamicResource AuraDangerBrush}" Foreground="White"
+                                                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                        CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                        FontSize="{StaticResource AuraFont12}"/>
+                                            </Grid>
+                                        </StackPanel>
+                                        <Button Content="Unban"
+                                                Command="{Binding Moderation.UnbanCommand}"
+                                                IsVisible="{Binding Moderation.SelectedIsBanned}"
+                                                IsEnabled="{Binding Moderation.CanUnban}"
+                                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                FontSize="{StaticResource AuraFont12}"/>
+
+                                        <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
+
+                                        <!-- Admin permissions. The client doesn't learn a
+                                             target's current permissions, so all start off. -->
+                                        <Button Content="{Binding Moderation.GrantButtonLabel}"
+                                                Command="{Binding Moderation.ToggleGrantCommand}"
+                                                IsEnabled="{Binding Moderation.CanOpenGrant}"
+                                                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                FontSize="{StaticResource AuraFont12}"/>
+                                        <StackPanel IsVisible="{Binding Moderation.ShowGrant}" Spacing="{StaticResource AuraSpace3}">
+                                            <TextBlock Text="Replaces their permissions with the ones ticked here. None ticked removes admin."
+                                                       FontSize="{StaticResource AuraFont11}"
+                                                       Foreground="{DynamicResource AuraTextDimBrush}"
+                                                       TextWrapping="Wrap"/>
+                                            <CheckBox Content="Verify users" IsChecked="{Binding Moderation.GrantVerifyUsers}"/>
+                                            <CheckBox Content="Ban and kick users" IsChecked="{Binding Moderation.GrantBanUsers}"/>
+                                            <CheckBox Content="Grant admin" IsChecked="{Binding Moderation.GrantGrantAdmin}"/>
+                                            <CheckBox Content="Manage channels" IsChecked="{Binding Moderation.GrantManageChannels}"/>
+                                            <Button Content="{Binding Moderation.GrantApplyLabel}"
+                                                    Command="{Binding Moderation.ApplyGrantCommand}"
+                                                    IsEnabled="{Binding Moderation.CanApplyGrant}"
+                                                    Background="{DynamicResource AuraBrandGradientBrush}" Foreground="White"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
+                                                    FontSize="{StaticResource AuraFont12}"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </Panel>
+                        </Border>
+                    </Grid>
                 </DockPanel>
             </Border>
         </Border>

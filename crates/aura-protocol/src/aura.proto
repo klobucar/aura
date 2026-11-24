@@ -315,6 +315,25 @@ message TextMessage {
     // Attachment metadata (for IMAGE and FILE types)
     uint64 file_size = 7;        // Size in bytes
     string sha256_hash = 8;      // Optional checksum
+
+    // End-to-end encrypted file attachment manifest. Present when the bytes
+    // travel as a file transfer (docs/protocol/file_transfer.md). Lives inside
+    // the encrypted payload, so the server never sees the key or the metadata.
+    // Fields 7/8 above are unused for transfers; `content` is a caption.
+    FileManifest attachment = 9;
+}
+
+// Describes one encrypted file transfer. Carried inside an encrypted TextMessage.
+// All string fields are sender-controlled and MUST be treated as untrusted.
+message FileManifest {
+    bytes file_id = 1;           // 16 random bytes; names the transfer stream and binds chunk AAD
+    bytes file_key = 2;          // 32 random bytes; XChaCha20-Poly1305 key for every chunk
+    string file_name = 3;        // Untrusted display name
+    string mime_type = 4;        // Untrusted MIME type
+    uint64 size = 5;             // Plaintext size in bytes
+    uint32 chunk_size = 6;       // Plaintext bytes per chunk (65536 in version 1)
+    uint32 chunk_count = 7;      // max(1, ceil(size / chunk_size))
+    bytes sha256 = 8;            // SHA-256 of the whole plaintext (32 bytes)
 }
 
 // Encrypted text packet sent over wire
