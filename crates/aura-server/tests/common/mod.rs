@@ -30,7 +30,7 @@ use aura_protocol::{
     mls_envelope::Content, AdminResponse, AuthRequest, AuthResponse, ChannelDeleted,
     EncryptedTextPacket, FastAudioPacket, JoinChannelRequest, ListUsersRequest, ListUsersResponse,
     MlsCommitWelcome, MlsEnvelope, MlsGroupType, MlsSyncMembers, ServerState, TextMessage,
-    UserJoined, UserLeft,
+    UserJoined, UserLeft, AUDIO_DATAGRAM, AUDIO_DATAGRAM_V1,
 };
 use aura_server::config::Config;
 use aura_server::connection::QuicServer;
@@ -718,14 +718,32 @@ impl TestClient {
         Ok(packet)
     }
 
-    /// Send `packet` as an audio datagram verbatim (`0x01` + packet). For
-    /// tests that send frames the real send path never would.
+    /// Send `packet` as an audio datagram verbatim (type `0x02` + packet).
+    /// For tests that send frames the real send path never would.
     pub fn send_audio_datagram(&self, packet: &[u8]) -> Result<()> {
+        self.send_datagram_tagged(AUDIO_DATAGRAM, packet)
+    }
+
+    /// Send `packet` under the version 1 audio tag (`0x01`), as an older
+    /// client would.
+    pub fn send_legacy_audio_datagram(&self, packet: &[u8]) -> Result<()> {
+        self.send_datagram_tagged(AUDIO_DATAGRAM_V1, packet)
+    }
+
+    fn send_datagram_tagged(&self, tag: u8, packet: &[u8]) -> Result<()> {
         let mut dgram = Vec::with_capacity(1 + packet.len());
-        dgram.push(0x01);
+        dgram.push(tag);
         dgram.extend_from_slice(packet);
         self.conn.send_datagram(dgram.into())?;
         Ok(())
+    }
+
+    /// Hand this client a datagram as if it had arrived from the relay: the
+    /// receive path runs exactly as for a real one. Stands in for a
+    /// malicious relay, which the server's sender check stops any other
+    /// client from imitating.
+    pub fn deliver_datagram(&self, datagram: &[u8]) {
+        handle_audio_datagram(&self.shared, datagram);
     }
 
     /// Every audio datagram that has reached this client, in arrival order.
@@ -872,27 +890,40 @@ async fn control_loop(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
     let _ = shared.events.send(Event::Closed(reason));
 }
 
-/// Audio arrives as datagrams tagged `0x01`; `0x00` is the keepalive.
+/// Audio arrives as datagrams tagged `0x02` (`0x01` is the older format,
+/// reported and dropped); `0x00` is the keepalive.
 async fn datagram_loop(shared: Arc<Shared>, conn: quinn::Connection) {
     while let Ok(data) = conn.read_datagram().await {
-        if data.len() <= 1 || data[0] != 0x01 {
-            continue;
-        }
-        let packet = &data[1..];
-        let Ok(parsed) = FastAudioPacket::parse(bytes::Bytes::copy_from_slice(packet)) else {
-            continue;
-        };
-        let accepted = shared
+        handle_audio_datagram(&shared, &data);
+    }
+}
+
+/// What a client does with one datagram.
+fn handle_audio_datagram(shared: &Shared, data: &[u8]) {
+    if data.len() <= 1 {
+        return;
+    }
+    let packet = &data[1..];
+    let accepted = match data[0] {
+        AUDIO_DATAGRAM => shared
             .receiver
             .on_packet(packet)
-            .map_err(|e| format!("{e:?}"));
-        shared.audio_log.lock().unwrap().push(AudioRecord {
-            session_id: parsed.session_id,
-            sequence: parsed.sequence,
-            epoch_hint: parsed.epoch_hint,
-            accepted,
-        });
-    }
+            .map_err(|e| format!("{e:?}")),
+        AUDIO_DATAGRAM_V1 => {
+            shared.receiver.note_legacy_packet(packet);
+            Err("older audio format".to_string())
+        }
+        _ => return,
+    };
+    let Ok(parsed) = FastAudioPacket::parse(bytes::Bytes::copy_from_slice(packet)) else {
+        return;
+    };
+    shared.audio_log.lock().unwrap().push(AudioRecord {
+        session_id: parsed.session_id,
+        sequence: parsed.sequence,
+        epoch_hint: parsed.epoch_hint,
+        accepted,
+    });
 }
 
 fn decrypt_packet(shared: &Shared, packet: &EncryptedTextPacket) -> Result<TextMessage, String> {

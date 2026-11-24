@@ -490,7 +490,10 @@ impl AudioReceiver {
     /// moves no receiver state; the first one from each sender logs that the
     /// peer needs to update. `data` is the packet after the type tag.
     pub fn note_legacy_packet(&self, data: &[u8]) {
-        let Some(id) = data.get(..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])) else {
+        let Some(id) = data
+            .get(..4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        else {
             return;
         };
         if self.legacy_reported.lock().unwrap().insert(id) {
@@ -1053,8 +1056,14 @@ mod tests {
             ("session_id", rewrite_header(&second, |p| p[3] = 2)),
             ("epoch_hint", rewrite_header(&second, |p| p[5] ^= 1)),
             ("sequence low", rewrite_header(&second, |p| p[7] ^= 1)),
-            ("sequence far ahead", rewrite_header(&second, |p| p[6] = 0x7F)),
-            ("sequence zeroed", rewrite_header(&second, |p| p[6..8].fill(0))),
+            (
+                "sequence far ahead",
+                rewrite_header(&second, |p| p[6] = 0x7F),
+            ),
+            (
+                "sequence zeroed",
+                rewrite_header(&second, |p| p[6..8].fill(0)),
+            ),
         ];
         for (what, frame) in cases {
             let id = u32::from_be_bytes(frame[..4].try_into().unwrap());
