@@ -251,7 +251,7 @@ extern "C" {
     // ========================================================================
 
     /// Creates a new DRED state
-    pub fn opus_dred_create(error: *mut c_int) -> *mut OpusDRED;
+    pub fn opus_dred_alloc(error: *mut c_int) -> *mut OpusDRED;
 
     /// Frees a DRED state
     pub fn opus_dred_free(dred: *mut OpusDRED);
