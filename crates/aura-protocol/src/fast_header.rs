@@ -6,6 +6,15 @@ use thiserror::Error;
 /// Format: [SessionID (4)] [EpochHint (2)] [Sequence (2)] [Nonce (24)] [Ciphertext (...)]
 /// Total Overhead: 32 bytes (8 byte header + 24 byte XChaCha20 nonce)
 ///
+/// Authentication: the first eight bytes (session id, epoch hint, sequence)
+/// are bound into the AEAD as associated data (see [`FastAudioPacket::aad`]),
+/// so a relay that rewrites or re-stamps them makes the frame fail to
+/// decrypt instead of replaying a genuine frame under a fresh sequence number.
+/// This is wire format version 2, carried by the transport tag rather than the
+/// packet: datagram type [`AUDIO_DATAGRAM`] / stream message [`MSG_AUDIO`].
+/// Version 1 (no associated data) used [`AUDIO_DATAGRAM_V1`] / [`MSG_AUDIO_V1`]
+/// and is not accepted.
+///
 /// Design Rationale:
 /// - EpochHint: Low 16 bits of MLS epoch. Receiver uses this to select the correct
 ///   decryption key when epoch changes mid-stream. Collisions are handled by trying
@@ -24,6 +33,25 @@ pub struct FastAudioPacket {
 /// XChaCha20 nonce size in bytes
 pub const NONCE_SIZE: usize = 24;
 
+/// Datagram type byte of version 1 audio (header not authenticated). The
+/// server still relays it so receivers can tell users to update; it is never
+/// decrypted.
+pub const AUDIO_DATAGRAM_V1: u8 = 0x01;
+/// Datagram type byte of version 2 audio (header bound into the AEAD).
+pub const AUDIO_DATAGRAM: u8 = 0x02;
+/// Reliable-stream message type of version 1 audio, framed `[type][u32 LE len][packet]`.
+pub const MSG_AUDIO_V1: u8 = 0x20;
+/// Reliable-stream message type of version 2 audio.
+pub const MSG_AUDIO: u8 = 0x21;
+
+/// Domain-separation label that starts the audio associated data.
+pub const AUDIO_AAD_LABEL: &[u8] = b"aura-audio-v2";
+/// Audio wire format version, the byte after the label in the associated data.
+pub const AUDIO_FORMAT_VERSION: u8 = 2;
+/// Length of the audio associated data: label (13) + version (1) + session id
+/// (4) + epoch hint (2) + sequence (2).
+pub const AUDIO_AAD_LEN: usize = 13 + 1 + 4 + 2 + 2;
+
 #[derive(Error, Debug)]
 pub enum PacketError {
     #[error("Packet too short: need at least {0} bytes, got {1}")]
@@ -33,6 +61,25 @@ pub enum PacketError {
 impl FastAudioPacket {
     /// Header size: SessionID(4) + EpochHint(2) + Sequence(2) + Nonce(24) = 32 bytes
     pub const HEADER_SIZE: usize = 4 + 2 + 2 + NONCE_SIZE;
+
+    /// AEAD associated data for a frame with these header fields:
+    /// `"aura-audio-v2" || 0x02 || session_id (u32 BE) || epoch_hint (u16 BE) || sequence (u16 BE)`.
+    /// Sender and receiver both derive it from the header as sent.
+    pub fn aad_for(session_id: u32, epoch_hint: u16, sequence: u16) -> [u8; AUDIO_AAD_LEN] {
+        let mut aad = [0u8; AUDIO_AAD_LEN];
+        let label = AUDIO_AAD_LABEL.len();
+        aad[..label].copy_from_slice(AUDIO_AAD_LABEL);
+        aad[label] = AUDIO_FORMAT_VERSION;
+        aad[label + 1..label + 5].copy_from_slice(&session_id.to_be_bytes());
+        aad[label + 5..label + 7].copy_from_slice(&epoch_hint.to_be_bytes());
+        aad[label + 7..label + 9].copy_from_slice(&sequence.to_be_bytes());
+        aad
+    }
+
+    /// The associated data for this packet's header.
+    pub fn aad(&self) -> [u8; AUDIO_AAD_LEN] {
+        Self::aad_for(self.session_id, self.epoch_hint, self.sequence)
+    }
 
     /// Zero-copy-ish parse.
     /// Takes a Bytes object, consumes the header, and returns the struct.
@@ -152,6 +199,15 @@ mod tests {
         assert_eq!(parsed.sequence, 99);
         assert_eq!(parsed.nonce, [1u8; 24]);
         assert_eq!(parsed.payload.as_ref(), b"hello opus data");
+    }
+
+    #[test]
+    fn test_aad_layout() {
+        let aad = FastAudioPacket::aad_for(0x0102_0304, 0x0506, 0x0708);
+        let mut want = b"aura-audio-v2".to_vec();
+        want.extend_from_slice(&[2, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(AUDIO_AAD_LEN, want.len());
+        assert_eq!(&aad[..], &want[..]);
     }
 
     #[test]

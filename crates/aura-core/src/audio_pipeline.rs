@@ -4,9 +4,9 @@
 //! for the send/receive hot paths.
 
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use crate::crypto::{CryptoError, DaveCrypto};
 use crate::jitter_buffer::{JitterBuffer, JitterBufferConfig, PopResult};
@@ -207,18 +207,19 @@ impl AudioSender {
         // 1. Encode to Opus
         let opus_data = self.codec.encode(pcm).map_err(AudioPipelineError::Opus)?;
 
-        // 2. Generate nonce and encrypt
+        // 2. Stamp the header, then encrypt with it as associated data
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
         let nonce = DaveCrypto::random_nonce();
+        let aad = FastAudioPacket::aad_for(self.session_id, epoch_hint, sequence);
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
             crypto
-                .encrypt(&opus_data, &nonce)
+                .encrypt_with_aad(&opus_data, &nonce, &aad)
                 .map_err(AudioPipelineError::Crypto)?
         };
 
         // 3. Build packet
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
 
         let packet = FastAudioPacket {
             session_id: self.session_id,
@@ -285,18 +286,19 @@ impl AudioSender {
             .encode_float(&processed)
             .map_err(AudioPipelineError::Opus)?;
 
-        // 5. Generate nonce and encrypt
+        // 5. Stamp the header, then encrypt with it as associated data
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
         let nonce = DaveCrypto::random_nonce();
+        let aad = FastAudioPacket::aad_for(self.session_id, epoch_hint, sequence);
         let ciphertext = {
             let crypto = self.crypto.read().unwrap();
             crypto
-                .encrypt(&opus_data, &nonce)
+                .encrypt_with_aad(&opus_data, &nonce, &aad)
                 .map_err(AudioPipelineError::Crypto)?
         };
 
         // 6. Build packet
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let epoch_hint = self.epoch_hint.load(Ordering::SeqCst);
 
         let packet = FastAudioPacket {
             session_id: self.session_id,
@@ -345,6 +347,9 @@ pub struct AudioReceiver {
     senders: RwLock<HashMap<u32, SenderState>>,
     /// Default jitter buffer config
     jitter_config: JitterBufferConfig,
+    /// Senders already reported as using the older audio format, so the
+    /// notice is logged once per sender rather than once per frame.
+    legacy_reported: Mutex<HashSet<u32>>,
 }
 
 /// State for a single remote sender
@@ -374,6 +379,7 @@ impl AudioReceiver {
         Self {
             senders: RwLock::new(HashMap::new()),
             jitter_config: JitterBufferConfig::default(),
+            legacy_reported: Mutex::new(HashSet::new()),
         }
     }
 
@@ -382,6 +388,7 @@ impl AudioReceiver {
         Self {
             senders: RwLock::new(HashMap::new()),
             jitter_config,
+            legacy_reported: Mutex::new(HashSet::new()),
         }
     }
 
@@ -478,6 +485,21 @@ impl AudioReceiver {
         }
     }
 
+    /// Note a version 1 audio frame (datagram type `0x01` / stream message
+    /// `0x20`, header not authenticated). It is never decrypted or played and
+    /// moves no receiver state; the first one from each sender logs that the
+    /// peer needs to update. `data` is the packet after the type tag.
+    pub fn note_legacy_packet(&self, data: &[u8]) {
+        let Some(id) = data.get(..4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])) else {
+            return;
+        };
+        if self.legacy_reported.lock().unwrap().insert(id) {
+            tracing::warn!(
+                "audio from session {id}: peer uses an older audio format; update both clients"
+            );
+        }
+    }
+
     /// Process a received packet
     ///
     /// Pipeline: Parse -> Try decrypt with epoch_hint key -> Fallback to other epochs -> Insert
@@ -505,15 +527,16 @@ impl AudioReceiver {
         }
 
         // 4. Try decryption with epoch_hint key first, then fallback
+        let aad = packet.aad();
         let opus_data = if let Some(crypto) = state.key_store.get(&packet.epoch_hint) {
             crypto
-                .decrypt(&packet.payload, &packet.nonce)
+                .decrypt_with_aad(&packet.payload, &packet.nonce, &aad)
                 .map_err(AudioPipelineError::Crypto)?
         } else {
             // Fallback: try other epochs (for packets in-flight during transition)
             let mut decrypted = None;
             for crypto in state.key_store.values() {
-                if let Ok(data) = crypto.decrypt(&packet.payload, &packet.nonce) {
+                if let Ok(data) = crypto.decrypt_with_aad(&packet.payload, &packet.nonce, &aad) {
                     decrypted = Some(data);
                     break;
                 }
@@ -817,15 +840,28 @@ mod tests {
         receiver
     }
 
-    /// Authentic frames that can be re-stamped with any sequence number (the
-    /// header isn't covered by the AEAD).
+    /// Authentic frames at any sequence number: the key holder opens one
+    /// genuine frame and seals its audio again under each header (the header
+    /// is authenticated, so it can't simply be rewritten).
     fn stamper(session_id: u32, key: &[u8; 32]) -> impl Fn(u16) -> Bytes {
         let sender = AudioSender::new(session_id, key).unwrap();
-        let template = sender.process(&[1000i16; 960]).unwrap().unwrap();
+        let template =
+            FastAudioPacket::parse(sender.process(&[1000i16; 960]).unwrap().unwrap()).unwrap();
+        let crypto = DaveCrypto::new(key);
+        let opus = crypto
+            .decrypt_with_aad(&template.payload, &template.nonce, &template.aad())
+            .unwrap();
         move |seq| {
-            let mut p = template.to_vec();
-            p[6..8].copy_from_slice(&seq.to_be_bytes());
-            Bytes::from(p)
+            let nonce = DaveCrypto::random_nonce();
+            let aad = FastAudioPacket::aad_for(session_id, template.epoch_hint, seq);
+            FastAudioPacket {
+                session_id,
+                epoch_hint: template.epoch_hint,
+                sequence: seq,
+                nonce,
+                payload: Bytes::from(crypto.encrypt_with_aad(&opus, &nonce, &aad).unwrap()),
+            }
+            .to_bytes()
         }
     }
 
@@ -984,5 +1020,130 @@ mod tests {
         receiver.on_packet(frame(0)).unwrap();
         receiver.on_packet(frame(1)).unwrap();
         assert_eq!(drain(&receiver, 1).packets_played, 2);
+    }
+
+    // --- header authentication -----------------------------------------------
+
+    /// The receiver's replay window for a sender.
+    fn highest(receiver: &AudioReceiver, id: u32) -> Option<u64> {
+        receiver.senders.read().unwrap()[&id].highest_sequence
+    }
+
+    fn rewrite_header(packet: &Bytes, f: impl FnOnce(&mut [u8])) -> Bytes {
+        let mut p = packet.to_vec();
+        f(&mut p);
+        Bytes::from(p)
+    }
+
+    #[test]
+    fn tampered_header_fields_fail_and_leave_state_alone() {
+        let key = DaveCrypto::random_key();
+        let sender = AudioSender::new(1, &key).unwrap();
+        let receiver = eager_receiver(1, &key);
+        let first = sender.process(&[1000i16; 960]).unwrap().unwrap();
+        let second = sender.process(&[1000i16; 960]).unwrap().unwrap();
+        receiver.on_packet(first).unwrap();
+        let before = highest(&receiver, 1);
+        assert!(before.is_some());
+
+        // session_id: the receiver looks the sender up by it, so register the
+        // id the tampered copy names; the frame must still not open.
+        receiver.add_sender(2, &key, 0).unwrap();
+        let cases: [(&str, Bytes); 5] = [
+            ("session_id", rewrite_header(&second, |p| p[3] = 2)),
+            ("epoch_hint", rewrite_header(&second, |p| p[5] ^= 1)),
+            ("sequence low", rewrite_header(&second, |p| p[7] ^= 1)),
+            ("sequence far ahead", rewrite_header(&second, |p| p[6] = 0x7F)),
+            ("sequence zeroed", rewrite_header(&second, |p| p[6..8].fill(0))),
+        ];
+        for (what, frame) in cases {
+            let id = u32::from_be_bytes(frame[..4].try_into().unwrap());
+            let err = receiver.on_packet(frame).unwrap_err();
+            assert!(
+                matches!(err, AudioPipelineError::Crypto(_)),
+                "{what}: expected an authentication failure, got {err:?}"
+            );
+            assert_eq!(highest(&receiver, 1), before, "{what} moved the window");
+            if id != 1 {
+                assert_eq!(highest(&receiver, id), None, "{what} moved a window");
+            }
+        }
+        // Nothing but the genuine first frame is waiting to play.
+        assert_eq!(drain(&receiver, 1).packets_played, 1);
+
+        // The untouched second frame is still accepted afterwards.
+        receiver.on_packet(second).unwrap();
+        assert_eq!(drain(&receiver, 1).packets_played, 2);
+    }
+
+    #[test]
+    fn replay_under_a_new_sequence_number_is_refused() {
+        let key = DaveCrypto::random_key();
+        let sender = AudioSender::new(1, &key).unwrap();
+        let receiver = eager_receiver(1, &key);
+        let captured = sender.process(&[1000i16; 960]).unwrap().unwrap();
+        receiver.on_packet(captured.clone()).unwrap();
+        assert_eq!(drain(&receiver, 1).packets_played, 1);
+        let before = highest(&receiver, 1);
+
+        for seq in [1u16, 2, 5_000, 65_535] {
+            let restamped =
+                rewrite_header(&captured, |p| p[6..8].copy_from_slice(&seq.to_be_bytes()));
+            assert!(receiver.on_packet(restamped).is_err(), "seq {seq} played");
+        }
+        assert_eq!(highest(&receiver, 1), before);
+        assert_eq!(drain(&receiver, 1).packets_played, 1);
+    }
+
+    #[test]
+    fn identical_replay_is_not_played_twice() {
+        let key = DaveCrypto::random_key();
+        let sender = AudioSender::new(1, &key).unwrap();
+        let receiver = eager_receiver(1, &key);
+        let frames: Vec<_> = (0..4)
+            .map(|_| sender.process(&[1000i16; 960]).unwrap().unwrap())
+            .collect();
+        for f in &frames {
+            receiver.on_packet(f.clone()).unwrap();
+        }
+        assert_eq!(drain(&receiver, 1).packets_played, 4);
+        // Replayed byte for byte, inside the reorder window: the jitter
+        // buffer sees it was already played.
+        receiver.on_packet(frames[1].clone()).unwrap();
+        let stats = drain(&receiver, 1);
+        assert_eq!(stats.packets_played, 4);
+        assert_eq!(stats.packets_dropped_late, 1);
+    }
+
+    #[test]
+    fn version_1_frame_is_refused_without_moving_state() {
+        let key = DaveCrypto::random_key();
+        let receiver = eager_receiver(1, &key);
+        let sender = AudioSender::new(1, &key).unwrap();
+        receiver
+            .on_packet(sender.process(&[1000i16; 960]).unwrap().unwrap())
+            .unwrap();
+        let before = highest(&receiver, 1);
+
+        // What an older client sends: the same header, sealed without AAD.
+        let crypto = DaveCrypto::new(&key);
+        let nonce = DaveCrypto::random_nonce();
+        let v1 = FastAudioPacket {
+            session_id: 1,
+            epoch_hint: 0,
+            sequence: 9,
+            nonce,
+            payload: Bytes::from(crypto.encrypt(b"opus", &nonce).unwrap()),
+        }
+        .to_bytes();
+        assert!(receiver.on_packet(v1.clone()).is_err());
+        // Reporting it never panics, on any input, and is logged once per sender.
+        receiver.note_legacy_packet(&v1);
+        receiver.note_legacy_packet(&v1);
+        receiver.note_legacy_packet(&[]);
+        receiver.note_legacy_packet(&[1, 2]);
+        assert_eq!(receiver.legacy_reported.lock().unwrap().len(), 1);
+        assert_eq!(highest(&receiver, 1), before);
+        assert_eq!(drain(&receiver, 1).packets_played, 1);
     }
 }
