@@ -217,9 +217,8 @@ impl FileEncryptor {
 
     /// Plaintext length the next call to `encrypt_next` expects.
     pub fn next_plaintext_len(&self) -> Option<usize> {
-        (self.next < self.manifest.chunk_count).then(|| {
-            plaintext_chunk_len(self.manifest.size, self.manifest.chunk_count, self.next)
-        })
+        (self.next < self.manifest.chunk_count)
+            .then(|| plaintext_chunk_len(self.manifest.size, self.manifest.chunk_count, self.next))
     }
 
     /// Encrypt the next chunk. `plaintext` must be exactly 64 KiB, except the
@@ -260,7 +259,8 @@ impl FileEncryptor {
     /// As [`encrypt_next`](Self::encrypt_next), with the 4-byte little-endian
     /// length prefix the wire format uses, ready to write to the stream.
     pub fn encrypt_next_framed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, FileError> {
-        self.encrypt_next(plaintext).map(|ct| wire::frame_chunk(&ct))
+        self.encrypt_next(plaintext)
+            .map(|ct| wire::frame_chunk(&ct))
     }
 
     /// Confirm every chunk was encrypted and the data matched the manifest's
@@ -587,12 +587,21 @@ impl FileEncryptorWrapper {
 
     /// Header bytes to write first on the upload stream.
     pub fn stream_header(&self, channel_id: String) -> Result<Vec<u8>, FileError> {
-        Ok(self.inner.lock().unwrap().stream_header(&channel_id)?.encode())
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .stream_header(&channel_id)?
+            .encode())
     }
 
     /// Plaintext length the next chunk must have; `None` once all are done.
     pub fn next_plaintext_len(&self) -> Option<u32> {
-        self.inner.lock().unwrap().next_plaintext_len().map(|n| n as u32)
+        self.inner
+            .lock()
+            .unwrap()
+            .next_plaintext_len()
+            .map(|n| n as u32)
     }
 
     /// Encrypt the next chunk and return it length-prefixed, ready to write

@@ -301,8 +301,7 @@ fn known_answer_vectors() {
     assert_eq!(hex(&sha(&chunks.concat())), KAT_DIGEST_TWO_CHUNKS);
 }
 
-const KAT_SHA256_HELLO: &str =
-    "8849ec6a95e487957ed548539a4b8c1f1ccc5e2470bc3e979d490507aa90a3a7";
+const KAT_SHA256_HELLO: &str = "8849ec6a95e487957ed548539a4b8c1f1ccc5e2470bc3e979d490507aa90a3a7";
 const KAT_CT_HELLO: &str = "7b72591113a8704e55fe198cf0e2792fff30be25bdadcea25f64c307c6aea6";
 const KAT_CT_EMPTY: &str = "ad26f55d63f742dee4de1755e856fdaa";
 const KAT_DIGEST_TWO_CHUNKS: &str =
