@@ -298,6 +298,7 @@ mod tests {
         assert_eq!(chunk_count_for_size(65537), 2);
         assert_eq!(ciphertext_len_for_size(0), 16);
         assert_eq!(ciphertext_len_for_size(65536), 65552);
+        assert_eq!(max_plaintext_size(), 26_208_000);
         assert!(ciphertext_len_for_size(max_plaintext_size()) <= MAX_FILE_CIPHERTEXT_SIZE);
         assert!(ciphertext_len_for_size(max_plaintext_size() + 1) > MAX_FILE_CIPHERTEXT_SIZE);
     }
