@@ -296,6 +296,7 @@ public partial class MainWindow : Window
         if (_vm.ChannelEditor.IsOpen) { _vm.ChannelEditor.Close(); return true; }
         if (_vm.ProfileCard.IsOpen) { _vm.ProfileCard.Close(); return true; }
         if (_vm.ShowSettings) { _vm.ToggleSettingsCommand.Execute(null); return true; }
+        if (_vm.Moderation.IsOpen) { _vm.Moderation.CloseCommand.Execute(null); return true; }
         if (_vm.TrustSheet.IsOpen) { _vm.TrustSheet.CloseCommand.Execute(null); return true; }
         return false;
     }

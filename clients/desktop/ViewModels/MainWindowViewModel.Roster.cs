@@ -34,6 +34,8 @@ public partial class MainWindowViewModel
     {
         var user = new User { Id = sessionId, Name = name, Comment = comment };
         user.IsLocallyMuted = _client?.IsLocallyMuted(sessionId) ?? false;
+        user.CanModerate = IsAdmin;
+        user.ModerateCommand = new RelayCommand(() => _ = OpenModerationFor(user));
         user.OpenProfileCommand = new RelayCommand(() => OpenProfile(user));
         user.ToggleLocalMuteCommand = new RelayCommand(() => ToggleLocalMute(user));
         user.SetVolumeCommand = new RelayCommand<string>(pct =>
@@ -63,7 +65,11 @@ public partial class MainWindowViewModel
 
     partial void OnIsAdminChanged(bool value)
     {
-        foreach (var channel in Channels) channel.CanManage = value;
+        foreach (var channel in Channels)
+        {
+            channel.CanManage = value;
+            foreach (var user in channel.Users) user.CanModerate = value && !user.IsSelf;
+        }
     }
 
     /// <summary>Show ourselves under <paramref name="channelId"/> and nowhere else.</summary>

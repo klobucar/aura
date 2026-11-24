@@ -205,6 +205,15 @@ public partial class MainWindowViewModel
         catch (AuthenticationException ex)
         {
             await AbandonAsync(client);
+            if (ModerationLogic.IsBannedLogin(ex.Message))
+            {
+                // A ban doesn't lift by retrying: stop the reconnect loop.
+                CancelReconnectInternal();
+                _rejoinChannelId = null;
+                ConnectionStatus = "Banned";
+                ShowBanner(ModerationLogic.BannedNotice, isError: true);
+                return false;
+            }
             ConnectionStatus = $"Auth failed: {ex.Message}";
             if (!isReconnect) ShowBanner($"Login refused: {ex.Message}", isError: true);
             return false;
@@ -283,7 +292,8 @@ public partial class MainWindowViewModel
         client.OnServerSnapshot += snapshot => Ui(() => HandleServerSnapshot(snapshot));
         client.OnTextMessage += (mid, sid, cid, content, reply) => Ui(() => HandleTextMessage(mid, sid, cid, content, reply));
         client.OnUserStatusUpdated += (sid, muted, deafened) => Ui(() => HandleUserStatusUpdate(sid, muted, deafened));
-        client.OnChannelDeleted += (deletedId, fallbackId) => Ui(() => _ = HandleChannelDeletedAsync(deletedId, fallbackId));
+        client.OnChannelDeleted += removal => Ui(() => _ = HandleChannelDeletedAsync(removal));
+        client.OnBanned += () => Ui(() => _ = HandleBannedAsync());
         client.OnProfileUpdated += profile => Ui(() => HandleProfileUpdated(profile));
         client.OnRequestResult += (action, ok, error) => Ui(() => HandleRequestResult(action, ok, error));
         client.OnConnectionLost += reason => Ui(() => _ = HandleConnectionLostAsync(reason));
@@ -348,6 +358,7 @@ public partial class MainWindowViewModel
         EpochLabel = "";
         ProfileCard.Close();
         ChannelEditor.Close();
+        _moderation?.CloseCommand.Execute(null);
     }
 
     // ==========================================================================
@@ -478,23 +489,53 @@ public partial class MainWindowViewModel
         }
     }
 
-    /// <summary>The channel was deleted; move somewhere that still exists.</summary>
-    private async Task HandleChannelDeletedAsync(string deletedChannelId, string fallbackChannelId)
+    /// <summary>
+    /// The server took us out of a channel: it was deleted, never existed, or
+    /// an admin moved us out of it. Either way move to the fallback; only a
+    /// deletion removes the channel from the list, since after a kick it
+    /// still exists.
+    /// </summary>
+    private async Task HandleChannelDeletedAsync(ChannelRemoval removal)
     {
-        var wasCurrent = SelectedChannel?.Id == deletedChannelId;
-        var deleted = Channels.FirstOrDefault(c => c.Id == deletedChannelId);
-        if (deleted != null) Channels.Remove(deleted);
-        _history.Remove(deletedChannelId);
+        var channelId = removal.ChannelId;
+        var wasCurrent = SelectedChannel?.Id == channelId;
 
-        if (!wasCurrent) return;
-
-        SelectedChannel = null;
-        var fallback = Channels.FirstOrDefault(c => c.Id == fallbackChannelId) ?? Channels.FirstOrDefault();
-        if (fallback != null)
+        if (removal.Kind != ChannelRemovalKind.Kicked)
         {
-            await JoinChannelAsync(fallback);
-            AddNotice(fallback.Id, "The channel you were in was deleted");
+            var deleted = Channels.FirstOrDefault(c => c.Id == channelId);
+            if (deleted != null) Channels.Remove(deleted);
+            _history.Remove(channelId);
         }
+
+        var notice = ModerationLogic.RemovalNotice(removal);
+        // Kicks and refused joins aren't something to learn from the chat log alone.
+        if (removal.Kind != ChannelRemovalKind.Deleted) ShowBanner(notice, isError: false);
+
+        if (wasCurrent)
+        {
+            SelectedChannel = null;
+            var fallback = Channels.FirstOrDefault(c => c.Id == removal.FallbackChannelId) ?? Channels.FirstOrDefault();
+            if (fallback != null)
+            {
+                await JoinChannelAsync(fallback);
+                AddNotice(fallback.Id, notice);
+            }
+        }
+        _moderation?.RefreshPresence();
+    }
+
+    /// <summary>
+    /// The server closed our connection because the account was banned.
+    /// Reconnecting would only be refused, so the session just ends.
+    /// </summary>
+    private async Task HandleBannedAsync()
+    {
+        if (_client == null) return;
+        CancelReconnectInternal();
+        _rejoinChannelId = null;
+        await DisconnectInternalAsync();
+        ConnectionStatus = "Banned";
+        ShowBanner(ModerationLogic.BannedNotice, isError: true);
     }
 
     private void HandleUserStatusUpdate(uint sessionId, bool isMuted, bool isDeafened)
@@ -521,6 +562,7 @@ public partial class MainWindowViewModel
 
         channel.Users.Add(NewUser(sessionId, name, ""));
         OnPropertyChanged(nameof(RosterLabel));
+        _moderation?.RefreshPresence();
         AddNotice(channelId, $"{name} joined");
         if (channelId == SelectedChannel?.Id) NotifyForPresence($"{name} joined {channel.Name}");
     }
@@ -534,6 +576,7 @@ public partial class MainWindowViewModel
         channel.Users.Remove(user);
         _talkStore.Forget(sessionId);
         OnPropertyChanged(nameof(RosterLabel));
+        _moderation?.RefreshPresence();
         AddNotice(channelId, $"{user.Name} left");
         if (channelId == SelectedChannel?.Id) NotifyForPresence($"{user.Name} left {channel.Name}");
         if (ProfileCard.IsOpen && ProfileCard.SessionId == sessionId) ProfileCard.Close();
@@ -586,6 +629,7 @@ public partial class MainWindowViewModel
         if (SelectedChannel != null) PlaceSelf(SelectedChannel.Id);
         OnPropertyChanged(nameof(RosterLabel));
         RefreshTrust(force: true);
+        _moderation?.RefreshPresence();
 
         if (_autoJoinPending)
         {
