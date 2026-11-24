@@ -413,6 +413,13 @@ fn message_type_name(msg_type: u8) -> &'static str {
     }
 }
 
+/// Whether an audio packet names `session_id` as its sender (its first four
+/// bytes, big-endian). Fan-out is decided by that field, so a packet may only
+/// be relayed on behalf of the connection that sent it.
+fn names_sender(packet: &[u8], session_id: u32) -> bool {
+    packet.get(..4) == Some(&session_id.to_be_bytes()[..])
+}
+
 /// A login the server refused, as opposed to a broken or malformed
 /// connection. Carries a reason code for telemetry.
 #[derive(Debug, thiserror::Error)]
@@ -490,6 +497,10 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                             match data[0] {
                                 // Audio. Skip empty audio frames (header only).
                                 0x01 if data.len() > 1 => {
+                                    if !names_sender(&data[1..], session_id) {
+                                        debug!("[{}] Dropped audio naming another session", remote);
+                                        continue;
+                                    }
                                     crate::metrics::METRICS.audio_datagram(data.len() - 1);
                                     ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                 }
@@ -862,6 +873,10 @@ impl ConnectionContext {
                     return Err(anyhow!("Incomplete audio packet received"));
                 }
 
+                if !names_sender(&packet_buf, self.session_id) {
+                    debug!("[{}] Dropped audio naming another session", self.remote);
+                    return Ok(true);
+                }
                 self.state
                     .route_audio_packet(bytes::Bytes::from(packet_buf))
                     .await;

@@ -253,7 +253,6 @@ async fn forged_frame_does_not_poison_the_replay_window() {
 /// past their mute. Datagrams must only be relayed for the session that sent
 /// them.
 #[tokio::test]
-#[ignore = "bug: the server relays a datagram for the session id written inside it without checking that it came from that session's connection, so any logged-in client can inject frames into another user's channel"]
 async fn audio_claiming_another_session_is_not_relayed() {
     let server = TestServer::start().await;
     let channel = server.create_channel("Room").await;
