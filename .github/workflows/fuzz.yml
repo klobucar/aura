@@ -71,7 +71,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler pkg-config
       - name: install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+        # With stable: cargo-fuzz's lockfile pins rustix 0.36, whose build
+        # script enables rustc_attrs on nightly, which current nightlies reject.
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
       - run: cargo fuzz build
 
   fuzz:
@@ -122,7 +126,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler pkg-config
       - name: install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
+        # With stable: cargo-fuzz's lockfile pins rustix 0.36, whose build
+        # script enables rustc_attrs on nightly, which current nightlies reject.
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
       - name: fuzz
         env:
           TARGET: ${{ matrix.target }}
