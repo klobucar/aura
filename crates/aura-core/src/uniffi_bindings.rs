@@ -296,6 +296,15 @@ impl AudioReceiverWrapper {
         Ok(())
     }
 
+    /// Report a version 1 audio frame (datagram type 0x01 / stream message
+    /// 0x20) without its type byte. It is dropped, and the first one from each
+    /// sender logs that the peer must update.
+    pub fn note_legacy_packet(&self, data: &[u8]) {
+        if let Ok(inner) = self.inner.read() {
+            inner.note_legacy_packet(data);
+        }
+    }
+
     /// Pop decoded frames
     pub fn pop_decoded(&self) -> Vec<DecodedFrame> {
         self.inner

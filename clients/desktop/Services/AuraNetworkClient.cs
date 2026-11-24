@@ -64,7 +64,11 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     // Protocol message types
     private const byte MSG_KEEPALIVE = 0x00;
     private const byte MSG_AUTH_RESPONSE = 0x04;
-    private const byte MSG_AUDIO = 0x20;
+    // Audio over the control stream. 0x21 is the current format (packet header
+    // authenticated by the AEAD); 0x20 is the older one, which peers report
+    // and drop rather than play.
+    private const byte MSG_AUDIO = 0x21;
+    private const byte MSG_AUDIO_V1 = 0x20;
     private const byte MSG_CREATE_CHANNEL = 0x40;
     private const byte MSG_UPDATE_CHANNEL = 0x41;
     private const byte MSG_UPDATE_PROFILE = 0x42;
@@ -1020,8 +1024,11 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                     case 0x13: // ChannelState
                         await HandleChannelStateAsync(ct);
                         break;
-                    case 0x20: // AudioPacket
+                    case MSG_AUDIO: // AudioPacket (v2)
                         await HandleAudioPacketAsync(ct);
+                        break;
+                    case MSG_AUDIO_V1: // Older audio format: reported, never played
+                        await HandleAudioPacketAsync(ct, legacy: true);
                         break;
                     case 0x30: // TextPacket
                         await HandleTextPacketAsync(ct);
@@ -1146,9 +1153,16 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         };
     }
 
-    private async Task HandleAudioPacketAsync(CancellationToken ct)
+    private async Task HandleAudioPacketAsync(CancellationToken ct, bool legacy = false)
     {
         var packet = await ReadHardenedPayloadAsync(MaxAudioPacketSize, ct);
+
+        if (legacy)
+        {
+            // The core drops it and logs once per sender that the peer must update.
+            _audioManager?.OnLegacyPacket(packet);
+            return;
+        }
         
         // 3. Decrypt and decode using AudioManager
         if (_audioManager != null)

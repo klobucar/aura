@@ -239,7 +239,7 @@ final class VoiceEngineTests: XCTestCase {
         await MainActor.run { XCTContext.runActivity(named: message) { _ in } }
     }
 
-    /// `[0x01][session u32][epoch u16][sequence u16]…`, big-endian.
+    /// `[0x02][session u32][epoch u16][sequence u16]…`, big-endian.
     private func header(_ datagram: Data) -> (epoch: UInt16, sequence: UInt16) {
         let bytes = [UInt8](datagram)
         return (UInt16(bytes[5]) << 8 | UInt16(bytes[6]), UInt16(bytes[7]) << 8 | UInt16(bytes[8]))

@@ -17,6 +17,12 @@ AES-GCM is famously **not key-committing**. In a multi-party context, an attacke
 - **TOB-DISCE2EC-5**: Trail of Bits identified this as a gap in Discord's implementation. 
 - **Solution**: We chose `XChaCha20-Poly1305` because it has better security bounds for random nonces and naturally higher resistance to certain classes of AEAD malleability. To formally address the commitment gap, we implement a **16-byte Zero-Padding Commitment** inside the ciphertext. This ensures that only the intended key can successfully unpad the message, creating a cryptographical "lock" that AES-GCM lacks.
 
+### Deviation: the packet header is AEAD associated data
+*   **Aura**: `session_id`, `epoch_hint` and `sequence` are bound into the AEAD as associated data (`"aura-audio-v2" || 0x02 || session_id || epoch_hint || sequence`).
+*   **Standard DAVE**: the nonce and ranges are in the frame; RTP headers stay outside the E2EE frame and are the SFU's to rewrite.
+
+Aura's relay is untrusted and never needs to rewrite the header, so nothing is gained by leaving it unauthenticated, and leaving it so let the relay replay a genuine frame under a new sequence number. See [Codec & Protocol](development/codec_and_protocol.md#header-authentication). This changed the wire format (version 2); version 1 is not accepted.
+
 ---
 
 ## 2. Transport Architecture
@@ -28,7 +34,7 @@ AES-GCM is famously **not key-committing**. In a multi-party context, an attacke
 **Rationale (QUIC vs. WebRTC):**
 Standard DAVE is constrained by **WebRTC**. WebRTC-based SFUs (Relays) often inspect or modify RTP headers. Putting E2EE metadata in a "supplemental footer" allows the packets to look like standard Opus packets to middle-boxes while keeping the E2EE data at the end.
 - **Aura Advantage**: Aura uses **QUIC Datagrams**. QUIC treats the payload as an opaque byte stream. We don't have to "hide" our metadata from the transport layer.
-- **Security Impact**: By using a **Header-First** approach, we ensure that the session context (Epoch Hint, Sequence, Session ID) is parsed *before* the decryption attempt. This is more robust against truncation attacks (where an attacker chops off the end of a packet) which are a known risk with footer-based schemes.
+- **Security Impact**: By using a **Header-First** approach, we ensure that the session context (Epoch Hint, Sequence, Session ID) is parsed *before* the decryption attempt, and then authenticated by it. This is more robust against truncation attacks (where an attacker chops off the end of a packet) which are a known risk with footer-based schemes.
 
 ---
 

@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 
@@ -57,10 +57,25 @@ impl DaveCrypto {
     /// 2. Encrypt with XChaCha20-Poly1305
     ///
     /// Returns: ciphertext (with 16-byte auth tag appended)
+    ///
+    /// Binds no associated data. Audio must use [`Self::encrypt_with_aad`] so
+    /// its packet header is authenticated.
     pub fn encrypt(
         &self,
         plaintext: &[u8],
         nonce: &[u8; NONCE_SIZE],
+    ) -> Result<Vec<u8>, CryptoError> {
+        self.encrypt_with_aad(plaintext, nonce, &[])
+    }
+
+    /// [`Self::encrypt`] with associated data: authenticated by the tag but
+    /// not encrypted, so decryption fails unless the receiver supplies the
+    /// same bytes.
+    pub fn encrypt_with_aad(
+        &self,
+        plaintext: &[u8],
+        nonce: &[u8; NONCE_SIZE],
+        aad: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
         // Zero-padding commitment (TOB-DISCE2EC-5 mitigation)
         let mut padded = vec![0u8; ZERO_PAD_SIZE];
@@ -68,7 +83,13 @@ impl DaveCrypto {
 
         let nonce = XNonce::from(*nonce);
         self.cipher
-            .encrypt(&nonce, padded.as_ref())
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: padded.as_ref(),
+                    aad,
+                },
+            )
             .map_err(|_| CryptoError::EncryptionFailed)
     }
 
@@ -78,16 +99,35 @@ impl DaveCrypto {
     /// 1. Decrypt with XChaCha20-Poly1305
     /// 2. Verify first 16 bytes are all zeros
     /// 3. Return remaining plaintext
+    ///
+    /// Expects no associated data; see [`Self::decrypt_with_aad`].
     pub fn decrypt(
         &self,
         ciphertext: &[u8],
         nonce: &[u8; NONCE_SIZE],
     ) -> Result<Vec<u8>, CryptoError> {
+        self.decrypt_with_aad(ciphertext, nonce, &[])
+    }
+
+    /// [`Self::decrypt`] that also verifies `aad`, which must equal what the
+    /// sender passed to [`Self::encrypt_with_aad`].
+    pub fn decrypt_with_aad(
+        &self,
+        ciphertext: &[u8],
+        nonce: &[u8; NONCE_SIZE],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
         let nonce = XNonce::from(*nonce);
 
         let padded = self
             .cipher
-            .decrypt(&nonce, ciphertext)
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
             .map_err(|_| CryptoError::DecryptionFailed)?;
 
         // Verify zero-padding commitment
@@ -153,6 +193,25 @@ mod tests {
         let decrypted = crypto.decrypt(&ciphertext, &nonce).expect("Decrypt failed");
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_aad_must_match() {
+        let crypto = DaveCrypto::new(&DaveCrypto::random_key());
+        let nonce = DaveCrypto::random_nonce();
+        let ct = crypto
+            .encrypt_with_aad(b"frame", &nonce, b"header")
+            .unwrap();
+        assert_eq!(
+            crypto.decrypt_with_aad(&ct, &nonce, b"header").unwrap(),
+            b"frame"
+        );
+        assert!(crypto.decrypt_with_aad(&ct, &nonce, b"headeR").is_err());
+        assert!(crypto.decrypt_with_aad(&ct, &nonce, b"").is_err());
+        assert!(crypto.decrypt(&ct, &nonce).is_err());
+        // And the other way: AAD-less ciphertext does not open with AAD.
+        let plain = crypto.encrypt(b"frame", &nonce).unwrap();
+        assert!(crypto.decrypt_with_aad(&plain, &nonce, b"header").is_err());
     }
 
     #[test]

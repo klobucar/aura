@@ -221,6 +221,8 @@ nonisolated enum VoiceCommand: Sendable {
 nonisolated enum VoiceEvent: Sendable {
     case captured([Float])
     case received(Data)
+    /// A version 1 audio packet (no authenticated header): never decoded.
+    case receivedLegacy(Data)
     case command(VoiceCommand)
 }
 
@@ -320,6 +322,12 @@ actor VoiceEngine {
         input.yield(.received(packet))
     }
 
+    /// A version 1 audio packet from an older client, without its type byte.
+    /// The core drops it and logs once per sender that the peer must update.
+    nonisolated func submitLegacyReceived(_ packet: Data) {
+        input.yield(.receivedLegacy(packet))
+    }
+
     nonisolated func post(_ command: VoiceCommand) {
         input.yield(.command(command))
     }
@@ -345,6 +353,8 @@ actor VoiceEngine {
                 transmit(pcm)
             case .received(let packet):
                 receive(packet)
+            case .receivedLegacy(let packet):
+                receiver?.noteLegacyPacket(data: packet)
             case .command(let command):
                 apply(command)
             }
@@ -394,7 +404,7 @@ actor VoiceEngine {
             return
         }
 
-        var datagram = Data([0x01])  // Audio datagram type
+        var datagram = Data([0x02])  // Audio datagram type (v2: header authenticated)
         datagram.append(packet)
 
         let logSend = sequenceNumber % 100 == 0

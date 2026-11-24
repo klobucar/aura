@@ -58,7 +58,11 @@ pub struct ClientSession {
 /// Internal messages sent to client connection loops
 #[derive(Debug, Clone)]
 pub enum ServiceMessage {
+    /// Audio in the current format (header authenticated).
     RelayAudio(Bytes),
+    /// Audio in the version 1 format. Relayed under its own tag so receivers
+    /// can tell the sender to update; no one can decrypt it any more.
+    RelayLegacyAudio(Bytes),
     /// User joined a channel - broadcast to ALL connected users
     UserJoined {
         channel_id: String,
@@ -67,10 +71,7 @@ pub enum ServiceMessage {
         user_uuid: String,
     },
     /// User left a channel - broadcast to ALL connected users
-    UserLeft {
-        channel_id: String,
-        session_id: u32,
-    },
+    UserLeft { channel_id: String, session_id: u32 },
     /// Full snapshot of server state - sent to new joiners
     ServerSnapshot(ProtoServerState),
     /// Relay encrypted text message to channel members
@@ -78,10 +79,7 @@ pub enum ServiceMessage {
 
     // --- MLS Protocol Messages ---
     /// Tell client to create a new MLS group (they are the first joiner)
-    MlsCreateGroup {
-        channel_id: String,
-        is_voice: bool,
-    },
+    MlsCreateGroup { channel_id: String, is_voice: bool },
     /// Forward a key package to the group founder for addition
     MlsAddMemberRequest {
         channel_id: String,
@@ -120,10 +118,7 @@ pub enum ServiceMessage {
     /// Ask the group founder to issue an empty commit, advancing the epoch for
     /// forward secrecy. Sent when a text group crosses its ratchet threshold,
     /// or when a voice group has been on one epoch for 15 minutes.
-    MlsRatchetRequest {
-        channel_id: String,
-        is_voice: bool,
-    },
+    MlsRatchetRequest { channel_id: String, is_voice: bool },
     /// Tell the group founder which members should still be in the group, so
     /// it commits a Remove for everyone else. Sent after a member leaves the
     /// channel or disconnects. It can only ever shrink the group.
@@ -2171,8 +2166,20 @@ impl ServerState {
 
     // --- Hot Path Media Relay ---
 
-    /// Route audio packet to voice group members.
+    /// Route an audio packet (current format) to voice group members.
     pub async fn route_audio_packet(&self, raw_bytes: Bytes) {
+        self.fan_out_audio(raw_bytes, ServiceMessage::RelayAudio)
+            .await;
+    }
+
+    /// Route a version 1 audio packet. The server cannot read audio either
+    /// way; it only keeps the old tag so receivers see why they hear nothing.
+    pub async fn route_legacy_audio_packet(&self, raw_bytes: Bytes) {
+        self.fan_out_audio(raw_bytes, ServiceMessage::RelayLegacyAudio)
+            .await;
+    }
+
+    async fn fan_out_audio(&self, raw_bytes: Bytes, wrap: fn(Bytes) -> ServiceMessage) {
         let packet = match FastAudioPacket::parse(raw_bytes.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -2226,9 +2233,7 @@ impl ServerState {
                 }
                 // Track outbound bytes for this receiver
                 session.bytes_out.fetch_add(relay_len, Ordering::Relaxed);
-                let _ = session
-                    .sender
-                    .send(ServiceMessage::RelayAudio(raw_bytes.clone()));
+                let _ = session.sender.send(wrap(raw_bytes.clone()));
             }
         }
     }

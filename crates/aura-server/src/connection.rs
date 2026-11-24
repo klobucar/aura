@@ -8,6 +8,7 @@ use crate::rate_limit::{HandshakeRateLimiter, PingRateLimiter};
 use crate::state::{ModerationError, ServerState, ServiceMessage};
 use crate::tls;
 use anyhow::{anyhow, Result};
+use aura_protocol::{AUDIO_DATAGRAM, AUDIO_DATAGRAM_V1, MSG_AUDIO, MSG_AUDIO_V1};
 use bytes::{BufMut, BytesMut};
 use prost::Message;
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
@@ -39,7 +40,9 @@ const MSG_PONG: u8 = 0x06;
 /// Length of a `MSG_PING` / `MSG_PONG` payload.
 const PING_NONCE_LEN: usize = 8;
 const MSG_JOIN_CHANNEL: u8 = 0x10;
-// const MSG_AUDIO_STREAM: u8 = 0x20;
+// Audio over the reliable stream is `aura_protocol::MSG_AUDIO` (0x21, header
+// authenticated) or `MSG_AUDIO_V1` (0x20, relayed only so receivers can report
+// the old format).
 const MSG_TEXT_PACKET: u8 = 0x30;
 const MSG_CREATE_CHANNEL: u8 = 0x40;
 const MSG_UPDATE_CHANNEL: u8 = 0x41;
@@ -491,6 +494,9 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
         current_channel_id: None,
     };
 
+    // The older audio format is logged once per connection, not per frame.
+    let mut warned_legacy_audio = false;
+
     // Main Main Loop
     loop {
         tokio::select! {
@@ -503,13 +509,24 @@ async fn handle_connection(conn: Connection, state: Arc<ServerState>) -> Result<
                         if !data.is_empty() {
                             match data[0] {
                                 // Audio. Skip empty audio frames (header only).
-                                0x01 if data.len() > 1 => {
+                                AUDIO_DATAGRAM if data.len() > 1 => {
                                     if !names_sender(&data[1..], session_id) {
                                         debug!("[{}] Dropped audio naming another session", remote);
                                         continue;
                                     }
                                     crate::metrics::METRICS.audio_datagram(data.len() - 1);
                                     ctx.state.route_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
+                                }
+                                AUDIO_DATAGRAM_V1 if data.len() > 1 => {
+                                    if !names_sender(&data[1..], session_id) {
+                                        debug!("[{}] Dropped audio naming another session", remote);
+                                        continue;
+                                    }
+                                    if !warned_legacy_audio {
+                                        warned_legacy_audio = true;
+                                        info!("[{}] Client sends the older audio format (v1); peers will drop it until it updates", remote);
+                                    }
+                                    ctx.state.route_legacy_audio_packet(bytes::Bytes::copy_from_slice(&data[1..])).await;
                                 }
                                 0x00 => {
                                     // Keepalive / RTT probe. Echo the full
@@ -871,9 +888,11 @@ impl ConnectionContext {
                         .await;
                 }
             }
-            0x20 => {
-                // MSG_AUDIO (legacy reliable path)
-                // Format: [20] [Length u32] [Payload...]
+            MSG_AUDIO | MSG_AUDIO_V1 => {
+                // Reliable audio path. Format: [21|20] [Length u32 LE] [Payload...]
+                // 0x21 is the current format, 0x20 the older one (relayed under
+                // its own tag so receivers can report it).
+                let legacy = msg_type == MSG_AUDIO_V1;
                 let mut len_buf = [0u8; 4];
                 self.recv.read_exact(&mut len_buf).await?;
                 let packet_len = u32::from_le_bytes(len_buf) as usize;
@@ -902,9 +921,12 @@ impl ConnectionContext {
                     debug!("[{}] Dropped audio naming another session", self.remote);
                     return Ok(true);
                 }
-                self.state
-                    .route_audio_packet(bytes::Bytes::from(packet_buf))
-                    .await;
+                let packet = bytes::Bytes::from(packet_buf);
+                if legacy {
+                    self.state.route_legacy_audio_packet(packet).await;
+                } else {
+                    self.state.route_audio_packet(packet).await;
+                }
                 info!(
                     "[{}] Routed audio packet from session {}",
                     self.remote, self.session_id
@@ -1474,26 +1496,40 @@ impl ConnectionContext {
         self.send_proto_response(msg_type, resp).await
     }
 
+    /// Send an audio packet to this client under the given tags: a QUIC
+    /// datagram for low latency, the reliable stream if that fails.
+    async fn relay_audio(
+        &mut self,
+        packet: &bytes::Bytes,
+        datagram_type: u8,
+        stream_type: u8,
+    ) -> Result<()> {
+        let mut dgram_data = vec![datagram_type];
+        dgram_data.extend_from_slice(packet);
+
+        if self
+            .conn
+            .send_datagram(bytes::Bytes::from(dgram_data))
+            .is_err()
+        {
+            self.send.write_u8(stream_type).await?;
+            self.send.write_u32_le(packet.len() as u32).await?;
+            self.send.write_all(packet).await?;
+            self.send.flush().await?;
+        }
+        Ok(())
+    }
+
     /// Act on a message from the rest of the server. `Ok(false)` ends the
     /// connection.
     async fn handle_service_message(&mut self, msg: ServiceMessage) -> Result<bool> {
         match msg {
             ServiceMessage::RelayAudio(packet) => {
-                // Use QUIC datagrams for unreliable, low-latency audio
-                let mut dgram_data = vec![0x01u8]; // Audio type
-                dgram_data.extend_from_slice(&packet);
-
-                if self
-                    .conn
-                    .send_datagram(bytes::Bytes::from(dgram_data))
-                    .is_err()
-                {
-                    // Fallback to reliable stream if datagrams fail
-                    self.send.write_u8(0x20).await?; // MSG_AUDIO
-                    self.send.write_u32_le(packet.len() as u32).await?;
-                    self.send.write_all(&packet).await?;
-                    self.send.flush().await?;
-                }
+                self.relay_audio(&packet, AUDIO_DATAGRAM, MSG_AUDIO).await?;
+            }
+            ServiceMessage::RelayLegacyAudio(packet) => {
+                self.relay_audio(&packet, AUDIO_DATAGRAM_V1, MSG_AUDIO_V1)
+                    .await?;
             }
             ServiceMessage::UserJoined {
                 channel_id,

@@ -207,6 +207,15 @@ public class AudioManager : IDisposable
     }
 
     /// <summary>
+    /// Report an audio packet in the older format (never decrypted or played;
+    /// the core logs once per sender that the peer must update).
+    /// </summary>
+    public void OnLegacyPacket(byte[] data)
+    {
+        _receiver?.NoteLegacyPacket(data);
+    }
+
+    /// <summary>
     /// Pop mixed audio for playback, returns PCM samples
     /// Also updates active speaker tracking
     /// </summary>

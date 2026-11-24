@@ -13,7 +13,7 @@ use std::time::Duration;
 use aura_core::crypto::DaveCrypto;
 use aura_core::uniffi_bindings::AudioSenderWrapper;
 use aura_identity::IdentitySecret;
-use aura_protocol::{ChannelRemovalReason, FastAudioPacket};
+use aura_protocol::{ChannelRemovalReason, FastAudioPacket, AUDIO_DATAGRAM};
 use common::*;
 use tokio::time::sleep;
 
@@ -277,17 +277,123 @@ async fn audio_claiming_another_session_is_not_relayed() {
     );
 }
 
-/// One authentic frame whose header can be re-stamped: the header (session,
-/// epoch hint, sequence) isn't covered by the AEAD, so the same ciphertext
-/// is a valid frame at any sequence number.
+/// Authentic frames at any sequence number. The header is authenticated, so
+/// the key holder (not a relay) opens one genuine frame and seals its audio
+/// again under each header.
 fn restampable_frame(key: &[u8; 32], amplitude: f32) -> impl Fn(u16) -> Vec<u8> {
     let sender = AudioSenderWrapper::new(9, key).unwrap();
     let template = sender.process(&tone_at(0, amplitude)).unwrap().unwrap();
+    let template = FastAudioPacket::parse(bytes::Bytes::from(template)).unwrap();
+    let crypto = DaveCrypto::new(key);
+    let opus = crypto
+        .decrypt_with_aad(&template.payload, &template.nonce, &template.aad())
+        .unwrap();
     move |seq| {
-        let mut p = template.clone();
-        p[6..8].copy_from_slice(&seq.to_be_bytes());
-        p
+        let nonce = DaveCrypto::random_nonce();
+        let aad = FastAudioPacket::aad_for(9, template.epoch_hint, seq);
+        FastAudioPacket {
+            session_id: 9,
+            epoch_hint: template.epoch_hint,
+            sequence: seq,
+            nonce,
+            payload: bytes::Bytes::from(crypto.encrypt_with_aad(&opus, &nonce, &aad).unwrap()),
+        }
+        .to_bytes()
+        .to_vec()
     }
+}
+
+/// The server is untrusted. One that captures a genuine frame and delivers it
+/// again with a rewritten header (a new sequence number, another epoch or
+/// session) must not get it played a second time or move the receiver's
+/// window. The server's sender check stops any *client* from injecting that
+/// datagram, so the rewritten datagrams are handed to the receiving client's
+/// datagram handler directly, exactly as the relay would deliver them.
+#[tokio::test]
+async fn relay_replaying_a_frame_under_a_new_sequence_is_not_played() {
+    let server = TestServer::start().await;
+    let channel = server.create_channel("Room").await;
+    let (a, b) = two_in_channel(&server, &channel).await;
+
+    // Genuine frames reach bob through the real relay and play.
+    let mut sent = Vec::new();
+    for frame in 0..4 {
+        sent.push(a.send_audio_frame(&tone(frame)).unwrap());
+        sleep(Duration::from_millis(20)).await;
+    }
+    let log = b.wait_audio_packets(4).await;
+    assert!(log.iter().all(|r| r.accepted.is_ok()));
+    let mut played = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while played < 3 && std::time::Instant::now() < deadline {
+        sleep(Duration::from_millis(20)).await;
+        played += b.pop_decoded().len();
+    }
+    assert!(played >= 3, "genuine frames should play, got {played}");
+    sleep(Duration::from_millis(100)).await;
+    let _ = b.pop_decoded();
+
+    // The relay replays the last frame: restamped as the next frame, far
+    // ahead, with another epoch hint, and under another session id.
+    let mut captured = vec![AUDIO_DATAGRAM];
+    captured.extend_from_slice(sent.last().unwrap());
+    let before = b.audio_log().len();
+    let restamp = |range: std::ops::Range<usize>, value: &[u8]| {
+        let mut p = captured.clone();
+        p[range].copy_from_slice(value);
+        p
+    };
+    let forged = [
+        restamp(7..9, &4u16.to_be_bytes()),
+        restamp(7..9, &30_000u16.to_be_bytes()),
+        restamp(6..7, &[0x55]),
+        restamp(1..5, &(a.session_id + 1).to_be_bytes()),
+    ];
+    for datagram in &forged {
+        b.deliver_datagram(datagram);
+    }
+    let log = b.audio_log();
+    assert_eq!(log.len(), before + forged.len());
+    assert!(
+        log[before..].iter().all(|r| r.accepted.is_err()),
+        "a re-stamped frame was accepted: {:?}",
+        &log[before..]
+    );
+    // (A refused frame is never queued, so it can't play; the decoder may
+    // still conceal the gap, which is why output isn't asserted empty.)
+
+    // The window did not move: alice's next real frame still plays.
+    a.send_audio_frame(&tone(4)).unwrap();
+    let log = b.wait_audio_packets(before + forged.len() + 1).await;
+    assert!(log.last().unwrap().accepted.is_ok());
+}
+
+/// A client still on the version 1 audio format is relayed under its own tag
+/// and reported by the receiver, never decrypted or played.
+#[tokio::test]
+async fn older_audio_format_is_reported_and_not_played() {
+    let server = TestServer::start().await;
+    let channel = server.create_channel("Room").await;
+    let (a, b) = two_in_channel(&server, &channel).await;
+
+    let frame = FastAudioPacket::with_sequence_nonce(
+        a.session_id,
+        1,
+        0,
+        bytes::Bytes::from(vec![0x42; 64]),
+    )
+    .to_bytes();
+    a.send_legacy_audio_datagram(&frame).unwrap();
+    let log = b.wait_audio_packets(1).await;
+    assert_eq!(log[0].session_id, a.session_id);
+    assert!(log[0].accepted.is_err());
+    sleep(Duration::from_millis(100)).await;
+    assert!(b.pop_decoded().is_empty());
+
+    // And it did not disturb the current-format stream.
+    a.send_audio_frame(&tone(0)).unwrap();
+    let log = b.wait_audio_packets(2).await;
+    assert!(log[1].accepted.is_ok());
 }
 
 /// Frame counters are 16-bit and wrap after about 22 minutes of speech
