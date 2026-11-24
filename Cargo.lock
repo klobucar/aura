@@ -375,6 +375,7 @@ name = "aura-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aura-core",
  "aura-identity",
  "aura-protocol",
  "aura-telemetry",
