@@ -500,6 +500,63 @@ async fn a_stalled_recipient_loses_its_copy_without_blocking_others() {
 }
 
 #[tokio::test]
+async fn a_recipient_that_stops_reading_after_the_upload_cannot_hold_the_slot() {
+    let _serial = LOGIN_TESTS.lock().await;
+    // Bob's queue holds the whole file, so he is never cut off for falling
+    // behind during the upload, and his writes may block for a long time:
+    // only the drain deadline can release the sender.
+    let rig = rig(Some(RelayLimits {
+        recipient_buffer_chunks: 512,
+        recipient_write_timeout: Duration::from_secs(60),
+        drain_timeout: Duration::from_millis(500),
+        ..Default::default()
+    }));
+    let (mut alice, mut bob, mut carol) = (
+        login(&rig, "Alice").await,
+        login(&rig, "Bob").await,
+        login(&rig, "Carol").await,
+    );
+    join(&mut alice, &rig.room, 1).await;
+    join(&mut bob, &rig.room, 1).await;
+    join(&mut carol, &rig.room, 1).await;
+
+    // Bob accepts the stream and then never reads it.
+    let bob_conn = bob.conn.clone();
+    let slow = tokio::spawn(async move { bob_conn.accept_uni().await.unwrap() });
+    let rc = tokio::spawn(receive(carol.conn.clone(), Duration::from_secs(10)));
+
+    let size = 16 << 20; // more than QUIC's flow-control window, less than Bob's queue
+    let h = header(&rig.room, size);
+    let started = std::time::Instant::now();
+    let (code, delivered) = upload_all(&alice, &h).await;
+    assert_eq!(code, 0, "the sender's transfer succeeds");
+    assert_eq!(delivered, 1, "only Carol's copy completed");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the sender waited on the stalled recipient"
+    );
+    assert_eq!(rig.state.file_relay.active_transfers(), 0, "slot released");
+
+    let Some(Got::Done(_, chunks)) = rc.await.unwrap() else {
+        panic!("Carol did not get the whole file");
+    };
+    assert_eq!(chunks.len() as u32, h.chunk_count);
+
+    let mut bob_stream = slow.await.unwrap();
+    let r = timeout(Duration::from_secs(10), bob_stream.read_to_end(64 << 20))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            r,
+            Err(quinn::ReadToEndError::Read(quinn::ReadError::Reset(c)))
+                if c.into_inner() as u32 == ec::RECIPIENT_TOO_SLOW
+        ),
+        "{r:?}"
+    );
+}
+
+#[tokio::test]
 async fn limits_concurrent_transfers_and_bytes_per_user() {
     let _serial = LOGIN_TESTS.lock().await;
     let rig = rig(Some(RelayLimits {

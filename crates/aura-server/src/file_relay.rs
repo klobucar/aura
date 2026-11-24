@@ -53,6 +53,10 @@ pub struct RelayLimits {
     pub open_stream_timeout: Duration,
     /// Wall-clock cap on one transfer.
     pub max_transfer_duration: Duration,
+    /// Once the sender has finished, how long recipients get to drain what is
+    /// queued for them. Stragglers are then cut off, so a recipient that reads
+    /// slowly on purpose can't hold the sender's transfer slot.
+    pub drain_timeout: Duration,
 }
 
 impl Default for RelayLimits {
@@ -66,6 +70,7 @@ impl Default for RelayLimits {
             recipient_write_timeout: Duration::from_secs(30),
             open_stream_timeout: Duration::from_secs(5),
             max_transfer_duration: Duration::from_secs(15 * 60),
+            drain_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -376,13 +381,34 @@ async fn upload(
     match result {
         Ok(()) => {
             // Closing every queue is the clean end: recipients drain what is
-            // queued and finish their streams.
-            let delivered = recipients.len() as u32;
-            drop(recipients);
-            // Hold the slot until they have, so a
-            // user's server-side buffering stays bounded by the slot count.
-            for t in tasks {
-                let _ = t.await;
+            // queued and finish their streams. Keep the cut-off switches.
+            let cuts: Vec<watch::Sender<u32>> = recipients
+                .drain(..)
+                .map(|Recipient { cut, .. }| cut)
+                .collect();
+            // Hold the slot until they have, so a user's server-side buffering
+            // stays bounded by the slot count, but only for `drain_timeout`:
+            // after that, whoever is still writing is cut off.
+            let deadline = tokio::time::Instant::now() + limits.drain_timeout;
+            let mut delivered = 0u32;
+            let mut cut_stragglers = false;
+            for mut t in tasks {
+                let done = match tokio::time::timeout_at(deadline, &mut t).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        if !cut_stragglers {
+                            cut_stragglers = true;
+                            for c in &cuts {
+                                c.send_replace(code::RECIPIENT_TOO_SLOW);
+                            }
+                        }
+                        metrics.file_recipient_dropped();
+                        t.await
+                    }
+                };
+                if matches!(done, Ok(true)) {
+                    delivered += 1;
+                }
             }
             metrics.file_transfer_finished("completed");
             debug!("[files] transfer {} completed", transfer_id);
@@ -540,7 +566,8 @@ async fn write_or_stop(
 }
 
 /// One recipient's task: open a stream, write the header, then forward queued
-/// chunks until the queue closes or the transfer is aborted.
+/// chunks until the queue closes or the transfer is aborted. Returns whether
+/// this recipient's copy was delivered in full.
 async fn deliver(
     conn: Connection,
     header: Bytes,
@@ -548,11 +575,11 @@ async fn deliver(
     mut cut: watch::Receiver<u32>,
     mut abort: watch::Receiver<u32>,
     limits: RelayLimits,
-) {
+) -> bool {
     let metrics = &crate::metrics::METRICS;
     let mut send = match timeout(limits.open_stream_timeout, conn.open_uni()).await {
         Ok(Ok(s)) => s,
-        _ => return,
+        _ => return false,
     };
     let limit = limits.recipient_write_timeout;
 
@@ -573,11 +600,10 @@ async fn deliver(
     .await;
 
     match outcome {
-        Ok(()) => {
-            let _ = send.finish();
-        }
+        Ok(()) => send.finish().is_ok(),
         Err(c) => {
             let _ = send.reset(varint(c));
+            false
         }
     }
 }
