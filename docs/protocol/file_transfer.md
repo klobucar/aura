@@ -104,7 +104,7 @@ Header validation (shared code, `FileStreamHeader::validate`): kind and version 
 
 When the transfer ends the server writes 8 bytes and finishes its side: `[code: u32 LE][recipients: u32 LE]`.
 
-- `code == 0`: the server received exactly the declared bytes, saw the sender finish the stream, and relayed it. `recipients` is the number of members whose copy was still live when the last chunk was queued; recipients can still fail afterwards, and nothing here is a delivery receipt.
+- `code == 0`: the server received exactly the declared bytes, saw the sender finish the stream, and relayed it. `recipients` is the number of members whose delivery stream the server wrote in full and finished. It is sent once every copy has either finished or been cut off (at most 2 minutes after the sender finishes). It is not a receipt: a recipient can still fail to decrypt or store the file.
 - `code != 0`: refused or aborted; see the codes below. `recipients` is 0. The server also issues `STOP_SENDING` with the same code so the sender stops writing promptly.
 
 The status arrives after the server has handed the last bytes to every live recipient connection (not merely when it read the last byte from the sender).
@@ -115,7 +115,7 @@ For each other member of the channel's text group at the moment the header is va
 
 A recipient can decline a transfer, or abandon one (for example when the manifest never arrives or the sender is not trusted), by calling `STOP_SENDING` on the stream; the server then drops only that copy.
 
-The text message carrying the manifest and the delivery stream are separate QUIC streams, so **either can arrive first**. A client must match them by `file_id`, hold or buffer a stream whose manifest has not arrived (bounded; reset it after a short wait), and never assume order.
+The text message carrying the manifest and the delivery stream are separate QUIC streams, so **either can arrive first**. A client must match them by `file_id` **and** by sender: the delivery header's `sender_session_id` must be the session that sent the announcing message. Every member who can read the manifest knows its `file_id` and key, so a stream for that `file_id` from anyone else must be rejected. Hold or buffer a stream whose manifest has not arrived (bounded; reset it after a short wait), and never assume order.
 
 ### 3.6 Error codes
 
@@ -129,7 +129,7 @@ Used as QUIC application error codes, and as the status `code` for uploads.
 | 4 | `RATE_LIMITED` | Per-user concurrency or bytes-per-minute limit |
 | 5 | `PROTOCOL_VIOLATION` | Chunk length disagrees with the header, or more bytes than declared, or the stream did not finish after the last chunk |
 | 6 | `SENDER_LEFT` | Sender left the channel, disconnected or reset the stream mid-transfer |
-| 7 | `RECIPIENT_TOO_SLOW` | This recipient's copy was dropped for falling behind (also: a write to it stalled for 30 s, or it refused the stream) |
+| 7 | `RECIPIENT_TOO_SLOW` | This recipient's copy was dropped for falling behind (also: a write to it stalled for 30 s, it had not drained its queue 2 minutes after the sender finished, or it refused the stream) |
 | 8 | `SENDER_STALLED` | No complete chunk within 30 s, or the transfer exceeded 15 minutes |
 | 9 | `NO_RECIPIENTS` | Nobody else in the channel, or every recipient was dropped or left |
 | 10 | `SERVER_UNAVAILABLE` | Reserved |
@@ -142,10 +142,10 @@ Used as QUIC application error codes, and as the status `code` for uploads.
 - **Membership.** The sender must be in the channel's text group when the header is validated, and again before every chunk. Recipients are the other members at that moment; someone who joins later never receives the file, and a recipient who leaves mid-transfer is cut off. Files are never queued for people who are offline or in another channel.
 - **Sender leaves or disconnects**: the relay aborts immediately (leaving a channel triggers it directly; disconnecting resets the stream; kicks and removals are caught by the per-chunk membership check). Recipients see a reset with `SENDER_LEFT`.
 - **Rate limits (per account, not per connection)**:
-  - at most **3 concurrent transfers** per user (a slot is held until the recipients have drained their queues);
+  - at most **3 concurrent transfers** per user (a slot is held until the recipients have drained their queues, for at most 2 minutes after the sender finishes; recipients still writing then are cut off with `RECIPIENT_TOO_SLOW`);
   - at most **100 MiB of declared ciphertext per minute** per user (token bucket, burst equal to the budget), charged when the transfer starts, at least 64 KiB per transfer so floods of tiny files are limited too.
   - Client-opened bidirectional streams per connection are capped at 16 by the QUIC transport settings.
-- **Timeouts**: header 10 s; no complete chunk for 30 s; a recipient write blocked for 30 s; opening a recipient stream 5 s; 15 minutes per transfer.
+- **Timeouts**: header 10 s; no complete chunk for 30 s; a recipient write blocked for 30 s; opening a recipient stream 5 s; 15 minutes per transfer; 2 minutes for recipients to drain once the sender has finished.
 - **Metrics** (`aura_` prefix; aggregate counts only): `file_transfers_started_total`, `file_transfers_rejected_total{reason}`, `file_transfers_finished_total{outcome}` (`completed`, `sender_left`, `sender_stalled`, `protocol_violation`, `recipients_gone`, `other`), `file_bytes_received_total`, `file_bytes_relayed_total`, `file_recipients_dropped_total`, and the gauge `file_transfers_active`.
 
 ## 5. Core API (`aura-core`, exposed through UniFFI)
@@ -180,7 +180,7 @@ The existing `TextCryptoWrapper.decrypt` still works on announcement messages bu
 
 1. On a text message with a manifest (`decrypt_text_with_attachment`): validate (done by core), then sanitise `file_name` and treat `mime_type` as untrusted. Show a file card.
 2. **Hold back files from unverified senders**: if the sender's identity is not verified (safety words), do not auto-accept or auto-preview. Show a placeholder ("File from an unverified user: Accept?") and, until accepted, do not read the delivery stream (call `STOP_SENDING` to decline, or hold it unread within flow-control limits for a short time). Pick one policy per client; never auto-open.
-3. Accept server-initiated unidirectional streams on the connection (make sure the QUIC stack allows at least 16 incoming unidirectional streams). Read 36 bytes, then `file_stream_header_channel_id_len`, then the channel id, then decode. Match `file_id` to a known manifest; if none arrives within a short window, `STOP_SENDING` the stream.
+3. Accept server-initiated unidirectional streams on the connection (make sure the QUIC stack allows at least 16 incoming unidirectional streams). Read 36 bytes, then `file_stream_header_channel_id_len`, then the channel id, then decode. Match `file_id` to a known manifest **and** check the header's `sender_session_id` is the session that sent that manifest's message; reset a stream that fails either check. If no manifest arrives within a short window, `STOP_SENDING` the stream.
 4. Create a `FileDecryptorWrapper(manifest)` and `check_header`. Loop: read `u32 LE` length, read that many bytes, `decrypt_next`, append plaintext to a **temporary file**.
 5. At end of stream call `finish()`. Only on success move the file to its final place and mark it *decrypted locally*; on any error, or a stream reset (any code), delete the partial file and show a failed state.
 6. UI states: *drop overlay* (sending side, when a file is dragged over the channel), *encrypting / progress* (both sides), *decrypted locally* (verified, safe to open, still untrusted content), *held back, sender unverified*, *failed / cancelled* (with the reason; a reset with `RECIPIENT_TOO_SLOW` is "your connection was too slow, ask them to resend").
@@ -192,7 +192,7 @@ What the **server learns**: that a transfer happened, who sent it (session and a
 
 - **Confidentiality** rests on the E2EE text path: anyone who can read the announcing message (current group members at that epoch) can read the file. A passive observer of the network sees QUIC.
 - **No forward secrecy beyond the per-file key's lifetime**: each file has its own key, so compromising one key exposes one file, but the key travels inside a text message protected by the MLS epoch key (which ratchets). Anyone who later compromises a client holding the manifest, or the stored message history, gets the key. Clients should drop the key from memory once the transfer ends and should not persist manifests beyond what chat history needs.
-- **Integrity**: a malicious server or network can drop or truncate a transfer (detected: reset or `Truncated`), reorder or splice chunks (detected: AEAD), or substitute another file's chunks (detected: AAD with `file_id`, and the hash). It cannot make a recipient accept altered content.
+- **Integrity**: a malicious server or network can drop or truncate a transfer (detected: reset or `Truncated`), reorder or splice chunks (detected: AEAD), or substitute another file's chunks (detected: AAD with `file_id`, and the hash). It cannot make a recipient accept altered content. Another channel member knows each file's key and `file_id` and could send its own stream under them; the server stamps the real `sender_session_id` on every delivery, so recipients reject it by sender, and the manifest's hash would reject different content anyway.
 - **Availability**: the server can refuse to relay, delay, or cut a transfer. Per-user limits stop one user exhausting the relay; a malicious member can still send up to 100 MiB per minute per account into a channel, and a channel's members each carry that bandwidth.
 - **Untrusted metadata**: file names and MIME types come from the sender (possibly a malicious member). Clients sanitise and never trust them (section 2).
 - **Late joiners and absentees never receive a file.** Only members present when the transfer starts get it; there is no store-and-forward and no re-send from the server. Someone who was offline must ask the sender to resend.
