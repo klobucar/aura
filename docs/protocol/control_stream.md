@@ -12,6 +12,8 @@ The control stream is a bidirectional QUIC stream opened by the server immediate
 - Keepalive pings and round-trip-time probes
 - Reliable audio fallback (when datagrams fail)
 
+The control stream is the only stream the server opens as bidirectional. Other streams on the connection are used for [encrypted file transfers](file_transfer.md): client-opened bidirectional streams for uploads and server-opened unidirectional streams for deliveries.
+
 ## Framing
 
 Every message except the bare `0x00` keepalive and the `0x02` ServerHello is framed as:
@@ -257,6 +259,8 @@ Transports opaque MLS messages. `Welcome` is sent by an existing member to a joi
 [reply_to_id_len: u8] [reply_to_id: UTF-8] (optional)
 ```
 End-to-end encrypted text message. Payload is XChaCha20-Poly1305.
+
+A text message can announce an end-to-end encrypted file (`TextMessage.attachment`). The file's bytes never use the control stream: they go on a dedicated QUIC stream per transfer. See [file_transfer.md](file_transfer.md).
 
 ## Connection Flow
 

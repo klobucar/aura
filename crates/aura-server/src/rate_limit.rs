@@ -113,6 +113,48 @@ impl PingRateLimiter {
     }
 }
 
+/// Per-user budget of file-transfer ciphertext per minute.
+///
+/// Charged when a transfer starts, by its declared size in KiB and never less
+/// than one chunk, so a flood of tiny transfers is limited too. The budget is
+/// also the burst, so a user can spend a whole minute's worth at once.
+pub struct FileByteLimiter {
+    inner: governor::DefaultKeyedRateLimiter<String>,
+    checks: std::sync::atomic::AtomicU32,
+}
+
+impl FileByteLimiter {
+    /// Smallest charge per transfer, in KiB (one 64 KiB chunk).
+    const MIN_CHARGE_KIB: u64 = 64;
+
+    pub fn new(kib_per_minute: u32) -> Self {
+        let kib = NonZeroU32::new(kib_per_minute).unwrap_or(nonzero!(1u32));
+        Self {
+            inner: RateLimiter::keyed(Quota::per_minute(kib).allow_burst(kib)),
+            checks: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Spend `bytes` of `user`'s budget. False if it would overdraw it.
+    pub fn try_consume(&self, user: &str, bytes: u64) -> bool {
+        // Prune fully refilled entries now and then so the map follows the
+        // number of recently active senders, not all users ever seen.
+        if self
+            .checks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % 256
+            == 255
+        {
+            self.inner.retain_recent();
+        }
+        let kib = bytes.div_ceil(1024).max(Self::MIN_CHARGE_KIB);
+        let Some(cells) = u32::try_from(kib).ok().and_then(NonZeroU32::new) else {
+            return false;
+        };
+        matches!(self.inner.check_key_n(&user.to_string(), cells), Ok(Ok(())))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +166,24 @@ mod tests {
         let answered = (0..20).filter(|_| limiter.check()).count();
         // The burst, plus at most a token or two refilled while looping.
         assert!((5..=7).contains(&answered), "answered {answered} of 20");
+    }
+
+    #[test]
+    fn file_budget_is_per_user_and_charges_a_minimum() {
+        let l = FileByteLimiter::new(1024); // 1 MiB per minute
+        assert!(l.try_consume("a", 512 * 1024));
+        assert!(l.try_consume("a", 512 * 1024));
+        assert!(!l.try_consume("a", 1));
+        assert!(l.try_consume("b", 1024 * 1024));
+        assert!(
+            !l.try_consume("b", 2 * 1024 * 1024),
+            "over the whole budget"
+        );
+        // A one-byte transfer still costs one chunk's worth.
+        let l = FileByteLimiter::new(128);
+        assert!(l.try_consume("a", 1));
+        assert!(l.try_consume("a", 1));
+        assert!(!l.try_consume("a", 1));
     }
 
     #[tokio::test]

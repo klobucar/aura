@@ -608,6 +608,9 @@ pub struct ServerState {
     pub db: Arc<Database>,
     pub config: Config,
     pub auth: Arc<AuthService>,
+
+    /// Connection registry and bookkeeping for encrypted file transfers.
+    pub file_relay: crate::file_relay::FileRelay,
 }
 
 impl ServerState {
@@ -626,6 +629,7 @@ impl ServerState {
             db: db.clone(),
             config: config.clone(),
             auth,
+            file_relay: crate::file_relay::FileRelay::default(),
         };
 
         // Load channels from DB

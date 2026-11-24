@@ -12,6 +12,8 @@ pub use aura::v1alpha1::*;
 pub mod fast_header;
 pub use fast_header::*;
 
+pub mod file_transfer;
+
 /// Generate a consistent MLS group ID for a channel.
 /// Format: {type}-v1-{channel_id}
 /// This function is idempotent: if the ID is already formatted, it returns it as-is.
@@ -79,6 +81,7 @@ mod tests {
             message_id: "msg-id-555".into(),
             file_size: 0,
             sha256_hash: "".into(),
+            attachment: None,
         };
 
         // Serialize

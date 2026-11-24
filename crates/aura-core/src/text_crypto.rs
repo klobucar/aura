@@ -96,6 +96,7 @@ pub fn create_text_message(
         r#type: aura_protocol::MediaType::Text as i32,
         file_size: 0,
         sha256_hash: String::new(),
+        attachment: None,
     }
 }
 

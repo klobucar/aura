@@ -59,6 +59,26 @@ const MESSAGE_TYPES: &[&str] = &[
 /// Why a connection was dropped before it got going.
 const REJECT_REASONS: &[&str] = &["rate_limited", "handshake_failed", "other"];
 
+/// Why a file transfer was refused before any data moved.
+const FILE_REJECT_REASONS: &[&str] = &[
+    "malformed",
+    "too_large",
+    "not_in_channel",
+    "rate_limited",
+    "no_recipients",
+    "other",
+];
+
+/// How a started file transfer ended.
+const FILE_OUTCOMES: &[&str] = &[
+    "completed",
+    "sender_left",
+    "sender_stalled",
+    "protocol_violation",
+    "recipients_gone",
+    "other",
+];
+
 const MAX_LABELS: usize = 24;
 
 /// A counter split by one label whose values come from a fixed list.
@@ -116,6 +136,12 @@ pub struct Metrics {
     audio_datagrams: AtomicU64,
     audio_bytes: AtomicU64,
     text_replays_rejected: AtomicU64,
+    file_transfers_started: AtomicU64,
+    file_transfers_rejected: LabeledCounter,
+    file_transfers_finished: LabeledCounter,
+    file_bytes_received: AtomicU64,
+    file_bytes_relayed: AtomicU64,
+    file_recipients_dropped: AtomicU64,
 }
 
 pub static METRICS: Metrics = Metrics {
@@ -128,6 +154,12 @@ pub static METRICS: Metrics = Metrics {
     audio_datagrams: AtomicU64::new(0),
     audio_bytes: AtomicU64::new(0),
     text_replays_rejected: AtomicU64::new(0),
+    file_transfers_started: AtomicU64::new(0),
+    file_transfers_rejected: LabeledCounter::new(FILE_REJECT_REASONS),
+    file_transfers_finished: LabeledCounter::new(FILE_OUTCOMES),
+    file_bytes_received: AtomicU64::new(0),
+    file_bytes_relayed: AtomicU64::new(0),
+    file_recipients_dropped: AtomicU64::new(0),
 };
 
 /// Keeps `aura_connections_active` up to date for one connection's lifetime.
@@ -164,6 +196,51 @@ impl Metrics {
 
     pub fn text_replay_rejected(&self) {
         self.text_replays_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A file transfer passed validation and began relaying.
+    pub fn file_transfer_started(&self) {
+        self.file_transfers_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A file transfer was refused before relaying.
+    pub fn file_transfer_rejected(&self, reason: &str) {
+        self.file_transfers_rejected.inc(reason);
+    }
+
+    /// A started file transfer ended: `completed`, or why it was aborted.
+    pub fn file_transfer_finished(&self, outcome: &str) {
+        self.file_transfers_finished.inc(outcome);
+    }
+
+    /// Ciphertext bytes read from senders.
+    pub fn file_bytes_received(&self, bytes: u64) {
+        self.file_bytes_received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Ciphertext bytes written to recipients (one count per recipient).
+    pub fn file_bytes_relayed(&self, bytes: u64) {
+        self.file_bytes_relayed.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// A recipient's copy was dropped because it fell behind.
+    pub fn file_recipient_dropped(&self) {
+        self.file_recipients_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Started file transfers so far (for tests).
+    pub fn file_transfers_started_total(&self) -> u64 {
+        self.file_transfers_started.load(Ordering::Relaxed)
+    }
+
+    /// File transfers refused for `reason` so far (for tests).
+    pub fn file_transfers_rejected_with(&self, reason: &str) -> u64 {
+        self.file_transfers_rejected.get(reason)
+    }
+
+    /// File transfers that ended with `outcome` so far (for tests).
+    pub fn file_transfers_finished_with(&self, outcome: &str) -> u64 {
+        self.file_transfers_finished.get(outcome)
     }
 
     /// Logins with `outcome` so far (for tests).
@@ -291,6 +368,82 @@ pub fn render(state: &ServerState) -> String {
 
     header(
         &mut out,
+        "aura_file_transfers_started_total",
+        "counter",
+        "File transfers that passed validation and began relaying.",
+    );
+    let _ = writeln!(
+        out,
+        "aura_file_transfers_started_total {}",
+        m.file_transfers_started.load(Ordering::Relaxed)
+    );
+    header(
+        &mut out,
+        "aura_file_transfers_rejected_total",
+        "counter",
+        "File transfers refused before relaying, by reason.",
+    );
+    m.file_transfers_rejected
+        .render(&mut out, "aura_file_transfers_rejected_total", "reason", "");
+    header(
+        &mut out,
+        "aura_file_transfers_finished_total",
+        "counter",
+        "Started file transfers, by how they ended (completed or aborted).",
+    );
+    m.file_transfers_finished.render(
+        &mut out,
+        "aura_file_transfers_finished_total",
+        "outcome",
+        "",
+    );
+    header(
+        &mut out,
+        "aura_file_bytes_received_total",
+        "counter",
+        "Bytes of encrypted file chunks received from senders.",
+    );
+    let _ = writeln!(
+        out,
+        "aura_file_bytes_received_total {}",
+        m.file_bytes_received.load(Ordering::Relaxed)
+    );
+    header(
+        &mut out,
+        "aura_file_bytes_relayed_total",
+        "counter",
+        "Bytes of encrypted file chunks written to recipients.",
+    );
+    let _ = writeln!(
+        out,
+        "aura_file_bytes_relayed_total {}",
+        m.file_bytes_relayed.load(Ordering::Relaxed)
+    );
+    header(
+        &mut out,
+        "aura_file_recipients_dropped_total",
+        "counter",
+        "Recipient copies of a file dropped for falling behind.",
+    );
+    let _ = writeln!(
+        out,
+        "aura_file_recipients_dropped_total {}",
+        m.file_recipients_dropped.load(Ordering::Relaxed)
+    );
+    header(
+        &mut out,
+        "aura_file_transfers_active",
+        "gauge",
+        "File transfers being relayed now.",
+    );
+    let _ = writeln!(
+        out,
+        "aura_file_transfers_active {}",
+        state.file_relay.active_transfers()
+    );
+
+    header(
+        &mut out,
         "aura_sessions_active",
         "gauge",
         "Logged-in sessions.",
@@ -379,6 +532,13 @@ mod tests {
             "aura_audio_datagrams_total",
             "aura_audio_bytes_total",
             "aura_text_replays_rejected_total",
+            "aura_file_transfers_started_total",
+            "aura_file_transfers_rejected_total",
+            "aura_file_transfers_finished_total",
+            "aura_file_bytes_received_total",
+            "aura_file_bytes_relayed_total",
+            "aura_file_recipients_dropped_total",
+            "aura_file_transfers_active",
             "aura_sessions_active",
             "aura_channels",
             "aura_seen_message_ids",
