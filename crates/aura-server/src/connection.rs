@@ -158,6 +158,14 @@ impl QuicServer {
         })
     }
 
+    /// The UDP address the QUIC endpoint is bound to (useful when the
+    /// configured port was 0).
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.endpoint
+            .local_addr()
+            .map_err(|e| anyhow!("Failed to get local address: {}", e))
+    }
+
     /// Configure ACME (Let's Encrypt) for automated certificate management.
     fn configure_acme(
         domain: &str,
