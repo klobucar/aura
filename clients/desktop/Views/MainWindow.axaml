@@ -70,13 +70,20 @@
                             <!-- Rounded-square avatar (desktop idiom), brand gradient -->
                             <Border Grid.Column="0" Width="34" Height="34" Margin="0,0,10,0"
                                     CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                    ClipToBounds="True"
                                     Background="{DynamicResource AuraBrandGradientBrush}">
-                                <TextBlock Text="{Binding DisplayName[0], FallbackValue='?'}"
-                                           FontSize="{StaticResource AuraFont14}"
-                                           FontWeight="Bold"
-                                           Foreground="White"
-                                           HorizontalAlignment="Center"
-                                           VerticalAlignment="Center"/>
+                                <Panel>
+                                    <TextBlock Text="{Binding DisplayName[0], FallbackValue='?'}"
+                                               IsVisible="{Binding ShowMyInitial}"
+                                               FontSize="{StaticResource AuraFont14}"
+                                               FontWeight="Bold"
+                                               Foreground="White"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"/>
+                                    <Image Source="{Binding MyAvatarImage}"
+                                           IsVisible="{Binding HasMyAvatar}"
+                                           Stretch="UniformToFill"/>
+                                </Panel>
                             </Border>
 
                             <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
@@ -345,13 +352,20 @@
                                                                 <!-- 20px rounded square, 4px radius -->
                                                                 <Border Grid.Column="0" Width="20" Height="20" Margin="0,0,8,0"
                                                                         CornerRadius="{StaticResource AuraRadiusAvatarSmall}"
+                                                                        ClipToBounds="True"
                                                                         Background="{Binding IsSpeaking, Converter={x:Static converters:AvatarBrushConverter.Instance}}">
-                                                                    <TextBlock Text="{Binding Initial}"
-                                                                               FontSize="{StaticResource AuraMono9}"
-                                                                               FontWeight="Bold"
-                                                                               Foreground="White"
-                                                                               HorizontalAlignment="Center"
-                                                                               VerticalAlignment="Center"/>
+                                                                    <Panel>
+                                                                        <TextBlock Text="{Binding Initial}"
+                                                                                   IsVisible="{Binding ShowInitial}"
+                                                                                   FontSize="{StaticResource AuraMono9}"
+                                                                                   FontWeight="Bold"
+                                                                                   Foreground="White"
+                                                                                   HorizontalAlignment="Center"
+                                                                                   VerticalAlignment="Center"/>
+                                                                        <Image Source="{Binding Avatar}"
+                                                                               IsVisible="{Binding HasAvatar}"
+                                                                               Stretch="UniformToFill"/>
+                                                                    </Panel>
                                                                 </Border>
 
                                                                 <TextBlock Grid.Column="1"
@@ -1736,10 +1750,17 @@
                     <Grid ColumnDefinitions="Auto,*,Auto">
                         <Border Grid.Column="0" Width="46" Height="46" Margin="0,0,12,0"
                                 CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                ClipToBounds="True"
                                 Background="{DynamicResource AuraBrandGradientBrush}">
-                            <TextBlock Text="{Binding ProfileCard.Initial}"
-                                       FontSize="{StaticResource AuraFont18}" FontWeight="Bold" Foreground="White"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Panel>
+                                <TextBlock Text="{Binding ProfileCard.Initial}"
+                                           IsVisible="{Binding ProfileCard.ShowInitial}"
+                                           FontSize="{StaticResource AuraFont18}" FontWeight="Bold" Foreground="White"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Image Source="{Binding ProfileCard.Avatar}"
+                                       IsVisible="{Binding ProfileCard.HasAvatar}"
+                                       Stretch="UniformToFill"/>
+                            </Panel>
                         </Border>
                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4">
                             <TextBlock Text="{Binding ProfileCard.Name}"
@@ -1775,6 +1796,17 @@
 
                     <!-- Your own comment, editable -->
                     <StackPanel Spacing="{StaticResource AuraSpace5}" IsVisible="{Binding ProfileCard.IsSelf}">
+                        <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
+                            <Button Content="Change avatar…"
+                                    Command="{Binding ProfileCard.PickAvatarCommand}"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="10,5"
+                                    FontSize="{StaticResource AuraFont12}"/>
+                            <Button Content="Remove avatar"
+                                    Command="{Binding ProfileCard.ClearAvatarCommand}"
+                                    IsVisible="{Binding ProfileCard.CanRemoveAvatar}"
+                                    CornerRadius="{StaticResource AuraRadiusControl}" Padding="10,5"
+                                    FontSize="{StaticResource AuraFont12}"/>
+                        </StackPanel>
                         <TextBlock Classes="monoLabel" Text="YOUR COMMENT · MARKDOWN"/>
                         <TextBox Classes="aura" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
                                  Text="{Binding ProfileCard.BioDraft}"

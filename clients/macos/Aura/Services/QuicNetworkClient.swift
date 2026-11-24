@@ -178,6 +178,11 @@ public class QuicNetworkClient {
     private var accountDeletion: CheckedContinuation<Void, Error>?
     private var accountDeletionToken: UUID?
 
+    /// The pending `updateProfile` call, resumed by the server's 0x42 reply
+    /// or a timeout.
+    private var profileUpdate: CheckedContinuation<Void, Error>?
+    private var profileUpdateToken: UUID?
+
     /// Rolling round-trip latency to the server, in milliseconds.
     /// `nil` until the first datagram pong has been received (or after a
     /// reset). Driven by the datagram ping loop below.
@@ -939,10 +944,14 @@ public class QuicNetworkClient {
         }
     }
 
-    /// Update user profile
-    public func updateProfile(bio: String, avatarData: Data) async {
+    /// Update user profile. Returns once the server has accepted it, and
+    /// throws the server's reason (or a timeout) otherwise.
+    public func updateProfile(bio: String, avatarData: Data) async throws {
         // The server only accepts a profile whose id is our account id.
-        guard self.sessionId != nil, let userUuid else { return }
+        guard self.sessionId != nil, let userUuid else { throw QuicClientError.notConnected }
+        guard profileUpdate == nil else {
+            throw QuicClientError.profileUpdateFailed("A profile update is already in progress")
+        }
 
         let record = UserProfileRecord(
             userId: userUuid,
@@ -960,19 +969,39 @@ public class QuicNetworkClient {
         
         // Send MSG_UPDATE_PROFILE (0x42)
         let mutStream: NWConnection? = await MainActor.run { self.controlStream }
-        guard let stream = mutStream else { return }
-        
+        guard let stream = mutStream else { throw QuicClientError.notConnected }
+
         var msg = Data([Self.MSG_UPDATE_PROFILE])
         let len = UInt32(payload.count).littleEndian
         msg.append(Data(withUnsafeBytes(of: len) { Array($0) }))
         msg.append(Data(payload))
-        
-        do {
-            try await send(data: msg, on: stream)
-            print("[QuicClient] Profile update sent")
-        } catch {
-            print("[QuicClient] Failed to send profile update: \(error)")
+
+        let token = UUID()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            profileUpdate = continuation
+            profileUpdateToken = token
+            Task {
+                do {
+                    try await self.send(data: msg, on: stream)
+                    print("[QuicClient] Profile update sent")
+                } catch {
+                    print("[QuicClient] Failed to send profile update: \(error)")
+                    self.finishProfileUpdate(.failure(error))
+                }
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(15))
+                guard self.profileUpdateToken == token else { return }
+                self.finishProfileUpdate(.failure(QuicClientError.profileUpdateFailed("The server didn't respond")))
+            }
         }
+    }
+
+    private func finishProfileUpdate(_ result: Result<Void, Error>) {
+        guard let continuation = profileUpdate else { return }
+        profileUpdate = nil
+        profileUpdateToken = nil
+        continuation.resume(with: result)
     }
     
     /// Create a new channel (Admin only)
@@ -1565,15 +1594,25 @@ public class QuicNetworkClient {
         do {
             let payload = try await receiveHardenedPayload(maxLen: Self.MAX_CONTROL_PACKET_SIZE, on: stream)
             let response = try decodeMetadataUpdateResponse(data: payload)
-            if !response.success {
-                print("[QuicClient] Update profile failed: \(response.errorMessage)")
-                await MainActor.run {
+            await MainActor.run {
+                if response.success {
+                    self.finishProfileUpdate(.success(()))
+                } else if self.profileUpdate != nil {
+                    // The profile editor shows the reason itself.
+                    self.finishProfileUpdate(.failure(QuicClientError.profileUpdateFailed(response.errorMessage)))
+                } else {
                     self.systemEvents.append(
                         SystemEvent(content: "Failed to update profile: \(response.errorMessage)"))
                 }
             }
+            if !response.success {
+                print("[QuicClient] Update profile failed: \(response.errorMessage)")
+            }
         } catch {
             print("[QuicClient] Failed to parse UpdateProfile MetadataUpdateResponse: \(error)")
+            await MainActor.run {
+                self.finishProfileUpdate(.failure(QuicClientError.profileUpdateFailed("Unreadable reply from the server")))
+            }
         }
     }
 
@@ -2784,6 +2823,8 @@ public enum QuicClientError: Error, LocalizedError {
     /// No answer to a delete-account request before the connection closed
     /// or the wait ran out.
     case accountDeletionUnconfirmed
+    /// The server refused a profile update, or didn't answer; the reason.
+    case profileUpdateFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -2799,6 +2840,8 @@ public enum QuicClientError: Error, LocalizedError {
             return message
         case .accountDeletionUnconfirmed:
             return "The server didn't confirm the deletion. Your account may still exist."
+        case .profileUpdateFailed(let message):
+            return message
         }
     }
 }

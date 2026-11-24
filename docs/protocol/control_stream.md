@@ -220,6 +220,19 @@ Sent to **ALL connected users** when a user leaves any channel or disconnects.
 ```
 Sent to new joiners with the full list of users and their MLS KeyPackages.
 
+### 0x42 - UpdateProfile
+```
+[0x42]
+[length: u32 LE] [UpdateProfile protobuf]
+```
+Replies with a `MetadataUpdateResponse` on `0x42`. `profile.user_id` must be the sender's own user id (otherwise `Cannot update other profiles`). Only `bio` and `avatar_data` are taken from the request:
+
+- `display_name` is ignored, not rejected. The server stores and broadcasts the account's own name (the one validated at login), so a profile update cannot rename anyone.
+- `avatar_data` must be empty (no avatar), a PNG (`89 50 4E 47 0D 0A 1A 0A`) or a JPEG (`FF D8 FF`), and at most 128 KiB. Otherwise the reply is `Avatar is larger than 128 KB` or `Avatar must be a PNG or JPEG image`.
+- `bio` is at most 16 KiB (16384 bytes of UTF-8). Otherwise the reply is `Bio is longer than 16 KB`.
+
+On success every session receives `ProfileUpdated` (`0x46`) with the stored profile. `signature` and `signing_key` are stored as sent and are not verified by the server.
+
 ### 0x21 - MlsSignal
 ```
 [0x21]
