@@ -152,7 +152,7 @@ Used as QUIC application error codes, and as the status `code` for uploads.
 
 | Item | Purpose |
 |---|---|
-| `FileHasherWrapper` (`update`, `finalize`) | Sender's pre-pass: SHA-256 of the file |
+| `FileHasherWrapper` (`update`, `finish`) | Sender's pre-pass: SHA-256 of the file |
 | `FileEncryptorWrapper(file_name, mime_type, size, sha256)` | Generates key and `file_id`. `manifest()`, `stream_header(channel_id)`, `next_plaintext_len()`, `encrypt_next_framed(plaintext)` (returns the length-prefixed chunk ready to write), `finish()` |
 | `FileDecryptorWrapper(manifest)` | `check_header(header_bytes)`, `decrypt_next(ciphertext)` (ciphertext without prefix, in order), `chunks_done()`, `finish()` |
 | `encrypt_text_with_attachment(dave_key, epoch, channel_id, sender_session_id, message, manifest)` | Encrypts the announcing text message (sets `type = FILE`) |

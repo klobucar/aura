@@ -541,7 +541,10 @@ impl FileHasherWrapper {
     }
 
     /// The 32-byte digest. Later calls return an empty vector.
-    pub fn finalize(&self) -> Vec<u8> {
+    ///
+    /// Named `finish`, not `finalize`: the C# bindings would turn `finalize`
+    /// into `Finalize()`, which clashes with the generated finalizer.
+    pub fn finish(&self) -> Vec<u8> {
         match self.inner.lock().unwrap().take() {
             Some(h) => h.finalize().to_vec(),
             None => Vec::new(),
