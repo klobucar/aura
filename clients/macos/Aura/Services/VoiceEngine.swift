@@ -161,6 +161,13 @@ nonisolated protocol VoiceOutput: AnyObject {
     func stop()
     func setVolume(_ volume: Float)
     func enqueue(pcm: [Int16])
+    func setOutputDevice(_ deviceID: UInt32?)
+    func restart()
+}
+
+nonisolated extension VoiceOutput {
+    func setOutputDevice(_ deviceID: UInt32?) {}
+    func restart() {}
 }
 
 /// Local-only mixer choices for one remote session, resolved from its user id
@@ -213,6 +220,8 @@ nonisolated enum VoiceCommand: Sendable {
     case setSenderGain(sessionId: UInt32, gain: Float)
     case setSenderMuted(sessionId: UInt32, muted: Bool)
     case applySettings(AudioSettingsChange)
+    case setOutputDevice(UInt32?)
+    case restartOutput
     case clearLocalSpeech(generation: UInt64)
     /// Runs `reached` once everything posted before it has been handled.
     case barrier(@Sendable () -> Void)
@@ -285,6 +294,8 @@ actor VoiceEngine {
     private var tracker = VoiceActivityTracker()
     private var throttle: MeterThrottle
     private var ticker: Task<Void, Never>?
+    private var playbackTask: Task<Void, Never>?
+    private var outputRestartTask: Task<Void, Never>?
     private var lastEventAt = ContinuousClock.now
 
     /// How long the publishing loop outlives the last event. Keeps it running
@@ -361,6 +372,10 @@ actor VoiceEngine {
             lastEventAt = .now
             ensureTicking()
         }
+        outputRestartTask?.cancel()
+        outputRestartTask = nil
+        playbackTask?.cancel()
+        playbackTask = nil
         ticker?.cancel()
         ticker = nil
         output.stop()
@@ -424,18 +439,54 @@ actor VoiceEngine {
         guard let receiver else { return }
         do {
             try receiver.onPacket(data: packet)
-            // The Rust core mixes what is ready, with PLC/DRED and talk
-            // detection inside.
-            if let result = receiver.popMixed() {
-                tracker.mixed(
-                    speakers: result.activeSpeakers,
-                    levelDb: VoiceLevelMeter.levelDb(result.pcm),
-                    at: .now
-                )
-                output.enqueue(pcm: result.pcm)
-            }
         } catch {
             print("[QuicClient] Audio processing error: \(error)")
+        }
+    }
+
+    /// Drives `receiver.popMixed()` on a steady 20ms real-time clock so PLC/DRED
+    /// runs continuously even when incoming packets are lost or delayed.
+    /// Catches up on missed ticks (capped at 5 frames) using elapsed time.
+    private func startPlaybackClock() {
+        playbackTask?.cancel()
+        playbackTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            let frameInterval = Duration.milliseconds(20)
+            var nextTick = clock.now
+            while !Task.isCancelled {
+                guard let self else { break }
+                let now = clock.now
+                var ticksDue = 0
+                while nextTick <= now && ticksDue < 5 {
+                    await self.tickPlayback()
+                    nextTick = nextTick.advanced(by: frameInterval)
+                    ticksDue += 1
+                }
+                if nextTick <= now {
+                    nextTick = now.advanced(by: frameInterval)
+                }
+                do {
+                    try await clock.sleep(until: nextTick, tolerance: .milliseconds(2))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func tickPlayback() {
+        guard let receiver else { return }
+        // The Rust core mixes what is ready, with PLC/DRED and talk
+        // detection inside.
+        if let result = receiver.popMixed() {
+            tracker.mixed(
+                speakers: result.activeSpeakers,
+                levelDb: VoiceLevelMeter.levelDb(result.pcm),
+                at: .now
+            )
+            lastEventAt = .now
+            ensureTicking()
+            output.enqueue(pcm: result.pcm)
         }
     }
 
@@ -449,6 +500,7 @@ actor VoiceEngine {
             closeSending(because: "a new session's sender has no channel key yet")
             output.setVolume(masterVolume)
             output.start()
+            startPlaybackClock()
 
         case .setAuthenticated(let authenticated):
             isAuthenticated = authenticated
@@ -493,12 +545,29 @@ actor VoiceEngine {
         case .applySettings(let change):
             applySettings(change)
 
+        case .setOutputDevice(let deviceID):
+            output.setOutputDevice(deviceID)
+
+        case .restartOutput:
+            // Trailing debounce so rapid AVAudioEngineConfigurationChange bursts coalesce
+            // instead of dropping a follow-up change.
+            outputRestartTask?.cancel()
+            outputRestartTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled, let self else { return }
+                await self.performOutputRestart()
+            }
+
         case .clearLocalSpeech(let generation):
             tracker.clearLocalSpeech(generation: generation)
 
         case .barrier(let reached):
             reached()
         }
+    }
+
+    private func performOutputRestart() {
+        output.restart()
     }
 
     private func closeSending(because reason: String) {

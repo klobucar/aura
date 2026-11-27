@@ -2,21 +2,151 @@ import Foundation
 import Combine
 import CoreAudio
 import AVFoundation
+import os
 
 class AudioDeviceManager: ObservableObject {
+    static let shared = AudioDeviceManager()
+
+    private static let outputUIDKey = "AuraSelectedOutputDeviceUID"
+    private static let inputUIDKey = "AuraSelectedInputDeviceUID"
+
     @Published var availableOutputDevices: [AudioDevice] = []
     @Published var availableInputDevices: [AudioDevice] = []
+    /// `nil` represents System Default (no explicit CoreAudio device binding).
     @Published var selectedOutputDeviceID: AudioDeviceID?
+    /// `nil` represents System Default (no explicit CoreAudio device binding).
     @Published var selectedInputDeviceID: AudioDeviceID?
-    
+
+    private var lastSystemDefaultOutputID: AudioDeviceID?
+    private var lastSystemDefaultInputID: AudioDeviceID?
+
+    nonisolated private struct BlockBox: @unchecked Sendable {
+        let block: AudioObjectPropertyListenerBlock
+    }
+
+    nonisolated private struct ListenerBlocks: Sendable {
+        var devices: BlockBox?
+        var defaultOutput: BlockBox?
+        var defaultInput: BlockBox?
+    }
+    private nonisolated let listenerBlocks = OSAllocatedUnfairLock(initialState: ListenerBlocks())
+
     struct AudioDevice: Identifiable, Hashable {
         let id: AudioDeviceID
         let name: String
         let uid: String
     }
-    
+
     init() {
         loadDevices()
+        installCoreAudioListeners()
+    }
+
+    deinit {
+        removeCoreAudioListeners()
+    }
+
+    private func installCoreAudioListeners() {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        let queue = DispatchQueue.main
+
+        var devicesAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let devicesBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleHardwareChange()
+        }
+        if AudioObjectAddPropertyListenerBlock(systemObject, &devicesAddr, queue, devicesBlock) == noErr {
+            let box = BlockBox(block: devicesBlock)
+            listenerBlocks.withLock { $0.devices = box }
+        }
+
+        var defaultOutAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let defaultOutBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleHardwareChange()
+        }
+        if AudioObjectAddPropertyListenerBlock(systemObject, &defaultOutAddr, queue, defaultOutBlock) == noErr {
+            let box = BlockBox(block: defaultOutBlock)
+            listenerBlocks.withLock { $0.defaultOutput = box }
+        }
+
+        var defaultInAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let defaultInBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleHardwareChange()
+        }
+        if AudioObjectAddPropertyListenerBlock(systemObject, &defaultInAddr, queue, defaultInBlock) == noErr {
+            let box = BlockBox(block: defaultInBlock)
+            listenerBlocks.withLock { $0.defaultInput = box }
+        }
+    }
+
+    nonisolated private func removeCoreAudioListeners() {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        let queue = DispatchQueue.main
+        let blocks = listenerBlocks.withLock { state -> (BlockBox?, BlockBox?, BlockBox?) in
+            let result = (state.devices, state.defaultOutput, state.defaultInput)
+            state.devices = nil
+            state.defaultOutput = nil
+            state.defaultInput = nil
+            return result
+        }
+
+        if let box = blocks.0 {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
+        }
+        if let box = blocks.1 {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
+        }
+        if let box = blocks.2 {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
+        }
+    }
+
+    private func handleHardwareChange() {
+        let prevOutput = selectedOutputDeviceID
+        let prevInput = selectedInputDeviceID
+        let prevSysOut = lastSystemDefaultOutputID
+        let prevSysIn = lastSystemDefaultInputID
+        loadDevices()
+
+        let outputChanged = selectedOutputDeviceID != prevOutput
+            || (selectedOutputDeviceID == nil && lastSystemDefaultOutputID != prevSysOut)
+        if outputChanged {
+            print("[AudioDeviceManager] Hot-swap output device -> \(selectedOutputDeviceID.map(String.init) ?? "System Default")")
+            NotificationCenter.default.post(name: .audioOutputDeviceChanged, object: selectedOutputDeviceID)
+        }
+
+        let inputChanged = selectedInputDeviceID != prevInput
+            || (selectedInputDeviceID == nil && lastSystemDefaultInputID != prevSysIn)
+        if inputChanged {
+            print("[AudioDeviceManager] Hot-swap input device -> \(selectedInputDeviceID.map(String.init) ?? "System Default")")
+            NotificationCenter.default.post(name: .audioInputDeviceChanged, object: selectedInputDeviceID)
+        }
     }
     
     func loadDevices() {
@@ -73,35 +203,34 @@ class AudioDeviceManager: ObservableObject {
             return AudioDevice(id: deviceID, name: name, uid: uid)
         }
         
-        // Get default output device
+        // Track current system default output/input IDs so we only notify on real default changes.
+        var sysOutID = AudioDeviceID()
+        var sysSize = UInt32(MemoryLayout<AudioDeviceID>.size)
         propertyAddress.mSelector = kAudioHardwarePropertyDefaultOutputDevice
-        var defaultOutputID = AudioDeviceID()
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        
-        if AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &size,
-            &defaultOutputID
-        ) == noErr {
-            selectedOutputDeviceID = defaultOutputID
-        }
-        
-        // Get default input device
+        lastSystemDefaultOutputID = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &sysSize, &sysOutID
+        ) == noErr ? sysOutID : nil
+
+        var sysInID = AudioDeviceID()
         propertyAddress.mSelector = kAudioHardwarePropertyDefaultInputDevice
-        var defaultInputID = AudioDeviceID()
-        
-        if AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            &size,
-            &defaultInputID
-        ) == noErr {
-            selectedInputDeviceID = defaultInputID
+        lastSystemDefaultInputID = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &sysSize, &sysInID
+        ) == noErr ? sysInID : nil
+
+        // Resolve output selection: nil means System Default; otherwise match persisted UID if present.
+        if let savedOutUID = UserDefaults.standard.string(forKey: Self.outputUIDKey),
+           let matched = availableOutputDevices.first(where: { $0.uid == savedOutUID }) {
+            selectedOutputDeviceID = matched.id
+        } else {
+            selectedOutputDeviceID = nil
+        }
+
+        // Resolve input selection: nil means System Default; otherwise match persisted UID if present.
+        if let savedInUID = UserDefaults.standard.string(forKey: Self.inputUIDKey),
+           let matched = availableInputDevices.first(where: { $0.uid == savedInUID }) {
+            selectedInputDeviceID = matched.id
+        } else {
+            selectedInputDeviceID = nil
         }
     }
     
@@ -195,49 +324,29 @@ class AudioDeviceManager: ObservableObject {
         return uid as String
     }
     
-    func setOutputDevice(_ deviceID: AudioDeviceID) {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        
-        var device = deviceID
-        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        
-        if AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            size,
-            &device
-        ) == noErr {
-            selectedOutputDeviceID = deviceID
-            print("[AudioDeviceManager] Set output device to \(deviceID)")
+    /// Selects the per-app output device without mutating system-wide defaults (`nil` = System Default).
+    func setOutputDevice(_ deviceID: AudioDeviceID?) {
+        selectedOutputDeviceID = deviceID
+        if let deviceID,
+           let uid = availableOutputDevices.first(where: { $0.id == deviceID })?.uid ?? getDeviceUID(deviceID) {
+            UserDefaults.standard.set(uid, forKey: Self.outputUIDKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.outputUIDKey)
         }
+        NotificationCenter.default.post(name: .audioOutputDeviceChanged, object: deviceID)
+        print("[AudioDeviceManager] Selected per-app output device: \(deviceID.map(String.init) ?? "System Default")")
     }
-    
-    func setInputDevice(_ deviceID: AudioDeviceID) {
-        var propertyAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        
-        var device = deviceID
-        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        
-        if AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &propertyAddress,
-            0,
-            nil,
-            size,
-            &device
-        ) == noErr {
-            selectedInputDeviceID = deviceID
-            print("[AudioDeviceManager] Set input device to \(deviceID)")
+
+    /// Selects the per-app input device without mutating system-wide defaults (`nil` = System Default).
+    func setInputDevice(_ deviceID: AudioDeviceID?) {
+        selectedInputDeviceID = deviceID
+        if let deviceID,
+           let uid = availableInputDevices.first(where: { $0.id == deviceID })?.uid ?? getDeviceUID(deviceID) {
+            UserDefaults.standard.set(uid, forKey: Self.inputUIDKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.inputUIDKey)
         }
+        NotificationCenter.default.post(name: .audioInputDeviceChanged, object: deviceID)
+        print("[AudioDeviceManager] Selected per-app input device: \(deviceID.map(String.init) ?? "System Default")")
     }
 }

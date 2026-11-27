@@ -30,6 +30,7 @@ struct ContentView: View {
 
     // Chat state
     @State private var messageText = ""
+    @State private var pendingAttachmentURL: URL?
     @State private var replyingTo: ChatMessage?
     /// Outgoing messages the server never acknowledged taking. Kept in the
     /// list, dimmed, with a retry — never silently dropped.
@@ -820,6 +821,7 @@ struct ContentView: View {
                                 ChatMessageRow(
                                     message: message,
                                     mode: layoutMode,
+                                    fileTransferState: message.attachment.flatMap { client.fileTransferStates[$0.fileIdHex] },
                                     onReply: { msg in
                                         replyingTo = msg
                                         isInputFocused = true
@@ -827,6 +829,12 @@ struct ContentView: View {
                                     onRetry: { retrySend($0, client: client) },
                                     onJumpToReply: { id in
                                         withAnimation { scrollProxy.scrollTo(id, anchor: .center) }
+                                    },
+                                    onOpenAttachment: { url in
+                                        NSWorkspace.shared.open(url)
+                                    },
+                                    onSaveAttachment: { sourceURL, suggestedName in
+                                        saveAttachment(from: sourceURL, suggestedName: suggestedName)
                                     }
                                 )
                                 .id(message.id)
@@ -897,6 +905,9 @@ struct ContentView: View {
                 focus: $isInputFocused,
                 placeholder: ChatFormatting.composerPlaceholder(channelName: currentChannel(for: client)?.name),
                 showsShortcutHint: isChatFirst,
+                pendingAttachment: pendingAttachmentURL,
+                onAttachFile: { pickAttachment(client: client) },
+                onClearAttachment: { pendingAttachmentURL = nil },
                 onSend: { sendMessage(client: client) },
                 onCancelReply: replyingTo == nil ? nil : { replyingTo = nil },
                 mentionCandidates: mentionCandidates(client: client)
@@ -990,6 +1001,7 @@ struct ContentView: View {
                 ? localAvatar
                 : client.profile(forSession: msg.senderSessionId).map(\.avatarData).flatMap { $0.isEmpty ? nil : $0 }
             chatMsg.deliveryFailed = failedMessageIds.contains(msg.id)
+            chatMsg.attachment = msg.attachment
 
             if let replyId = msg.replyToId,
                let originalMsg = client.receivedMessages.first(where: { $0.id == replyId }) {
@@ -1247,9 +1259,43 @@ struct ContentView: View {
         }
     }
 
+    private func pickAttachment(client: QuicNetworkClient) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a file or image to send (up to \(maxFilePlaintextSize() / (1024 * 1024)) MiB)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? UInt64,
+           size > maxFilePlaintextSize() {
+            client.systemEvents.append(
+                SystemEvent(content: "File \"\(url.lastPathComponent)\" exceeds the 25 MiB limit", channelId: "0")
+            )
+            return
+        }
+        pendingAttachmentURL = url
+    }
+
+    private func saveAttachment(from sourceURL: URL, suggestedName: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = suggestedName
+        guard panel.runModal() == .OK, let destURL = panel.url else { return }
+        do {
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                try FileManager.default.removeItem(at: destURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destURL)
+        } catch {
+            print("[ContentView] Failed to save attachment: \(error)")
+        }
+    }
+
     private func sendMessage(client: QuicNetworkClient) {
         let content = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return }
+        let attachmentURL = pendingAttachmentURL
+        guard !content.isEmpty || attachmentURL != nil else { return }
 
         // Without a channel there is nowhere to put the message: the optimistic
         // copy would be filed under a placeholder id that the chat filter never
@@ -1262,11 +1308,51 @@ struct ContentView: View {
 
         let replying = replyingTo
         messageText = "" // Clear immediately for UX
+        pendingAttachmentURL = nil
         replyingTo = nil // Clear reply state
         let sessionId = client.sessionId ?? 0
 
         // Use UUID message ID
         let messageId = "msg_\(UUID().uuidString)"
+
+        if let attachmentURL {
+            let sanitized = FileAttachmentInfo.sanitizeFileName(attachmentURL.lastPathComponent)
+            let mime = UTType(filenameExtension: attachmentURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            let size = (try? FileManager.default.attributesOfItem(atPath: attachmentURL.path)[.size] as? UInt64) ?? 0
+            let previewAttachment = FileAttachmentInfo(
+                fileId: Data(UUID().uuidString.utf8.prefix(16)),
+                fileName: sanitized,
+                mimeType: mime,
+                size: size
+            )
+            let msg = ReceivedTextMessage(
+                id: messageId,
+                senderSessionId: sessionId,
+                senderName: identity?.displayName ?? "You",
+                channelId: channelId,
+                content: content,
+                timestamp: Date(),
+                rawPacket: Data(),
+                replyToId: replying?.id,
+                attachment: previewAttachment
+            )
+            client.receivedMessages.append(msg)
+            failedMessageIds.remove(messageId)
+            Task {
+                do {
+                    try await client.sendFileAttachment(
+                        url: attachmentURL,
+                        caption: content,
+                        messageId: messageId,
+                        replyToId: replying?.id
+                    )
+                } catch {
+                    print("[ContentView] Failed to send attachment: \(error)")
+                    failedMessageIds.insert(messageId)
+                }
+            }
+            return
+        }
 
         // Optimistically add to client.receivedMessages
         let msg = ReceivedTextMessage(
@@ -1415,6 +1501,9 @@ struct ChatMessage: Identifiable, Equatable {
     var replyToId: String?
     var replyToSender: String?
     var replyToPreview: String?
+
+    // E2EE file/image attachment
+    var attachment: FileAttachmentInfo?
 }
 
 enum MessageType: Equatable, Codable {

@@ -100,6 +100,8 @@ pub fn build_auth_request(
         signature: signature.as_bytes().to_vec(),
         server_password,
         challenge: challenge.to_vec(),
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        protocol_version: Some(aura_protocol::PROTOCOL_VERSION),
     }
     .encode_to_vec();
 
@@ -217,6 +219,8 @@ mod tests {
             error_message: String::new(),
             user_uuid: "U_1".into(),
             is_admin: false,
+            server_version: None,
+            protocol_version: None,
         }
         .encode_to_vec();
         let r = decode_auth_response(payload).unwrap();

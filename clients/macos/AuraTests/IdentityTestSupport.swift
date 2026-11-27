@@ -67,7 +67,8 @@ final class InMemoryKeychain: SecretKeychain {
 
 /// The fields of a login frame, `[0x03][u32 LE length][AuthRequest]`, by
 /// protobuf field number (1 identity key, 2 display name, 3 signature,
-/// 4 server password, 5 challenge). Nil if the framing is wrong.
+/// 4 server password, 5 challenge, 6 client_version, 7 protocol_version).
+/// Nil if the framing is wrong.
 func authRequestFields(_ frame: Data) -> [Int: Data]? {
     let bytes = [UInt8](frame)
     guard bytes.count >= 5, bytes[0] == 0x03 else { return nil }
@@ -76,10 +77,30 @@ func authRequestFields(_ frame: Data) -> [Int: Data]? {
     return protobufLengthDelimitedFields(Array(bytes[5...]))
 }
 
-/// Length-delimited fields of a protobuf message, which is every field an
-/// AuthRequest has. Nil on anything else or on truncation.
+/// All field numbers present in a login frame's `AuthRequest` payload.
+func authRequestFieldNumbers(_ frame: Data) -> Set<Int>? {
+    let bytes = [UInt8](frame)
+    guard bytes.count >= 5, bytes[0] == 0x03 else { return nil }
+    let length = Int(bytes[1]) | Int(bytes[2]) << 8 | Int(bytes[3]) << 16 | Int(bytes[4]) << 24
+    guard length == bytes.count - 5 else { return nil }
+    var seen = Set<Int>()
+    guard protobufWalkFields(Array(bytes[5...]), onField: { fieldNumber, _ in
+        seen.insert(fieldNumber)
+    }) else { return nil }
+    return seen
+}
+
+/// Length-delimited fields of a protobuf message, skipping varint and fixed
+/// fields. Nil on unknown wire types or truncation.
 func protobufLengthDelimitedFields(_ bytes: [UInt8]) -> [Int: Data]? {
     var fields: [Int: Data] = [:]
+    guard protobufWalkFields(bytes, onField: { fieldNumber, data in
+        if let data { fields[fieldNumber] = data }
+    }) else { return nil }
+    return fields
+}
+
+private func protobufWalkFields(_ bytes: [UInt8], onField: (Int, Data?) -> Void) -> Bool {
     var index = 0
 
     func varint() -> Int? {
@@ -96,10 +117,28 @@ func protobufLengthDelimitedFields(_ bytes: [UInt8]) -> [Int: Data]? {
     }
 
     while index < bytes.count {
-        guard let tag = varint(), tag & 0x7 == 2, let length = varint(),
-              length >= 0, index + length <= bytes.count else { return nil }
-        fields[tag >> 3] = Data(bytes[index..<(index + length)])
-        index += length
+        guard let tag = varint() else { return false }
+        let fieldNumber = tag >> 3
+        let wireType = tag & 0x7
+        switch wireType {
+        case 0: // varint
+            guard varint() != nil else { return false }
+            onField(fieldNumber, nil)
+        case 1: // 64-bit fixed
+            guard index + 8 <= bytes.count else { return false }
+            index += 8
+            onField(fieldNumber, nil)
+        case 2: // length-delimited
+            guard let length = varint(), length >= 0, index + length <= bytes.count else { return false }
+            onField(fieldNumber, Data(bytes[index..<(index + length)]))
+            index += length
+        case 5: // 32-bit fixed
+            guard index + 4 <= bytes.count else { return false }
+            index += 4
+            onField(fieldNumber, nil)
+        default:
+            return false
+        }
     }
-    return fields
+    return true
 }

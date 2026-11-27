@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Quic;
@@ -64,6 +65,8 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     // Protocol message types
     private const byte MSG_KEEPALIVE = 0x00;
     private const byte MSG_AUTH_RESPONSE = 0x04;
+    private const byte MSG_PING = 0x05;
+    private const byte MSG_PONG = 0x06;
     // Audio over the control stream. 0x21 is the current format (packet header
     // authenticated by the AEAD); 0x20 is the older one, which peers report
     // and drop rather than play.
@@ -118,6 +121,14 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     private CancellationTokenSource? _keepaliveCts;
+    private CancellationTokenSource? _pingCts;
+    private CancellationTokenSource? _playbackCts;
+    private CancellationTokenSource? _fileAcceptCts;
+    private readonly ConcurrentDictionary<ulong, long> _pendingPings = new();
+    private long _pingNonceCounter;
+
+    /// <summary>RTT in milliseconds measured from control-stream Ping/Pong (0x05/0x06).</summary>
+    public event Action<int>? OnLatencyMeasured;
 
     /// <summary>Set once we tear down on purpose, so the loss handler stays quiet.</summary>
     private volatile bool _disposed;
@@ -288,10 +299,7 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                         }
                         throw new CertificateMismatchException(host, ServerCertificateFingerprint ?? "");
                     }
-#if DEBUG
-                    Console.WriteLine($"[AuraClient] DEBUG: TLS cert validation: errors={errors} (Accepting all)");
-                    return true;
-#else
+
                     if (errors == SslPolicyErrors.None)
                     {
                         return true;
@@ -316,7 +324,6 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                     // Not trusted - we throw an exception that the UI can catch
                     // Note: This callback is inside QuicConnection.ConnectAsync
                     throw new UntrustedCertificateException(host, fingerprint, cert);
-#endif
                 }
             }
         };
@@ -416,6 +423,118 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         // Start listening for server messages (presence, chat, etc.)
         StartListening();
         StartKeepalive();
+        StartPingLoop();
+        StartPlaybackClock();
+        StartFileDeliveryLoop();
+    }
+
+    private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan PlaybackInterval = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>
+    /// Probe RTT over the control stream using MSG_PING (0x05) / MSG_PONG (0x06).
+    /// System.Net.Quic in .NET 10 does not expose a QUIC datagram API, so
+    /// control-stream Ping/Pong is the protocol-sanctioned RTT mechanism.
+    /// </summary>
+    private void StartPingLoop()
+    {
+        _pingCts?.Cancel();
+        _pendingPings.Clear();
+        var cts = new CancellationTokenSource();
+        _pingCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token);
+                while (!cts.IsCancellationRequested)
+                {
+                    if (_pendingPings.Count > 16)
+                        _pendingPings.Clear();
+
+                    var nonce = (ulong)Interlocked.Increment(ref _pingNonceCounter);
+                    var nonceBytes = new byte[8];
+                    BinaryPrimitives.WriteUInt64LittleEndian(nonceBytes, nonce);
+                    _pendingPings[nonce] = Stopwatch.GetTimestamp();
+                    await WriteControlAsync(ControlFrames.Frame(MSG_PING, nonceBytes), cts.Token);
+
+                    await Task.Delay(PingInterval, cts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[AuraClient] Ping loop stopped: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// Drive AudioManager.PopMixed() on a steady 20ms real-time clock with
+    /// elapsed-time catch-up (capped at 5 frames = 100ms) so Windows 15.6ms
+    /// timer granularity doesn't fall behind real time.
+    /// </summary>
+    private void StartPlaybackClock()
+    {
+        _playbackCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _playbackCts = cts;
+        _ = Task.Run(async () =>
+        {
+            var frameTicks = (long)(Stopwatch.Frequency * 0.020);
+            const int maxCatchUpFrames = 5;
+            var nextTick = Stopwatch.GetTimestamp() + frameTicks;
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var now = Stopwatch.GetTimestamp();
+                    var remainingTicks = nextTick - now;
+                    if (remainingTicks > 0)
+                    {
+                        var delayMs = Math.Max(1, (int)(remainingTicks * 1000 / Stopwatch.Frequency));
+                        await Task.Delay(delayMs, cts.Token);
+                        now = Stopwatch.GetTimestamp();
+                    }
+
+                    int frames = 0;
+                    while (now >= nextTick && frames < maxCatchUpFrames)
+                    {
+                        nextTick += frameTicks;
+                        frames++;
+
+                        var manager = _audioManager;
+                        var engine = _audioEngine;
+                        if (manager == null || engine == null) continue;
+
+                        try
+                        {
+                            var mixedPcm = manager.PopMixed();
+                            if (mixedPcm != null)
+                            {
+                                engine.PlayAudio(mixedPcm);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[AuraClient] Playback tick error: {ex.Message}");
+                        }
+                    }
+
+                    // If we fell behind by more than maxCatchUpFrames (e.g. OS sleep),
+                    // snap forward rather than bursting stale frames.
+                    if (now - nextTick > frameTicks * maxCatchUpFrames)
+                    {
+                        nextTick = now + frameTicks;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }, cts.Token);
     }
 
     /// <summary>
@@ -795,7 +914,12 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         _disposed = true;
         FailPendingModeration();
         _keepaliveCts?.Cancel();
+        _pingCts?.Cancel();
+        _playbackCts?.Cancel();
+        _fileAcceptCts?.Cancel();
         _listenCts?.Cancel();
+        _pendingPings.Clear();
+        _pendingFileAnnouncements.Clear();
 
         try
         {
@@ -1015,6 +1139,9 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                     case 0x00: // Keepalive
                         Console.WriteLine("[AuraClient] Received Keepalive");
                         break;
+                    case MSG_PONG: // 0x06 - Ping reply
+                        await HandlePongAsync(ct);
+                        break;
                     case 0x11: // UserJoined
                         await HandleUserJoinedAsync(ct);
                         break;
@@ -1153,6 +1280,19 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         };
     }
 
+    private async Task HandlePongAsync(CancellationToken ct)
+    {
+        var payload = await ReadHardenedPayloadAsync(64, ct);
+        if (payload.Length != 8) return;
+
+        var nonce = BinaryPrimitives.ReadUInt64LittleEndian(payload);
+        if (_pendingPings.TryRemove(nonce, out var sentTs))
+        {
+            var rttMs = Math.Max(0, (int)Math.Round(Stopwatch.GetElapsedTime(sentTs).TotalMilliseconds));
+            OnLatencyMeasured?.Invoke(rttMs);
+        }
+    }
+
     private async Task HandleAudioPacketAsync(CancellationToken ct, bool legacy = false)
     {
         var packet = await ReadHardenedPayloadAsync(MaxAudioPacketSize, ct);
@@ -1164,21 +1304,11 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
             return;
         }
         
-        // 3. Decrypt and decode using AudioManager
+        // Decrypt and decode into the jitter buffer; the 20ms playback clock
+        // drains PopMixed() on a steady timer so PLC/DRED runs in real time.
         if (_audioManager != null)
         {
-            // Feed packet to Rust core for decryption + Opus decoding
             _audioManager.OnPacket(packet);
-            
-            // Pop mixed audio for playback
-            var mixedPcm = _audioManager.PopMixed();
-            if (mixedPcm != null)
-            {
-                // Convert shorts to bytes for RustAudioEngine
-                var pcmBytes = new byte[mixedPcm.Length * 2];
-                Buffer.BlockCopy(mixedPcm, 0, pcmBytes, 0, pcmBytes.Length);
-                _audioEngine?.PlayAudio(pcmBytes);
-            }
         }
         else
         {
@@ -1405,7 +1535,412 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         }
     }
 
+    public sealed record FileAttachmentInfo(string FileIdHex, string FileName, string MimeType, ulong Size);
+
     public event Action<string, uint, string, string, string?>? OnTextMessage; // msgId, senderId, channelId, content, replyToId
+    public event Action<string, uint, string, string, string?, FileAttachmentInfo>? OnFileAnnouncement;
+    public event Action<string, string, string, string?>? OnFileTransferUpdated; // channelId, fileIdHex, status, localPath
+
+    private sealed class PendingFileEntry
+    {
+        public string ChannelId { get; set; } = "";
+        public FileManifestRecord? Manifest { get; set; }
+        public TaskCompletionSource<bool> Ready { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenSource? _timeoutCts;
+        private readonly object _timeoutLock = new();
+
+        public CancellationToken ResetTimeout(CancellationToken parentToken)
+        {
+            lock (_timeoutLock)
+            {
+                _timeoutCts?.Cancel();
+                _timeoutCts?.Dispose();
+                _timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+                return _timeoutCts.Token;
+            }
+        }
+
+        public void CancelTimeout()
+        {
+            lock (_timeoutLock)
+            {
+                _timeoutCts?.Cancel();
+                _timeoutCts?.Dispose();
+                _timeoutCts = null;
+            }
+        }
+    }
+
+    private readonly ConcurrentDictionary<(string FileIdHex, uint SenderSessionId), PendingFileEntry> _pendingFileAnnouncements = new();
+    private static readonly TimeSpan PendingFileTimeout = TimeSpan.FromSeconds(60);
+
+    public async Task SendFileAsync(
+        string channelId,
+        string filePath,
+        string? caption,
+        string messageId,
+        string? replyToId = null,
+        Action<string>? onProgress = null,
+        CancellationToken ct = default)
+    {
+        if (_connection == null || _controlStream == null || _mlsWrapper == null)
+            throw new InvalidOperationException("Client not fully initialized");
+
+        var fileInfo = new FileInfo(filePath);
+        if (!fileInfo.Exists) throw new FileNotFoundException("File not found", filePath);
+
+        var maxPlaintext = AuraCoreMethods.MaxFilePlaintextSize();
+        if ((ulong)fileInfo.Length > maxPlaintext)
+            throw new InvalidOperationException($"File exceeds {maxPlaintext / (1024 * 1024)} MiB limit");
+
+        onProgress?.Invoke("Hashing…");
+        byte[] sha256;
+        using (var hasher = new FileHasherWrapper())
+        await using (var fs = File.OpenRead(filePath))
+        {
+            var buf = new byte[65536];
+            int read;
+            while ((read = await fs.ReadAsync(buf, ct)) > 0)
+            {
+                hasher.Update(read == buf.Length ? buf : buf[..read]);
+            }
+            sha256 = hasher.Finish();
+        }
+
+        var mimeType = GuessMimeType(fileInfo.Name);
+        using var encryptor = new FileEncryptorWrapper(fileInfo.Name, mimeType, (ulong)fileInfo.Length, sha256);
+        var manifest = encryptor.Manifest();
+        var streamHeader = encryptor.StreamHeader(channelId);
+
+        onProgress?.Invoke("Announcing…");
+        await WaitMlsGroupAsync(channelId, isVoice: false, 5000, ct);
+        var key = _mlsWrapper.ExportTextKey(channelId, _userId, null);
+        var epoch = _mlsWrapper.CurrentEpoch(channelId, isVoice: false);
+
+        byte mediaType = IsImageExtension(fileInfo.Name) ? (byte)1 : (byte)2; // 1 = IMAGE, 2 = FILE
+        var sha256Hex = Convert.ToHexString(sha256).ToLowerInvariant();
+        var textMsg = new uniffi.aura_core.TextMessageRecord(
+            _userUuid ?? "",
+            (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            caption ?? "",
+            replyToId ?? "",
+            messageId,
+            mediaType,
+            (ulong)fileInfo.Length,
+            sha256Hex
+        );
+
+        var nativePacket = AuraCoreMethods.EncryptTextWithAttachment(key, epoch, channelId, _userId, textMsg, manifest);
+        var packet = new EncryptedTextPacket
+        {
+            SenderSessionId = _userId,
+            ChannelId = channelId,
+            Epoch = epoch,
+            MessageId = messageId,
+            Ciphertext = ByteString.CopyFrom(nativePacket.Ciphertext),
+            Nonce = ByteString.CopyFrom(nativePacket.Nonce),
+            Tag = ByteString.CopyFrom(nativePacket.Tag),
+            ReplyToId = replyToId ?? ""
+        };
+        await SendProtoRequestAsync(MSG_TEXT_PACKET, packet, ct);
+
+        onProgress?.Invoke("Uploading…");
+        await using var stream = await _connection.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, ct);
+        await stream.WriteAsync(streamHeader, ct);
+
+        await using (var fs = File.OpenRead(filePath))
+        {
+            while (encryptor.NextPlaintextLen() is uint nextLen)
+            {
+                var chunk = new byte[nextLen];
+                var offset = 0;
+                while (offset < nextLen)
+                {
+                    var n = await fs.ReadAsync(chunk.AsMemory(offset, (int)nextLen - offset), ct);
+                    if (n == 0) throw new EndOfStreamException("File changed while uploading");
+                    offset += n;
+                }
+                var framed = encryptor.EncryptNextFramed(chunk);
+                await stream.WriteAsync(framed, ct);
+            }
+        }
+
+        encryptor.Finish();
+        stream.CompleteWrites();
+
+        var statusBuf = new byte[8];
+        await ControlFrames.ReadExactAsync(stream, statusBuf, ct);
+        var code = BinaryPrimitives.ReadUInt32LittleEndian(statusBuf.AsSpan(0, 4));
+        var recipients = BinaryPrimitives.ReadUInt32LittleEndian(statusBuf.AsSpan(4, 4));
+        if (code != 0)
+            throw new ProtocolException($"Upload failed (server code {code})");
+
+        onProgress?.Invoke(recipients == 1 ? "Sent (1 recipient)" : $"Sent ({recipients} recipients)");
+    }
+
+    private void StartFileDeliveryLoop()
+    {
+        _fileAcceptCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _fileAcceptCts = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!cts.IsCancellationRequested && _connection != null)
+                {
+                    var stream = await _connection.AcceptInboundStreamAsync(cts.Token);
+                    _ = Task.Run(() => HandleIncomingFileStreamAsync(stream, cts.Token), cts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[AuraClient] File delivery accept loop ended: {ex.Message}");
+            }
+        });
+    }
+
+    private async Task HandleIncomingFileStreamAsync(QuicStream stream, CancellationToken ct)
+    {
+        string fileIdHex = "";
+        string channelId = "";
+        uint senderSessionId = 0;
+        string? tempPath = null;
+
+        try
+        {
+            await using (stream)
+            {
+                var fixedLen = (int)AuraCoreMethods.FileStreamHeaderFixedLen();
+                var prefix = new byte[fixedLen];
+                await ControlFrames.ReadExactAsync(stream, prefix, ct);
+
+                var channelIdLen = (int)AuraCoreMethods.FileStreamHeaderChannelIdLen(prefix);
+                var headerBytes = new byte[fixedLen + channelIdLen];
+                Buffer.BlockCopy(prefix, 0, headerBytes, 0, fixedLen);
+                if (channelIdLen > 0)
+                {
+                    var channelIdBuf = new byte[channelIdLen];
+                    await ControlFrames.ReadExactAsync(stream, channelIdBuf, ct);
+                    Buffer.BlockCopy(channelIdBuf, 0, headerBytes, fixedLen, channelIdLen);
+                }
+
+                var header = AuraCoreMethods.DecodeFileStreamHeader(headerBytes);
+                fileIdHex = Convert.ToHexString(header.FileId).ToLowerInvariant();
+                channelId = header.ChannelId;
+                senderSessionId = header.SenderSessionId;
+
+                var entry = _pendingFileAnnouncements.GetOrAdd((fileIdHex, header.SenderSessionId), _ => new PendingFileEntry());
+                if (entry.Manifest == null)
+                {
+                    using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    waitCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    await entry.Ready.Task.WaitAsync(waitCts.Token);
+                }
+
+                var manifest = entry.Manifest;
+                if (manifest == null)
+                {
+                    stream.Abort(QuicAbortDirection.Read, 1);
+                    return;
+                }
+
+                channelId = entry.ChannelId;
+                entry.CancelTimeout();
+                using var decryptor = new FileDecryptorWrapper(manifest);
+                decryptor.CheckHeader(headerBytes);
+
+                var downloadDir = GetSecureDownloadsDir();
+                tempPath = Path.Combine(downloadDir, $"{fileIdHex}_{SanitizeFileName(manifest.FileName)}");
+
+                var streamOpts = new FileStreamOptions
+                {
+                    Mode = FileMode.Create,
+                    Access = FileAccess.Write,
+                    Share = FileShare.None,
+                };
+                if (!OperatingSystem.IsWindows())
+                {
+                    streamOpts.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                }
+
+                await using (var outFs = new FileStream(tempPath, streamOpts))
+                {
+                    var lenBuf = new byte[4];
+                    using var inactivityCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    for (uint i = 0; i < header.ChunkCount; i++)
+                    {
+                        inactivityCts.CancelAfter(PendingFileTimeout);
+                        await ControlFrames.ReadExactAsync(stream, lenBuf, inactivityCts.Token);
+                        var cipherLen = BinaryPrimitives.ReadUInt32LittleEndian(lenBuf);
+                        if (cipherLen > 65536 + 16)
+                            throw new ProtocolException("Invalid file chunk length");
+
+                        var cipherBuf = new byte[cipherLen];
+                        await ControlFrames.ReadExactAsync(stream, cipherBuf, inactivityCts.Token);
+                        var plain = decryptor.DecryptNext(cipherBuf);
+                        await outFs.WriteAsync(plain, ct);
+                    }
+                }
+
+                decryptor.Finish();
+                _pendingFileAnnouncements.TryRemove((fileIdHex, header.SenderSessionId), out _);
+                OnFileTransferUpdated?.Invoke(channelId, fileIdHex, "Ready", tempPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!string.IsNullOrEmpty(fileIdHex) &&
+                _pendingFileAnnouncements.TryRemove((fileIdHex, senderSessionId), out var failedEntry))
+            {
+                failedEntry.CancelTimeout();
+            }
+            if (!string.IsNullOrEmpty(tempPath) && File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
+            if (!string.IsNullOrEmpty(fileIdHex) && !string.IsNullOrEmpty(channelId))
+                OnFileTransferUpdated?.Invoke(channelId, fileIdHex, $"Failed: {ex.Message}", null);
+        }
+    }
+
+    private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
+    public static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return "attachment";
+        var sb = new StringBuilder(Math.Min(name.Length, 128));
+        foreach (var ch in name)
+        {
+            if (sb.Length >= 128) break;
+            if (ch is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' or '\0'
+                || char.IsControl(ch)
+                || ch is >= '\u202A' and <= '\u202E'
+                || ch is >= '\u2066' and <= '\u2069')
+                sb.Append('_');
+            else
+                sb.Append(ch);
+        }
+        var result = sb.ToString().Trim().TrimEnd('.', ' ');
+        if (string.IsNullOrEmpty(result) || result is "." or "..") return "attachment";
+
+        var stem = Path.GetFileNameWithoutExtension(result);
+        if (WindowsReservedNames.Contains(stem))
+            result = "_" + result;
+
+        return result;
+    }
+
+    private static bool IsImageExtension(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch
+    {
+        ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" => true,
+        _ => false,
+    };
+
+    private static string GetSecureDownloadsRootDir()
+    {
+        var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrEmpty(baseDir)) baseDir = Path.GetTempPath();
+        var root = Path.Combine(baseDir, "aura", "downloads");
+        if (!Directory.Exists(root))
+        {
+            if (!OperatingSystem.IsWindows())
+                Directory.CreateDirectory(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            else
+                Directory.CreateDirectory(root);
+        }
+        return root;
+    }
+
+    private static string GetSecureDownloadsDir()
+    {
+        var dir = Path.Combine(GetSecureDownloadsRootDir(), Environment.ProcessId.ToString());
+        if (!Directory.Exists(dir))
+        {
+            if (!OperatingSystem.IsWindows())
+                Directory.CreateDirectory(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            else
+                Directory.CreateDirectory(dir);
+        }
+        return dir;
+    }
+
+    /// <summary>Remove cached decrypted downloads for this process (and dead PIDs).</summary>
+    public static void CleanupDownloadsCache()
+    {
+        try
+        {
+            var root = GetSecureDownloadsRootDir();
+            if (!Directory.Exists(root)) return;
+            var myPid = Environment.ProcessId.ToString();
+            foreach (var sub in Directory.EnumerateDirectories(root))
+            {
+                var name = Path.GetFileName(sub);
+                if (name == myPid)
+                {
+                    try { Directory.Delete(sub, recursive: true); } catch { }
+                }
+                else if (int.TryParse(name, out var pid))
+                {
+                    var alive = false;
+                    try
+                    {
+                        using var proc = System.Diagnostics.Process.GetProcessById(pid);
+                        alive = !proc.HasExited;
+                    }
+                    catch { }
+                    if (!alive)
+                    {
+                        try { Directory.Delete(sub, recursive: true); } catch { }
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void SchedulePendingFileTimeout((string FileIdHex, uint SenderSessionId) key, PendingFileEntry entry, string channelId)
+    {
+        var token = entry.ResetTimeout(_fileAcceptCts?.Token ?? CancellationToken.None);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(PendingFileTimeout, token);
+                if (_pendingFileAnnouncements.TryRemove(key, out _))
+                {
+                    OnFileTransferUpdated?.Invoke(channelId, key.FileIdHex, "Failed: transfer timed out", null);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }, token);
+    }
+
+    private static string GuessMimeType(string fileName) => Path.GetExtension(fileName).ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        ".bmp" => "image/bmp",
+        ".pdf" => "application/pdf",
+        ".txt" => "text/plain",
+        ".json" => "application/json",
+        ".zip" => "application/zip",
+        _ => "application/octet-stream",
+    };
 
     private async Task HandleTextPacketAsync(CancellationToken ct)
     {
@@ -1447,16 +1982,38 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                     packet.ReplyToId
                 );
 
-                // 3. Decrypt using a transient wrapper with the sender-specific key
-                using var transientCrypto = new uniffi.aura_core.TextCryptoWrapper(senderKey);
-                var decryptedMessage = transientCrypto.Decrypt(nativePacket);
+                // 3. Decrypt (supporting both plain text and file attachment announcements)
+                var announcement = AuraCoreMethods.DecryptTextWithAttachment(senderKey, nativePacket);
+                var decryptedMessage = announcement.Message;
                 
                 // Only the reply reference inside the ciphertext counts. The
                 // packet's plaintext copy is server-controlled, so falling back
                 // to it would let a server forge reply quotes.
-                var replyTo = decryptedMessage.ReplyToId;
-                OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content,
-                    string.IsNullOrEmpty(replyTo) ? null : replyTo);
+                var replyTo = string.IsNullOrEmpty(decryptedMessage.ReplyToId) ? null : decryptedMessage.ReplyToId;
+
+                if (announcement.Manifest is { } manifest)
+                {
+                    var sanitized = manifest with { FileName = SanitizeFileName(manifest.FileName) };
+                    var fileIdHex = Convert.ToHexString(sanitized.FileId).ToLowerInvariant();
+                    var entryKey = (fileIdHex, packet.SenderSessionId);
+                    var entry = _pendingFileAnnouncements.GetOrAdd(entryKey, _ => new PendingFileEntry());
+                    entry.ChannelId = channelId;
+                    entry.Manifest = sanitized;
+                    SchedulePendingFileTimeout(entryKey, entry, channelId);
+                    entry.Ready.TrySetResult(true);
+
+                    OnFileAnnouncement?.Invoke(
+                        packet.MessageId,
+                        packet.SenderSessionId,
+                        channelId,
+                        decryptedMessage.Content,
+                        replyTo,
+                        new FileAttachmentInfo(fileIdHex, sanitized.FileName, sanitized.MimeType, sanitized.Size));
+                }
+                else
+                {
+                    OnTextMessage?.Invoke(packet.MessageId, packet.SenderSessionId, channelId, decryptedMessage.Content, replyTo);
+                }
             }
         }
         catch (Exception ex)

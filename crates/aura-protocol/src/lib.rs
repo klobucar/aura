@@ -9,6 +9,9 @@ pub mod aura {
 // Re-export v1alpha1 types to top-level for convenience/compat
 pub use aura::v1alpha1::*;
 
+/// Current wire protocol version advertised during auth negotiation.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 pub mod fast_header;
 pub use fast_header::*;
 

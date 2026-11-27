@@ -271,10 +271,9 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     partial void OnEpochLabelChanged(string value) => OnPropertyChanged(nameof(HasEpoch));
 
     /// <summary>
-    /// `… ms`: System.Net.Quic exposes neither QUIC datagrams nor RTT, and the
-    /// server's only echo is datagram-based, so this client cannot measure
-    /// latency yet. The pill stays in the handoff's unknown state rather than
-    /// inventing a number.
+    /// Control-stream RTT in ms (`18 ms`), measured via `MSG_PING` / `MSG_PONG`
+    /// (`System.Net.Quic` has no datagram API). Stays `"… ms"` until the first
+    /// pong arrives or while disconnected.
     /// </summary>
     [ObservableProperty] private string _latencyLabel = "… ms";
 
@@ -472,7 +471,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private void EnsureAudio()
     {
         NativeLibraryLoader.Initialize();
-        _audioEngine ??= new RustAudioEngine();
+        var createdEngine = _audioEngine == null;
+        _audioEngine ??= new RustAudioEngine(SelectedInputDeviceOrNull, SelectedOutputDeviceOrNull);
+        if (createdEngine && !string.IsNullOrEmpty(_audioEngine.FallbackNotice))
+        {
+            ShowBanner(_audioEngine.FallbackNotice, isError: false);
+        }
         _audioManager ??= new AudioManager();
         if (_audioEventsWired) return;
 

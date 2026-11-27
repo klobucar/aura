@@ -81,6 +81,9 @@ final class UserIdentityTests: XCTestCase {
         XCTAssertEqual(fields[3]?.count, IdentitySizes.signature)
         XCTAssertEqual(fields[4], Data("hunter2".utf8))
         XCTAssertEqual(fields[5], challenge)
+        let fieldNumbers = authRequestFieldNumbers(frame)
+        XCTAssertTrue(fieldNumbers?.contains(6) == true)
+        XCTAssertTrue(fieldNumbers?.contains(7) == true)
     }
 
     func testAuthRequestWithoutPasswordOmitsIt() throws {

@@ -838,6 +838,7 @@ mod tests {
             max_packets: 100,
             max_age_ms: 60_000,
             frame_duration_ms: 20,
+            ..Default::default()
         });
         receiver.add_sender(session_id, key, 0).unwrap();
         receiver

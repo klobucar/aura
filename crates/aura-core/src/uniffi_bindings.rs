@@ -34,6 +34,10 @@ pub enum AudioError {
     PacketParseError,
     #[error("Unknown sender: {0}")]
     UnknownSender(u32),
+    #[error("Audio device not found: {0}")]
+    DeviceNotFound(String),
+    #[error("Audio device error: {0}")]
+    DeviceError(String),
 }
 
 /// Convert internal error to UniFFI-compatible error
@@ -147,37 +151,64 @@ impl AudioSenderWrapper {
         }
     }
 
-    /// Enable or disable WebRTC AEC (Echo Cancellation)
-    /// Note: Only works if compiled with --features webrtc-audio
-    pub fn set_webrtc_aec_enabled(&self, enabled: bool) {
+    /// Enable or disable WebRTC AEC (Echo Cancellation).
+    /// Returns `true` if applied, `false` if `aura-core` was built without `--features webrtc-audio`.
+    pub fn set_webrtc_aec_enabled(&self, enabled: bool) -> bool {
         #[cfg(feature = "webrtc-audio")]
-        if let Ok(inner) = self.inner.read() {
-            inner.set_webrtc_aec_enabled(enabled);
+        {
+            if let Ok(inner) = self.inner.read() {
+                inner.set_webrtc_aec_enabled(enabled);
+                return true;
+            }
+            false
         }
         #[cfg(not(feature = "webrtc-audio"))]
-        let _ = enabled; // Suppress unused warning
+        {
+            if enabled {
+                tracing::warn!("WebRTC AEC requested, but aura-core was built without the `webrtc-audio` feature");
+            }
+            false
+        }
     }
 
-    /// Enable or disable WebRTC NS (Noise Suppression)
-    /// Note: Only works if compiled with --features webrtc-audio
-    pub fn set_webrtc_ns_enabled(&self, enabled: bool) {
+    /// Enable or disable WebRTC NS (Noise Suppression).
+    /// Returns `true` if applied, `false` if `aura-core` was built without `--features webrtc-audio`.
+    pub fn set_webrtc_ns_enabled(&self, enabled: bool) -> bool {
         #[cfg(feature = "webrtc-audio")]
-        if let Ok(inner) = self.inner.read() {
-            inner.set_webrtc_ns_enabled(enabled);
+        {
+            if let Ok(inner) = self.inner.read() {
+                inner.set_webrtc_ns_enabled(enabled);
+                return true;
+            }
+            false
         }
         #[cfg(not(feature = "webrtc-audio"))]
-        let _ = enabled; // Suppress unused warning
+        {
+            if enabled {
+                tracing::warn!("WebRTC NS requested, but aura-core was built without the `webrtc-audio` feature");
+            }
+            false
+        }
     }
 
-    /// Enable or disable WebRTC AGC (Auto Gain Control)
-    /// Note: Only works if compiled with --features webrtc-audio
-    pub fn set_webrtc_agc_enabled(&self, enabled: bool) {
+    /// Enable or disable WebRTC AGC (Auto Gain Control).
+    /// Returns `true` if applied, `false` if `aura-core` was built without `--features webrtc-audio`.
+    pub fn set_webrtc_agc_enabled(&self, enabled: bool) -> bool {
         #[cfg(feature = "webrtc-audio")]
-        if let Ok(inner) = self.inner.read() {
-            inner.set_webrtc_agc_enabled(enabled);
+        {
+            if let Ok(inner) = self.inner.read() {
+                inner.set_webrtc_agc_enabled(enabled);
+                return true;
+            }
+            false
         }
         #[cfg(not(feature = "webrtc-audio"))]
-        let _ = enabled; // Suppress unused warning
+        {
+            if enabled {
+                tracing::warn!("WebRTC AGC requested, but aura-core was built without the `webrtc-audio` feature");
+            }
+            false
+        }
     }
 
     /// Get current sequence number
@@ -349,6 +380,72 @@ impl Default for AudioReceiverWrapper {
 // Audio Hardware - UniFFI-compatible wrapper for cpal
 // =============================================================================
 
+/// Returns `true` if `aura-core` was compiled with WebRTC audio processing (`webrtc-audio` feature).
+#[uniffi::export]
+pub fn is_webrtc_audio_available() -> bool {
+    cfg!(feature = "webrtc-audio")
+}
+
+/// Metadata for an available audio input or output device.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AudioDeviceInfoRecord {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// List available audio input (microphone) devices.
+#[uniffi::export]
+pub fn list_input_audio_devices() -> Vec<AudioDeviceInfoRecord> {
+    #[cfg(feature = "native-audio")]
+    {
+        crate::audio_io::list_input_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| AudioDeviceInfoRecord {
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "native-audio"))]
+    {
+        Vec::new()
+    }
+}
+
+/// List available audio output (speaker) devices.
+#[uniffi::export]
+pub fn list_output_audio_devices() -> Vec<AudioDeviceInfoRecord> {
+    #[cfg(feature = "native-audio")]
+    {
+        crate::audio_io::list_output_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|d| AudioDeviceInfoRecord {
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "native-audio"))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "native-audio")]
+fn map_audio_io_error(e: crate::audio_io::AudioError) -> AudioError {
+    match e {
+        crate::audio_io::AudioError::NoDevice => {
+            AudioError::DeviceNotFound("No default audio device found".into())
+        }
+        crate::audio_io::AudioError::Device(msg) if msg.contains("not found") => {
+            AudioError::DeviceNotFound(msg)
+        }
+        other => AudioError::DeviceError(other.to_string()),
+    }
+}
+
 #[cfg(feature = "native-audio")]
 #[derive(uniffi::Object)]
 pub struct AudioHardware {
@@ -360,7 +457,20 @@ pub struct AudioHardware {
 impl AudioHardware {
     #[uniffi::constructor]
     pub fn new() -> Result<Self, AudioError> {
-        let device = AudioDevice::new().map_err(|_e| AudioError::OpusError)?;
+        let device = AudioDevice::new().map_err(map_audio_io_error)?;
+        Ok(Self {
+            device: Mutex::new(device),
+        })
+    }
+
+    #[uniffi::constructor]
+    pub fn new_with_devices(
+        input_device: Option<String>,
+        output_device: Option<String>,
+    ) -> Result<Self, AudioError> {
+        let device =
+            AudioDevice::new_with_devices(input_device.as_deref(), output_device.as_deref())
+                .map_err(map_audio_io_error)?;
         Ok(Self {
             device: Mutex::new(device),
         })

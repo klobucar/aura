@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
 use tracing::field::Empty;
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, trace, warn, Instrument as _};
 
 // Protocol message types
 //
@@ -130,9 +130,9 @@ impl QuicServer {
             // acme_bind_port and the second bind would fail.
             Self::configure_acme(&domain, tcp_ip, &state)?
         } else {
-            info!("No TLS cert or ACME domain configured. Generating self-signed fallback...");
+            info!("No TLS cert or ACME domain configured. Checking persisted self-signed cert...");
             Self::start_health_check_listener(&state, tcp_ip);
-            Self::generate_self_signed_config()?
+            Self::generate_or_load_self_signed_config(&state)?
         };
 
         info!("Creating QUIC endpoint on {}...", bind_addr);
@@ -301,8 +301,78 @@ impl QuicServer {
         Self::quic_server_config_from_cert(cert_chain, key)
     }
 
-    /// Generate self-signed TLS certificate for QUIC.
-    fn generate_self_signed_config() -> Result<ServerConfig> {
+    /// Directory where `aura-cert.pem` / `aura-key.pem` should be persisted, or
+    /// `None` for in-memory databases (`:memory:`).
+    fn self_signed_cert_dir(db_path: &Path) -> Option<&Path> {
+        if db_path == Path::new(":memory:") {
+            return None;
+        }
+        match db_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => Some(p),
+            _ => Some(Path::new(".")),
+        }
+    }
+
+    /// Load persisted self-signed TLS certificate from the data directory, or
+    /// generate and persist a new one so restarts preserve the TLS fingerprint.
+    fn generate_or_load_self_signed_config(state: &ServerState) -> Result<ServerConfig> {
+        let data_dir = Self::self_signed_cert_dir(&state.config.database.path);
+
+        if let Some(dir) = data_dir {
+            let cert_path = dir.join("aura-cert.pem");
+            let key_path = dir.join("aura-key.pem");
+            if cert_path.exists() && key_path.exists() {
+                info!(
+                    "Loading persisted self-signed TLS certificate from {:?}...",
+                    cert_path
+                );
+                return Self::configure_manual_tls(&cert_path, &key_path);
+            }
+
+            let cert =
+                rcgen::generate_simple_self_signed(vec!["localhost".into(), "aura.local".into()])?;
+            let cert_pem = cert.cert.pem();
+            let key_pem = cert.signing_key.serialize_pem();
+
+            std::fs::create_dir_all(dir)?;
+            let tmp_cert = dir.join(format!(".aura-cert.pem.tmp.{}", std::process::id()));
+            let tmp_key = dir.join(format!(".aura-key.pem.tmp.{}", std::process::id()));
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp_cert)?;
+                f.write_all(cert_pem.as_bytes())?;
+                f.sync_all()?;
+            }
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp_key)?;
+                f.write_all(key_pem.as_bytes())?;
+                f.sync_all()?;
+            }
+            #[cfg(not(unix))]
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp_key)?;
+                f.write_all(key_pem.as_bytes())?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp_key, &key_path)?;
+            std::fs::rename(&tmp_cert, &cert_path)?;
+
+            info!(
+                "Generated and persisted self-signed TLS certificate to {:?}",
+                cert_path
+            );
+            return Self::configure_manual_tls(&cert_path, &key_path);
+        }
+
         let cert =
             rcgen::generate_simple_self_signed(vec!["localhost".into(), "aura.local".into()])?;
         let cert_der = cert.cert.der().to_vec();
@@ -739,7 +809,10 @@ async fn authenticate_client_inner(
     recv.read_exact(&mut payload).await?;
     let request = aura_protocol::AuthRequest::decode(payload.as_slice())
         .map_err(|e| anyhow!("Malformed AuthRequest: {}", e))?;
-    info!("[Auth] Display name: {}", request.display_name);
+    info!(
+        "[Auth] Display name: {} (client_version={:?}, protocol_version={:?})",
+        request.display_name, request.client_version, request.protocol_version
+    );
 
     // The signature covers this challenge; a mismatch means a stale or
     // replayed request.
@@ -788,6 +861,8 @@ async fn authenticate_client_inner(
                 error_message: String::new(),
                 user_uuid: result.user_uuid.clone(),
                 is_admin: result.is_admin,
+                server_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                protocol_version: Some(aura_protocol::PROTOCOL_VERSION),
             };
             (response, Ok((session_id, result.user_uuid, rx)))
         }
@@ -795,6 +870,8 @@ async fn authenticate_client_inner(
             let response = aura_protocol::AuthResponse {
                 success: false,
                 error_message: refused.message.clone(),
+                server_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                protocol_version: Some(aura_protocol::PROTOCOL_VERSION),
                 ..Default::default()
             };
             (response, Err(anyhow::Error::new(refused)))
@@ -897,9 +974,10 @@ impl ConnectionContext {
                 self.recv.read_exact(&mut len_buf).await?;
                 let packet_len = u32::from_le_bytes(len_buf) as usize;
 
-                info!(
+                trace!(
                     "[{}] Received audio packet: {} bytes",
-                    self.remote, packet_len
+                    self.remote,
+                    packet_len
                 );
 
                 // Limit audio packet size too
@@ -927,9 +1005,10 @@ impl ConnectionContext {
                 } else {
                     self.state.route_audio_packet(packet).await;
                 }
-                info!(
+                trace!(
                     "[{}] Routed audio packet from session {}",
-                    self.remote, self.session_id
+                    self.remote,
+                    self.session_id
                 );
             }
             MSG_TEXT_PACKET => {
@@ -1950,6 +2029,7 @@ mod tests {
             signature: sig.as_bytes().to_vec(),
             server_password: password.map(str::to_owned),
             challenge: challenge.to_vec(),
+            ..Default::default()
         }
         .encode_to_vec();
         send.write_all(&[MSG_AUTH_REQUEST]).await?;
@@ -2197,6 +2277,7 @@ mod tests {
                 signature: sig.as_bytes().to_vec(),
                 server_password: None,
                 challenge: challenge.to_vec(),
+                ..Default::default()
             };
             let mut client = Self {
                 _endpoint: endpoint,
@@ -2835,5 +2916,40 @@ mod tests {
         assert!(resp.success, "{}", resp.error_message);
         assert!(state.channel_exists(&resp.channel_id));
         bob.close();
+    }
+
+    #[test]
+    fn test_self_signed_cert_persistence() {
+        let dir = std::env::temp_dir().join(format!("aura-cert-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = crate::config::Config::default();
+        config.database.path = dir.join("aura.db");
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let state = ServerState::new(db, config);
+
+        // First call generates and persists aura-cert.pem / aura-key.pem
+        QuicServer::generate_or_load_self_signed_config(&state).unwrap();
+        let cert_path = dir.join("aura-cert.pem");
+        let key_path = dir.join("aura-key.pem");
+        assert!(cert_path.exists());
+        assert!(key_path.exists());
+        let first_cert = std::fs::read(&cert_path).unwrap();
+
+        // Second call loads the persisted cert without overwriting
+        QuicServer::generate_or_load_self_signed_config(&state).unwrap();
+        let second_cert = std::fs::read(&cert_path).unwrap();
+        assert_eq!(first_cert, second_cert);
+
+        // Default relative path ("aura.db") falls back to "." rather than skipping persistence
+        assert_eq!(
+            QuicServer::self_signed_cert_dir(Path::new("aura.db")),
+            Some(Path::new("."))
+        );
+        assert_eq!(
+            QuicServer::self_signed_cert_dir(Path::new(":memory:")),
+            None
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using Aura.Desktop.Services;
 using Avalonia;
 using Avalonia.Input;
@@ -35,6 +36,12 @@ public partial class MainWindowViewModel
     [ObservableProperty] private int _themeIndex;
     [ObservableProperty] private int _appearanceIndex;
     [ObservableProperty] private int _transmissionIndex;
+
+    public const string SystemDefaultDeviceLabel = "System Default";
+    public ObservableCollection<string> InputDeviceOptions { get; } = new() { SystemDefaultDeviceLabel };
+    public ObservableCollection<string> OutputDeviceOptions { get; } = new() { SystemDefaultDeviceLabel };
+    [ObservableProperty] private int _inputDeviceIndex;
+    [ObservableProperty] private int _outputDeviceIndex;
 
     /// <summary>0..100 in the UI, 0..1 persisted (macOS AuraVADSensitivity).</summary>
     [ObservableProperty] private int _vadSensitivity = 50;
@@ -122,6 +129,87 @@ public partial class MainWindowViewModel
         SaveSettings();
     }
 
+    private string? SelectedInputDeviceOrNull =>
+        InputDeviceIndex > 0 && InputDeviceIndex < InputDeviceOptions.Count
+            ? InputDeviceOptions[InputDeviceIndex]
+            : null;
+
+    private string? SelectedOutputDeviceOrNull =>
+        OutputDeviceIndex > 0 && OutputDeviceIndex < OutputDeviceOptions.Count
+            ? OutputDeviceOptions[OutputDeviceIndex]
+            : null;
+
+    partial void OnInputDeviceIndexChanged(int value)
+    {
+        if (!_suppressSettingsSave)
+            _audioEngine?.SetDevices(SelectedInputDeviceOrNull, SelectedOutputDeviceOrNull);
+        SaveSettings();
+    }
+
+    partial void OnOutputDeviceIndexChanged(int value)
+    {
+        if (!_suppressSettingsSave)
+            _audioEngine?.SetDevices(SelectedInputDeviceOrNull, SelectedOutputDeviceOrNull);
+        SaveSettings();
+    }
+
+    [RelayCommand]
+    private void RefreshAudioDevices()
+    {
+        var prevIn = SelectedInputDeviceOrNull;
+        var prevOut = SelectedOutputDeviceOrNull;
+        var currentIn = prevIn ?? "";
+        var currentOut = prevOut ?? "";
+
+        var wasSuppressed = _suppressSettingsSave;
+        _suppressSettingsSave = true;
+        try
+        {
+            InputDeviceOptions.Clear();
+            InputDeviceOptions.Add(SystemDefaultDeviceLabel);
+            OutputDeviceOptions.Clear();
+            OutputDeviceOptions.Add(SystemDefaultDeviceLabel);
+
+            try
+            {
+                foreach (var dev in uniffi.aura_core.AuraCoreMethods.ListInputAudioDevices())
+                {
+                    if (!string.IsNullOrWhiteSpace(dev.Name) && !InputDeviceOptions.Contains(dev.Name))
+                        InputDeviceOptions.Add(dev.Name);
+                }
+                foreach (var dev in uniffi.aura_core.AuraCoreMethods.ListOutputAudioDevices())
+                {
+                    if (!string.IsNullOrWhiteSpace(dev.Name) && !OutputDeviceOptions.Contains(dev.Name))
+                        OutputDeviceOptions.Add(dev.Name);
+                }
+            }
+            catch
+            {
+                // Native library may not be loaded in unit tests.
+            }
+
+            if (!string.IsNullOrWhiteSpace(currentIn) && !InputDeviceOptions.Contains(currentIn))
+                InputDeviceOptions.Add(currentIn);
+            if (!string.IsNullOrWhiteSpace(currentOut) && !OutputDeviceOptions.Contains(currentOut))
+                OutputDeviceOptions.Add(currentOut);
+
+            InputDeviceIndex = string.IsNullOrWhiteSpace(currentIn) ? 0 : Math.Max(0, InputDeviceOptions.IndexOf(currentIn));
+            OutputDeviceIndex = string.IsNullOrWhiteSpace(currentOut) ? 0 : Math.Max(0, OutputDeviceOptions.IndexOf(currentOut));
+        }
+        finally
+        {
+            _suppressSettingsSave = wasSuppressed;
+        }
+
+        if (!wasSuppressed &&
+            (!string.Equals(SelectedInputDeviceOrNull, prevIn, StringComparison.Ordinal) ||
+             !string.Equals(SelectedOutputDeviceOrNull, prevOut, StringComparison.Ordinal)))
+        {
+            _audioEngine?.SetDevices(SelectedInputDeviceOrNull, SelectedOutputDeviceOrNull);
+            SaveSettings();
+        }
+    }
+
     partial void OnThemeIndexChanged(int value)
     {
         AuraThemeManager.Apply((AuraThemeType)Math.Clamp(value, 0, 2));
@@ -203,6 +291,13 @@ public partial class MainWindowViewModel
         DredDuration = s.DredDuration;
         JitterBufferMs = s.JitterBufferMs;
         MasterVolume = s.MasterVolume;
+        RefreshAudioDevices();
+        if (!string.IsNullOrWhiteSpace(s.AudioInputDevice) && !InputDeviceOptions.Contains(s.AudioInputDevice))
+            InputDeviceOptions.Add(s.AudioInputDevice);
+        InputDeviceIndex = string.IsNullOrWhiteSpace(s.AudioInputDevice) ? 0 : Math.Max(0, InputDeviceOptions.IndexOf(s.AudioInputDevice));
+        if (!string.IsNullOrWhiteSpace(s.AudioOutputDevice) && !OutputDeviceOptions.Contains(s.AudioOutputDevice))
+            OutputDeviceOptions.Add(s.AudioOutputDevice);
+        OutputDeviceIndex = string.IsNullOrWhiteSpace(s.AudioOutputDevice) ? 0 : Math.Max(0, OutputDeviceOptions.IndexOf(s.AudioOutputDevice));
         LayoutMode = s.LayoutMode;
         ThemeIndex = (int)AuraThemeManager.Parse(s.Theme);
         AuraThemeManager.Apply((AuraThemeType)ThemeIndex);
@@ -234,6 +329,10 @@ public partial class MainWindowViewModel
         s.DredDuration = DredDuration;
         s.JitterBufferMs = JitterBufferMs;
         s.MasterVolume = MasterVolume;
+        s.AudioInputDevice = InputDeviceIndex > 0 && InputDeviceIndex < InputDeviceOptions.Count
+            ? InputDeviceOptions[InputDeviceIndex] : "";
+        s.AudioOutputDevice = OutputDeviceIndex > 0 && OutputDeviceIndex < OutputDeviceOptions.Count
+            ? OutputDeviceOptions[OutputDeviceIndex] : "";
         s.LayoutMode = LayoutMode;
         s.Theme = AuraThemeManager.ToSettingValue((AuraThemeType)Math.Clamp(ThemeIndex, 0, 2));
         s.Appearance = AppearanceIndex switch { 1 => "light", 2 => "system", _ => "dark" };
@@ -264,6 +363,7 @@ public partial class MainWindowViewModel
         {
             _audioEngine.Volume = MasterVolume / 100f;
             _audioEngine.OutputMuted = IsDeafened;
+            _audioEngine.SetDevices(SelectedInputDeviceOrNull, SelectedOutputDeviceOrNull);
         }
         ApplyTransmission();
     }

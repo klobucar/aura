@@ -192,6 +192,8 @@ message AuthRequest {
                                     // (aura_identity::auth_transcript, Purpose::Auth)
     optional string server_password = 4;  // If server requires password
     bytes challenge = 5;            // The 32-byte challenge that was signed
+    optional string client_version = 6;   // Client application version (e.g. "0.2.0")
+    optional uint32 protocol_version = 7; // Client protocol version for negotiation
 }
 
 // Authentication response from server
@@ -204,6 +206,8 @@ message AuthResponse {
     string user_uuid = 6;           // The account's server-assigned id (U_...); the user id
                                     // clients put in their MLS credential
     bool is_admin = 7;
+    optional string server_version = 8;   // Server application version
+    optional uint32 protocol_version = 9; // Negotiated/supported server protocol version
 }
 
 // Challenge request - client asks server for a random challenge to sign
