@@ -762,6 +762,47 @@
                                                                        CodeFontFamily="{StaticResource AuraMonoFontFamily}"
                                                                        TextWrapping="Wrap"
                                                                        FontSize="{StaticResource AuraFont13}"/>
+
+                                                <!-- E2EE file / image attachment -->
+                                                <Border IsVisible="{Binding HasAttachment}"
+                                                        Background="{DynamicResource AuraWellBrush}"
+                                                        BorderBrush="{DynamicResource AuraDividerBrush}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="{StaticResource AuraRadiusControl}"
+                                                        Padding="10,8">
+                                                    <StackPanel Spacing="{StaticResource AuraSpace6}">
+                                                        <Image Source="{Binding AttachmentPreview}"
+                                                               MaxWidth="280" MaxHeight="220"
+                                                               Stretch="Uniform"
+                                                               IsVisible="{Binding HasAttachmentPreview}"/>
+                                                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                                            <StackPanel Grid.Column="0" Spacing="2">
+                                                                <TextBlock Text="{Binding AttachmentFileName}"
+                                                                           FontSize="{StaticResource AuraFont12}"
+                                                                           FontWeight="SemiBold"
+                                                                           Foreground="{Binding ., Converter={x:Static converters:ChatBubbleTextColorConverter.Instance}}"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                    <TextBlock Classes="mono"
+                                                                               Text="{Binding AttachmentSizeLabel}"
+                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                               Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                                                    <TextBlock Classes="mono"
+                                                                               Text="{Binding AttachmentStatus}"
+                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                               Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                                                </StackPanel>
+                                                            </StackPanel>
+                                                            <Button Grid.Column="1" Classes="icon"
+                                                                    Content="Save"
+                                                                    Padding="8,4"
+                                                                    FontSize="{StaticResource AuraFont11}"
+                                                                    Command="{Binding SaveAttachmentCommand}"
+                                                                    IsVisible="{Binding CanSaveAttachment}"
+                                                                    VerticalAlignment="Center"/>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
                                             </StackPanel>
                                         </Border>
 
@@ -837,11 +878,20 @@
                         BorderBrush="{DynamicResource AuraDividerBrush}"
                         BorderThickness="0,1,0,0"
                         Padding="16,10">
-                    <!-- No attach button: dropped media (§5) needs a transfer path
-                         the protocol doesn't have yet (text frames cap at 256 KB). -->
-                    <Grid ColumnDefinitions="*,Auto,Auto">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                        <Button Grid.Column="0" Classes="icon"
+                                Command="{Binding AttachFileCommand}"
+                                Width="36" Height="36"
+                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Padding="0"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                ToolTip.Tip="Send encrypted file (max 25 MiB)">
+                            <TextBlock Text="+" FontSize="{StaticResource AuraFont16}" FontWeight="SemiBold"/>
+                        </Button>
+
                         <TextBox x:Name="Composer"
-                                 Grid.Column="0" Classes="aura"
+                                 Grid.Column="1" Classes="aura"
                                  Text="{Binding MessageInput}"
                                  PlaceholderText="{Binding ComposerPlaceholder}"
                                  MaxLength="4000"
@@ -854,15 +904,14 @@
                         </TextBox>
 
                         <!-- Keycap hint, mono. Hidden in the narrow chat column. -->
-                        <TextBlock Grid.Column="1" Classes="mono"
+                        <TextBlock Grid.Column="2" Classes="mono"
                                    Text="Ctrl↵"
                                    FontSize="{StaticResource AuraMono9}"
                                    Foreground="{DynamicResource AuraTextFaintBrush}"
                                    VerticalAlignment="Center"
-                                   Margin="8,0"
                                    IsVisible="{Binding IsChatFirst}"/>
 
-                        <Button Grid.Column="2"
+                        <Button Grid.Column="3"
                                 Command="{Binding SendMessageCommand}"
                                 Width="36" Height="36"
                                 CornerRadius="{StaticResource AuraRadiusControl}"
@@ -1944,10 +1993,37 @@
                                            Foreground="{DynamicResource AuraTextDimBrush}"
                                            VerticalAlignment="Center" Margin="10,0,0,0"/>
                             </Grid>
-                            <TextBlock Text="Input and output use the system default devices."
-                                       FontSize="{StaticResource AuraFont11}"
-                                       Foreground="{DynamicResource AuraTextFaintBrush}"
-                                       TextWrapping="Wrap"/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Text="Input device"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextBrush}"
+                                           VerticalAlignment="Center"/>
+                                <ComboBox Grid.Column="1" MinWidth="170"
+                                          ItemsSource="{Binding InputDeviceOptions}"
+                                          SelectedIndex="{Binding InputDeviceIndex}"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Text="Output device"
+                                           FontSize="{StaticResource AuraFont12}"
+                                           Foreground="{DynamicResource AuraTextBrush}"
+                                           VerticalAlignment="Center"/>
+                                <ComboBox Grid.Column="1" MinWidth="170"
+                                          ItemsSource="{Binding OutputDeviceOptions}"
+                                          SelectedIndex="{Binding OutputDeviceIndex}"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0"
+                                           Text="System Default follows your OS audio routing."
+                                           FontSize="{StaticResource AuraFont11}"
+                                           Foreground="{DynamicResource AuraTextFaintBrush}"
+                                           TextWrapping="Wrap"
+                                           VerticalAlignment="Center"/>
+                                <Button Grid.Column="1" Classes="icon"
+                                        Content="Refresh"
+                                        Padding="8,4"
+                                        FontSize="{StaticResource AuraFont11}"
+                                        Command="{Binding RefreshAudioDevicesCommand}"/>
+                            </Grid>
                             <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
                             <TextBlock Classes="monoLabel" Text="NOTIFICATIONS"/>
                             <Grid ColumnDefinitions="*,Auto">

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using uniffi.aura_core;
 
 namespace Aura.Desktop.ViewModels;
 
@@ -59,6 +61,12 @@ public partial class MainWindowViewModel
     /// <summary>Set by the view; the VM has no clipboard of its own.</summary>
     public Func<string, Task>? ClipboardSetter { get; set; }
 
+    /// <summary>Set by the view to pick a local file to send.</summary>
+    public Func<Task<string?>>? FileAttachmentPicker { get; set; }
+
+    /// <summary>Set by the view to pick a destination stream when saving a received file.</summary>
+    public Func<string, Task<Stream?>>? FileSavePicker { get; set; }
+
     private ObservableCollection<ChatMessage>? _observedMessages;
 
     private void ShowMessagesFor(string? channelId)
@@ -91,7 +99,85 @@ public partial class MainWindowViewModel
         message.ReplyCommand = new RelayCommand(() => ReplyingTo = message);
         message.CopyCommand = new AsyncRelayCommand(() => CopyAsync(message));
         message.RetryCommand = new AsyncRelayCommand(() => SendAsync(message));
+        message.SaveAttachmentCommand = new AsyncRelayCommand(() => SaveAttachmentAsync(message));
         return message;
+    }
+
+    private async Task SaveAttachmentAsync(ChatMessage message)
+    {
+        if (FileSavePicker == null || string.IsNullOrEmpty(message.AttachmentLocalPath) || !File.Exists(message.AttachmentLocalPath))
+            return;
+
+        var suggestedName = string.IsNullOrWhiteSpace(message.AttachmentFileName) ? "attachment" : message.AttachmentFileName;
+        await using var dest = await FileSavePicker(suggestedName);
+        if (dest == null) return;
+
+        await using var src = File.OpenRead(message.AttachmentLocalPath);
+        await src.CopyToAsync(dest);
+    }
+
+    [RelayCommand]
+    private async Task AttachFileAsync()
+    {
+        var targetChannel = SelectedChannel;
+        if (_client == null || targetChannel == null)
+        {
+            ShowBanner("Join a channel before sending files.", isError: true);
+            return;
+        }
+        if (FileAttachmentPicker == null) return;
+
+        var path = await FileAttachmentPicker();
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        var info = new FileInfo(path);
+        var maxBytes = AuraCoreMethods.MaxFilePlaintextSize();
+        if ((ulong)info.Length > maxBytes)
+        {
+            ShowBanner($"File is too large (max {maxBytes / (1024 * 1024)} MiB).", isError: true);
+            return;
+        }
+
+        var caption = MessageInput.TrimEnd();
+        var replying = ReplyingTo;
+        MessageInput = "";
+        ReplyingTo = null;
+
+        var fileIdHex = Guid.NewGuid().ToString("N");
+        var message = Wire(new ChatMessage
+        {
+            ChannelId = targetChannel.Id,
+            UserId = _client.UserId,
+            UserName = "you",
+            Content = caption,
+            IsFromCurrentUser = true,
+            ReplyToId = replying?.Id,
+            ReplySender = replying == null ? "" : replying.IsFromCurrentUser ? "you" : replying.UserName,
+            ReplyPreview = replying == null ? "" : ChatMessage.PreviewOf(replying.Content),
+            AttachmentFileIdHex = fileIdHex,
+            AttachmentFileName = info.Name,
+            AttachmentSize = (ulong)info.Length,
+            AttachmentStatus = "Encrypting…",
+            AttachmentLocalPath = path,
+        });
+        TryLoadImagePreview(message, path, info.Name, null);
+        _history.Add(message);
+
+        try
+        {
+            await _client.SendFileAsync(
+                targetChannel.Id,
+                path,
+                caption,
+                message.Id,
+                message.ReplyToId,
+                status => Avalonia.Threading.Dispatcher.UIThread.Post(() => message.AttachmentStatus = status));
+        }
+        catch (Exception ex)
+        {
+            message.SendError = ex.Message;
+            message.AttachmentStatus = "Failed";
+        }
     }
 
     private async Task CopyAsync(ChatMessage message)
@@ -178,5 +264,78 @@ public partial class MainWindowViewModel
         });
 
         if (_history.Add(message)) NotifyForMessage(message);
+    }
+
+    private void HandleFileAnnouncement(
+        string msgId,
+        uint senderId,
+        string channelId,
+        string caption,
+        string? replyToId,
+        Services.AuraNetworkClient.FileAttachmentInfo attachment)
+    {
+        if (_client != null && senderId == _client.UserId) return;
+
+        var sender = Channels.SelectMany(c => c.Users).FirstOrDefault(u => !u.IsSelf && u.Id == senderId);
+        var quoted = _history.Find(channelId, replyToId);
+
+        var message = Wire(new ChatMessage
+        {
+            Id = string.IsNullOrEmpty(msgId) ? Guid.NewGuid().ToString() : msgId,
+            ChannelId = channelId,
+            UserId = senderId,
+            UserName = sender?.Name ?? $"User {senderId}",
+            Content = caption,
+            ReplyToId = replyToId,
+            ReplySender = quoted == null ? "" : quoted.IsFromCurrentUser ? "you" : quoted.UserName,
+            ReplyPreview = quoted == null ? "" : ChatMessage.PreviewOf(quoted.Content),
+            IsMention = IsMentionForMe(caption),
+            AttachmentFileIdHex = attachment.FileIdHex,
+            AttachmentFileName = attachment.FileName,
+            AttachmentMimeType = attachment.MimeType,
+            AttachmentSize = attachment.Size,
+            AttachmentStatus = "Receiving…",
+        });
+
+        if (_history.Add(message)) NotifyForMessage(message);
+    }
+
+    private void HandleFileTransferUpdated(string channelId, string fileIdHex, string status, string? localPath)
+    {
+        var list = _history.For(channelId);
+        var msg = list.FirstOrDefault(m => m.AttachmentFileIdHex == fileIdHex);
+        if (msg == null) return;
+
+        msg.AttachmentStatus = status;
+        if (!string.IsNullOrEmpty(localPath))
+        {
+            msg.AttachmentLocalPath = localPath;
+            TryLoadImagePreview(msg, localPath, msg.AttachmentFileName, msg.AttachmentMimeType);
+        }
+    }
+
+    private static void TryLoadImagePreview(ChatMessage msg, string localPath, string? fileName, string? mimeType)
+    {
+        const ulong maxPreviewBytes = 10 * 1024 * 1024;
+        if (msg.AttachmentSize > maxPreviewBytes) return;
+
+        var ext = Path.GetExtension(fileName ?? localPath).ToLowerInvariant();
+        var isImage = (mimeType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ?? false)
+            || ext is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".webp";
+        if (!isImage) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                using var fs = File.OpenRead(localPath);
+                var bitmap = Avalonia.Media.Imaging.Bitmap.DecodeToWidth(fs, 512);
+                Avalonia.Threading.Dispatcher.UIThread.Post(() => msg.AttachmentPreview = bitmap);
+            }
+            catch
+            {
+                // Non-decodable image; leave as a standard file card.
+            }
+        });
     }
 }

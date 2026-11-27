@@ -41,6 +41,14 @@ public class AppSettings
     public int JitterBufferMs { get; set; } = 40;
     public int MasterVolume { get; set; } = 100;     // 0–100 %
 
+    /// <summary>Preferred audio input device name (empty = system default).</summary>
+    [JsonPropertyName("AuraAudioInputDevice")]
+    public string AudioInputDevice { get; set; } = "";
+
+    /// <summary>Preferred audio output device name (empty = system default).</summary>
+    [JsonPropertyName("AuraAudioOutputDevice")]
+    public string AudioOutputDevice { get; set; } = "";
+
     /// <summary>Chat-first (default) or voice-focus. macOS key: AuraLayoutMode.</summary>
     [JsonPropertyName("AuraLayoutMode")]
     [JsonConverter(typeof(JsonStringEnumConverter))]

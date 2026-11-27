@@ -21,6 +21,8 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             StartTelemetry(desktop);
+            AuraNetworkClient.CleanupDownloadsCache();
+            desktop.Exit += (_, _) => AuraNetworkClient.CleanupDownloadsCache();
 
             // Clicking an aura:// link launches us with the link as the first
             // argument. Registration is per-user and Windows-only; a link

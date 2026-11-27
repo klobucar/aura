@@ -291,11 +291,16 @@ public partial class MainWindowViewModel
         client.OnUserLeft += (cid, sid) => Ui(() => HandleUserLeft(cid, sid));
         client.OnServerSnapshot += snapshot => Ui(() => HandleServerSnapshot(snapshot));
         client.OnTextMessage += (mid, sid, cid, content, reply) => Ui(() => HandleTextMessage(mid, sid, cid, content, reply));
+        client.OnFileAnnouncement += (mid, sid, cid, caption, reply, manifest) =>
+            Ui(() => HandleFileAnnouncement(mid, sid, cid, caption, reply, manifest));
+        client.OnFileTransferUpdated += (cid, fileIdHex, status, localPath) =>
+            Ui(() => HandleFileTransferUpdated(cid, fileIdHex, status, localPath));
         client.OnUserStatusUpdated += (sid, muted, deafened) => Ui(() => HandleUserStatusUpdate(sid, muted, deafened));
         client.OnChannelDeleted += removal => Ui(() => _ = HandleChannelDeletedAsync(removal));
         client.OnBanned += () => Ui(() => _ = HandleBannedAsync());
         client.OnProfileUpdated += profile => Ui(() => HandleProfileUpdated(profile));
         client.OnRequestResult += (action, ok, error) => Ui(() => HandleRequestResult(action, ok, error));
+        client.OnLatencyMeasured += rttMs => Ui(() => UpdateLatency(rttMs));
         client.OnConnectionLost += reason => Ui(() => _ = HandleConnectionLostAsync(reason));
 
         // Per-user playback gain is local-only state the network client owns
@@ -304,6 +309,17 @@ public partial class MainWindowViewModel
         client.OnLocalMixerPrefsChanged += () => Ui(SaveLocalMixerPrefs);
         VoiceRail.LocalVolumeProvider = sid => _client?.LocalVolumeForSession(sid) ?? 1f;
         VoiceRail.LocalVolumeSetter = (sid, gain) => _client?.SetLocalVolume(sid, gain);
+    }
+
+    private void UpdateLatency(int rttMs)
+    {
+        LatencyLabel = $"{rttMs} ms";
+        LatencyBrush = rttMs switch
+        {
+            < 80 => AuraBrushes.Named("AuraGoodBrush"),
+            < 180 => AuraBrushes.Named("AuraCautionBrush"),
+            _ => AuraBrushes.Named("AuraDangerBrush"),
+        };
     }
 
     private void SaveLocalMixerPrefs()
@@ -356,6 +372,8 @@ public partial class MainWindowViewModel
         _talkStore.Clear();
         VoiceRail.Rebuild(BuildParticipants(), _talkStore);
         EpochLabel = "";
+        LatencyLabel = "… ms";
+        LatencyBrush = AuraBrushes.Named("AuraTextDimBrush");
         ProfileCard.Close();
         ChannelEditor.Close();
         _moderation?.CloseCommand.Execute(null);

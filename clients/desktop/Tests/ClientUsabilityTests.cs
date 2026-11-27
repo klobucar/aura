@@ -318,3 +318,54 @@ public class AudioKeyGateTests
         Assert.Null(manager.ProcessCapture(LoudFrame()));
     }
 }
+
+public class P0BlockerTests
+{
+    [Fact]
+    public void AudioDeviceSettingsDefaultToEmptyAndRoundTrip()
+    {
+        var settings = new AppSettings
+        {
+            AudioInputDevice = "USB Mic",
+            AudioOutputDevice = "Studio Headphones",
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        Assert.Contains("AuraAudioInputDevice", json);
+        Assert.Contains("AuraAudioOutputDevice", json);
+
+        var loaded = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(json);
+        Assert.NotNull(loaded);
+        Assert.Equal("USB Mic", loaded!.AudioInputDevice);
+        Assert.Equal("Studio Headphones", loaded.AudioOutputDevice);
+    }
+
+    [Fact]
+    public void ChatMessageFormatsAttachmentStateAndSize()
+    {
+        var msg = new Aura.Desktop.ViewModels.ChatMessage
+        {
+            AttachmentFileIdHex = "abcd",
+            AttachmentFileName = "screenshot.png",
+            AttachmentSize = 1_572_864,
+            AttachmentStatus = "Ready",
+        };
+        Assert.True(msg.HasAttachment);
+        Assert.Equal("1.5 MB", msg.AttachmentSizeLabel);
+        Assert.False(msg.CanSaveAttachment);
+
+        msg.AttachmentLocalPath = "/tmp/screenshot.png";
+        Assert.True(msg.CanSaveAttachment);
+    }
+
+    [Fact]
+    public void SanitizeFileNameStripsTraversalAndBidiControls()
+    {
+        Assert.Equal(".._.._etc_passwd", AuraNetworkClient.SanitizeFileName("../../etc/passwd"));
+        Assert.Equal("evil_exe", AuraNetworkClient.SanitizeFileName("evil\u202Eexe"));
+        Assert.Equal("bad_name_.txt", AuraNetworkClient.SanitizeFileName("bad:name?.txt"));
+        Assert.Equal("_CON.txt", AuraNetworkClient.SanitizeFileName("CON.txt"));
+        Assert.Equal("_nul", AuraNetworkClient.SanitizeFileName("nul"));
+        Assert.Equal("attachment", AuraNetworkClient.SanitizeFileName(".."));
+        Assert.Equal("attachment", AuraNetworkClient.SanitizeFileName(""));
+    }
+}

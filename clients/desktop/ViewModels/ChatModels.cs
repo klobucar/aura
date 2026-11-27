@@ -62,6 +62,38 @@ public partial class ChatMessage : ObservableObject
     public CommunityToolkit.Mvvm.Input.IRelayCommand? ReplyCommand { get; set; }
     public CommunityToolkit.Mvvm.Input.IRelayCommand? CopyCommand { get; set; }
     public CommunityToolkit.Mvvm.Input.IRelayCommand? RetryCommand { get; set; }
+    public CommunityToolkit.Mvvm.Input.IRelayCommand? SaveAttachmentCommand { get; set; }
+
+    // ── E2EE File Attachment ─────────────────────────────────────────────────
+    public string? AttachmentFileIdHex { get; init; }
+    public string? AttachmentFileName { get; init; }
+    public string? AttachmentMimeType { get; init; }
+    public ulong AttachmentSize { get; init; }
+
+    public bool HasAttachment => !string.IsNullOrEmpty(AttachmentFileName);
+
+    public string AttachmentSizeLabel => FormatBytes(AttachmentSize);
+
+    [ObservableProperty]
+    private string _attachmentStatus = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanSaveAttachment))]
+    private string? _attachmentLocalPath;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAttachmentPreview))]
+    private Avalonia.Media.Imaging.Bitmap? _attachmentPreview;
+
+    public bool HasAttachmentPreview => AttachmentPreview != null;
+    public bool CanSaveAttachment => !string.IsNullOrEmpty(AttachmentLocalPath);
+
+    private static string FormatBytes(ulong bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
+        _ => $"{bytes / (1024.0 * 1024.0):0.##} MB",
+    };
 
     /// <summary>A message from someone else (avatar on the left).</summary>
     public bool IsIncoming => !System && !IsFromCurrentUser;

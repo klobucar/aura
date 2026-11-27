@@ -108,6 +108,8 @@ public partial class MainWindow : Window
         _vm.SaveBackupPicker = PickBackupDestinationAsync;
         _vm.OpenBackupPicker = PickBackupSourceAsync;
         _vm.AvatarPicker = PickAvatarSourceAsync;
+        _vm.FileAttachmentPicker = PickFileAttachmentAsync;
+        _vm.FileSavePicker = PickFileSaveDestinationAsync;
         ObserveMessages(_vm.Messages);
     }
 
@@ -210,6 +212,27 @@ public partial class MainWindow : Window
         using var buffer = new System.IO.MemoryStream();
         await stream.CopyToAsync(buffer);
         return buffer.ToArray();
+    }
+
+    private async System.Threading.Tasks.Task<string?> PickFileAttachmentAsync()
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Send encrypted file",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { FilePickerFileTypes.All },
+        });
+        return files.Count == 0 ? null : files[0].TryGetLocalPath();
+    }
+
+    private async System.Threading.Tasks.Task<System.IO.Stream?> PickFileSaveDestinationAsync(string suggestedName)
+    {
+        var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save file",
+            SuggestedFileName = suggestedName,
+        });
+        return file == null ? null : await file.OpenWriteAsync();
     }
 
     private async System.Threading.Tasks.Task<byte[]?> PickAvatarSourceAsync()
