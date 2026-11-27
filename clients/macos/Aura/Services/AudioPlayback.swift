@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import CoreAudio
+import AudioToolbox
 import os
 
 /// Audio playback engine using AVAudioEngine.
@@ -31,6 +33,8 @@ nonisolated final class AudioPlayback: VoiceOutput {
 
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
+    private var outputDeviceID: AudioDeviceID?
+    private var configChangeObserver: NSObjectProtocol?
     private let format: AVAudioFormat
 
     init() {
@@ -59,11 +63,42 @@ nonisolated final class AudioPlayback: VoiceOutput {
             engine.attach(player)
             engine.connect(player, to: engine.mainMixerNode, format: format)
 
+            // Route per-app output device without mutating system-wide defaults.
+            if let deviceID = outputDeviceID,
+               deviceID != 0,
+               let audioUnit = engine.outputNode.audioUnit {
+                var id = deviceID
+                let status = AudioUnitSetProperty(
+                    audioUnit,
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    &id,
+                    UInt32(MemoryLayout<AudioDeviceID>.size)
+                )
+                if status != noErr {
+                    print("[AudioPlayback] Warning: failed to bind output device \(deviceID) (status \(status))")
+                }
+            }
+
             // Apply the persisted master volume to the mixer output.
             engine.mainMixerNode.outputVolume = volume
 
             try engine.start()
             player.play()
+
+            // Install after start() so binding kAudioOutputUnitProperty_CurrentDevice
+            // during setup cannot self-trigger a configuration-change restart loop.
+            if let configChangeObserver {
+                NotificationCenter.default.removeObserver(configChangeObserver)
+            }
+            configChangeObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: nil
+            ) { _ in
+                NotificationCenter.default.post(name: .audioOutputNeedsRestart, object: nil)
+            }
 
             isPlaying = true
             print("[AudioPlayback] Started - 48kHz mono")
@@ -77,6 +112,10 @@ nonisolated final class AudioPlayback: VoiceOutput {
     func stop() {
         guard isPlaying else { return }
 
+        if let configChangeObserver {
+            NotificationCenter.default.removeObserver(configChangeObserver)
+            self.configChangeObserver = nil
+        }
         playerNode?.stop()
         audioEngine?.stop()
         audioEngine = nil
@@ -84,6 +123,22 @@ nonisolated final class AudioPlayback: VoiceOutput {
         isPlaying = false
 
         print("[AudioPlayback] Stopped - \(framesPlayed) frames played")
+    }
+
+    /// Route playback to a specific CoreAudio device without mutating system-wide defaults (`nil` = System Default).
+    func setOutputDevice(_ deviceID: UInt32?) {
+        let changed = outputDeviceID != deviceID
+        outputDeviceID = deviceID
+        if isPlaying && (changed || deviceID == nil) {
+            restart()
+        }
+    }
+
+    func restart() {
+        guard isPlaying else { return }
+        print("[AudioPlayback] Restarting playback for audio device/configuration change...")
+        stop()
+        start()
     }
 
     /// Set master output volume (0.0–1.0). Takes effect immediately if playing,

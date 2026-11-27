@@ -15,7 +15,7 @@ struct SettingsView: View {
     var onLeaveServer: (() -> Void)? = nil
     @StateObject private var appSettings = AppSettings.shared
     @StateObject private var hotkeyManager = HotkeyManager.shared
-    @StateObject private var deviceManager = AudioDeviceManager()
+    @ObservedObject private var deviceManager = AudioDeviceManager.shared
     
     // Audio Quality Settings
     @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
@@ -84,7 +84,7 @@ struct SettingsView: View {
                             subtitle: "Select your microphone",
                             selection: Binding(
                                 get: { deviceManager.selectedInputDeviceID },
-                                set: { if let deviceID = $0 { deviceManager.setInputDevice(deviceID) } }
+                                set: { deviceManager.setInputDevice($0) }
                             ),
                             devices: deviceManager.availableInputDevices
                         )
@@ -94,7 +94,7 @@ struct SettingsView: View {
                             subtitle: "Select your speakers/headphones",
                             selection: Binding(
                                 get: { deviceManager.selectedOutputDeviceID },
-                                set: { if let deviceID = $0 { deviceManager.setOutputDevice(deviceID) } }
+                                set: { deviceManager.setOutputDevice($0) }
                             ),
                             devices: deviceManager.availableOutputDevices
                         )

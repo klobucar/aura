@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 // MARK: - Message row
 
@@ -8,9 +9,12 @@ import SwiftUI
 struct ChatMessageRow: View {
     let message: ChatMessage
     let mode: AuraLayoutMode
+    var fileTransferState: FileTransferState? = nil
     var onReply: (ChatMessage) -> Void
     var onRetry: (ChatMessage) -> Void
     var onJumpToReply: (String) -> Void
+    var onOpenAttachment: ((URL) -> Void)? = nil
+    var onSaveAttachment: ((URL, String) -> Void)? = nil
 
     @State private var isHovering = false
 
@@ -111,13 +115,25 @@ struct ChatMessageRow: View {
                 replyContext(sender: message.replyToSender ?? "", preview: preview)
             }
 
-            AuraMarkdownText(
-                source: message.content,
-                size: AuraTheme.Typography.t13,
-                foreground: outgoing ? .white : AuraTheme.Colors.text,
-                underlineLinks: outgoing,
-                mentionName: outgoing ? nil : message.mentionName
-            )
+            if let attachment = message.attachment {
+                ChatAttachmentCard(
+                    attachment: attachment,
+                    state: fileTransferState ?? .pending,
+                    outgoing: outgoing,
+                    onOpen: onOpenAttachment,
+                    onSave: onSaveAttachment
+                )
+            }
+
+            if !message.content.isEmpty {
+                AuraMarkdownText(
+                    source: message.content,
+                    size: AuraTheme.Typography.t13,
+                    foreground: outgoing ? .white : AuraTheme.Colors.text,
+                    underlineLinks: outgoing,
+                    mentionName: outgoing ? nil : message.mentionName
+                )
+            }
         }
         .padding(.horizontal, isWide ? AuraTheme.Spacing.s16 : AuraTheme.Spacing.s14)
         .padding(.vertical, isWide ? AuraTheme.Spacing.s12 : 10)
@@ -220,16 +236,130 @@ struct ChatInfoRow: View {
     }
 }
 
+// MARK: - Attachment card
+
+struct ChatAttachmentCard: View {
+    let attachment: FileAttachmentInfo
+    let state: FileTransferState
+    let outgoing: Bool
+    var onOpen: ((URL) -> Void)?
+    var onSave: ((URL, String) -> Void)?
+
+    @State private var thumbnail: NSImage?
+
+    private var isImage: Bool {
+        attachment.mimeType.hasPrefix("image/")
+    }
+
+    private var readyURL: URL? {
+        if case .ready(let url) = state { return url }
+        return nil
+    }
+
+    private var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: Int64(attachment.size), countStyle: .file)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AuraTheme.Spacing.s5) {
+            if let url = readyURL, isImage, let thumbnail {
+                Button { onOpen?(url) } label: {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 260, maxHeight: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: AuraTheme.Radii.r10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .help("Open \(attachment.fileName)")
+            }
+
+            HStack(spacing: AuraTheme.Spacing.s8) {
+                Image(systemName: isImage ? "photo.fill" : "doc.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(outgoing ? Color.white.opacity(0.9) : AuraTheme.Colors.primary)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(attachment.fileName)
+                        .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12, weight: .semibold))
+                        .foregroundStyle(outgoing ? .white : AuraTheme.Colors.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(formattedSize)
+                        .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10))
+                        .foregroundStyle(outgoing ? Color.white.opacity(0.75) : AuraTheme.Colors.textDim)
+                }
+
+                Spacer(minLength: AuraTheme.Spacing.s8)
+
+                switch state {
+                case .pending:
+                    ProgressView()
+                        .controlSize(.small)
+                case .transferring(let progress):
+                    ProgressView(value: progress)
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                case .ready(let url):
+                    HStack(spacing: AuraTheme.Spacing.s5) {
+                        Button("Open") { onOpen?(url) }
+                            .buttonStyle(.plain)
+                            .font(AuraTheme.Typography.ui(AuraTheme.Typography.t11, weight: .semibold))
+                            .foregroundStyle(outgoing ? .white : AuraTheme.Colors.link)
+                        Button("Save") { onSave?(url, attachment.fileName) }
+                            .buttonStyle(.plain)
+                            .font(AuraTheme.Typography.ui(AuraTheme.Typography.t11, weight: .semibold))
+                            .foregroundStyle(outgoing ? Color.white.opacity(0.85) : AuraTheme.Colors.textDim)
+                    }
+                case .failed(let reason):
+                    Text(reason)
+                        .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10))
+                        .foregroundStyle(AuraTheme.Colors.danger)
+                        .lineLimit(1)
+                }
+            }
+            .padding(AuraTheme.Spacing.s8)
+            .background(
+                RoundedRectangle(cornerRadius: AuraTheme.Radii.r10, style: .continuous)
+                    .fill(outgoing ? Color.white.opacity(0.12) : Color.white.opacity(0.05))
+            )
+        }
+        .task(id: readyURL) {
+            guard isImage, let url = readyURL else {
+                thumbnail = nil
+                return
+            }
+            let decoded: NSImage? = await Task.detached(priority: .userInitiated) {
+                guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 520
+                ]
+                guard let cgImage = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else {
+                    return nil
+                }
+                return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            }.value
+            if !Task.isCancelled {
+                thumbnail = decoded
+            }
+        }
+    }
+}
+
 // MARK: - Composer
 
-/// Composer (handoff §2), without the attach button: dropped media needs
-/// protocol work, and a button that does nothing is worse than none.
+/// Composer (handoff §2), with encrypted file/image attachment picker.
 struct ChatComposer: View {
     @Binding var text: String
     var focus: FocusState<Bool>.Binding
     let placeholder: String
     /// `⌘↵` keycap hint — chat-first only.
     let showsShortcutHint: Bool
+    var pendingAttachment: URL? = nil
+    var onAttachFile: (() -> Void)? = nil
+    var onClearAttachment: (() -> Void)? = nil
     let onSend: () -> Void
     /// Set while replying; Escape cancels the reply.
     let onCancelReply: (() -> Void)?
@@ -243,7 +373,7 @@ struct ChatComposer: View {
     @State private var dismissedQuery: String?
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingAttachment != nil
     }
 
     private var mentionQuery: String? {
@@ -265,6 +395,30 @@ struct ChatComposer: View {
                     onPick: complete
                 )
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            if let pendingAttachment {
+                HStack(spacing: AuraTheme.Spacing.s5) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AuraTheme.Colors.primary)
+                    Text(pendingAttachment.lastPathComponent)
+                        .font(AuraTheme.Typography.ui(AuraTheme.Typography.t11, weight: .medium))
+                        .foregroundStyle(AuraTheme.Colors.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let onClearAttachment {
+                        Button(action: onClearAttachment) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(AuraTheme.Colors.textDim)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove attachment")
+                    }
+                }
+                .padding(.horizontal, AuraTheme.Spacing.s9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(AuraTheme.Colors.primary.opacity(0.14)))
             }
             field
         }
@@ -294,6 +448,20 @@ struct ChatComposer: View {
 
     private var field: some View {
         HStack(spacing: 10) {
+            if let onAttachFile {
+                Button(action: onAttachFile) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(pendingAttachment != nil ? AuraTheme.Colors.primary : AuraTheme.Colors.textDim)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Attach encrypted file or image")
+                .accessibilityLabel("Attach file")
+                .auraFluidHover()
+            }
+
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13))

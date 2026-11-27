@@ -305,6 +305,11 @@ final class VoiceEngineTests: XCTestCase {
             receiving.submitReceived(Data(datagram.dropFirst()))
         }
         await receiving.flush()
+        // Wait deterministically for the 20ms playback clock to pop at least one frame.
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+        while playback.frames == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
 
         XCTAssertTrue(playback.started)
         XCTAssertGreaterThan(playback.frames, 0)

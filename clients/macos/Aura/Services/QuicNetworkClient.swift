@@ -6,6 +6,7 @@ import Observation
 import UserNotifications
 import SwiftUI
 import CryptoKit
+import UniformTypeIdentifiers
 import os
 
 /// Native QUIC client for Aura server using Apple's Network framework.
@@ -70,6 +71,23 @@ public class QuicNetworkClient {
 
     /// Received chat messages (populated by incoming text packets)
     public var receivedMessages: [ReceivedTextMessage] = []
+
+    /// E2EE file transfer states keyed by lowercase hex `fileId`.
+    public var fileTransferStates: [String: FileTransferState] = [:]
+
+    private struct PendingManifest {
+        let manifest: FileManifestRecord
+        let senderSessionId: UInt32
+    }
+
+    private struct PendingDelivery {
+        let header: FileStreamHeaderRecord
+        let chunks: [Data]
+    }
+
+    private var pendingManifests: [String: PendingManifest] = [:]
+    private var pendingDeliveries: [String: PendingDelivery] = [:]
+    private var transferTimeoutTasks: [String: Task<Void, Never>] = [:]
     
     /// System events (user leave/join) for UI
     public var systemEvents: [SystemEvent] = []
@@ -300,6 +318,14 @@ public class QuicNetworkClient {
     private var isIntentionalDisconnect = false
     
     /// Saved connection parameters for retry
+    nonisolated private struct ObserverBox: @unchecked Sendable {
+        let token: NSObjectProtocol
+    }
+    nonisolated private struct ObserverTokens: Sendable {
+        var tokens: [ObserverBox] = []
+    }
+    private nonisolated let notificationObservers = OSAllocatedUnfairLock(initialState: ObserverTokens())
+
     private var savedHost: String?
     private var savedPort: UInt16?
     private var savedIdentity: UserIdentity?
@@ -310,7 +336,7 @@ public class QuicNetworkClient {
 
         // Listen for audio settings changes. Everything they touch belongs to
         // the audio domain, so they go straight there.
-        NotificationCenter.default.addObserver(
+        let settingsToken = NotificationCenter.default.addObserver(
             forName: .audioSettingsChanged,
             object: nil,
             queue: .main
@@ -318,6 +344,35 @@ public class QuicNetworkClient {
             if let change = AudioSettingsChange(notification.object) {
                 voice.post(.applySettings(change))
             }
+        }
+
+        if let initialOutputID = AudioDeviceManager.shared.selectedOutputDeviceID {
+            voice.post(.setOutputDevice(initialOutputID))
+        }
+
+        let outputDeviceToken = NotificationCenter.default.addObserver(
+            forName: .audioOutputDeviceChanged,
+            object: nil,
+            queue: .main
+        ) { [voice] notification in
+            voice.post(.setOutputDevice(notification.object as? UInt32))
+        }
+
+        let restartOutputToken = NotificationCenter.default.addObserver(
+            forName: .audioOutputNeedsRestart,
+            object: nil,
+            queue: .main
+        ) { [voice] _ in
+            voice.post(.restartOutput)
+        }
+
+        let boxes = [
+            ObserverBox(token: settingsToken),
+            ObserverBox(token: outputDeviceToken),
+            ObserverBox(token: restartOutputToken)
+        ]
+        notificationObservers.withLock {
+            $0.tokens = boxes
         }
 
         // Meter snapshots from the audio domain: at most ~30 a second, and
@@ -330,7 +385,14 @@ public class QuicNetworkClient {
     }
     
     deinit {
-        NotificationCenter.default.removeObserver(self)
+        let tokens = notificationObservers.withLock { box -> [ObserverBox] in
+            let current = box.tokens
+            box.tokens.removeAll()
+            return current
+        }
+        for item in tokens {
+            NotificationCenter.default.removeObserver(item.token)
+        }
         voice.shutdown()
     }
     
@@ -362,9 +424,12 @@ public class QuicNetworkClient {
     }
 
     private func performConnect(host: String, port: UInt16) async throws {
-        // Clear intentional disconnect flag for fresh connections
+        // Clear intentional disconnect flag and any stale control stream before connecting.
         isIntentionalDisconnect = false
         wasBanned = false
+        controlStream?.stateUpdateHandler = nil
+        controlStream?.cancel()
+        controlStream = nil
         
         // Save connection parameters for retry
         savedHost = host
@@ -389,14 +454,12 @@ public class QuicNetworkClient {
         let expectedFingerprint = expectedCertificateFingerprint?.lowercased()
         let pinCheck = CertificatePinCheck()
         self.pinCheck = pinCheck
-#if !DEBUG
         // The verify block runs on a background queue, so it gets the
         // fingerprint trusted for this host now rather than reading settings.
         let trustedFingerprint = AppSettings.shared.pinnedFingerprint(forHost: host)
-#endif
 
-        // Strict certificate verification in release, TOFU in dev. The block
-        // runs on the queue passed below, never on the main actor.
+        // Strict certificate verification / TOFU in all builds (including DEBUG).
+        // The block runs on the queue passed below, never on the main actor.
         sec_protocol_options_set_verify_block(quicOptions.securityProtocolOptions, { @Sendable [weak self] _, trust, completeHandler in
             guard let self = self else {
                 completeHandler(false)
@@ -416,10 +479,6 @@ public class QuicNetworkClient {
                 return
             }
 
-#if DEBUG
-            print("[QuicClient] DEBUG: TLS verify - accepting all certificates")
-            completeHandler(true)
-#else
             let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
             var error: CFError?
             let isValid = SecTrustEvaluateWithError(trustRef, &error)
@@ -450,7 +509,6 @@ public class QuicNetworkClient {
                 }
                 completeHandler(false)
             }
-#endif
         }, .global())
         
         sec_protocol_options_set_min_tls_protocol_version(quicOptions.securityProtocolOptions, .TLSv13)
@@ -579,6 +637,12 @@ public class QuicNetworkClient {
     
     /// Handle incoming stream from server
     private func handleIncomingStream(_ connection: NWConnection) {
+        if controlStream != nil {
+            print("[QuicClient] Incoming secondary stream — treating as file delivery stream")
+            receiveFileDeliveryStream(connection)
+            return
+        }
+
         print("[QuicClient] Handling incoming server stream...")
         
         // Start the connection
@@ -2040,15 +2104,25 @@ public class QuicNetworkClient {
                 return
             }
             
-            // Create crypto wrapper with sender's key
-            let crypto = try TextCryptoWrapper(key: senderKey)
-            
-            let decryptedMessage: TextMessageRecord
+            let announcement: DecryptedFileAnnouncement
             do {
-                decryptedMessage = try crypto.decrypt(packet: packet)
+                announcement = try decryptTextWithAttachment(daveKey: senderKey, packet: packet)
             } catch {
                 print("[QuicClient] Failed to decrypt text message: \(error)")
                 return
+            }
+            let decryptedMessage = announcement.message
+
+            var attachmentInfo: FileAttachmentInfo?
+            if let manifest = announcement.manifest {
+                let info = FileAttachmentInfo(manifest: manifest)
+                attachmentInfo = info
+                let hex = info.fileIdHex
+                pendingManifests[hex] = PendingManifest(manifest: manifest, senderSessionId: senderSessionId)
+                if fileTransferStates[hex] == nil {
+                    fileTransferStates[hex] = .pending
+                }
+                scheduleTransferTimeout(fileIdHex: hex)
             }
             
             // Find sender name from usersByChannel
@@ -2074,12 +2148,16 @@ public class QuicNetworkClient {
                 content: decryptedMessage.content,
                 timestamp: Date(timeIntervalSince1970: TimeInterval(decryptedMessage.timestamp) / 1000),
                 rawPacket: payload,
-                replyToId: replyToId
+                replyToId: replyToId,
+                attachment: attachmentInfo
             )
             
             await MainActor.run {
                 receivedMessages.append(message)
                 print("[QuicClient] Received encrypted text message from \(senderName): \(decryptedMessage.content.prefix(30))")
+                if let hex = attachmentInfo?.fileIdHex {
+                    processPendingDelivery(fileIdHex: hex)
+                }
             }
         } catch {
             print("[QuicClient] Failed to parse/decrypt TextPacket: \(error)")
@@ -2763,6 +2841,421 @@ public class QuicNetworkClient {
         try await send(data: msg, on: stream)
         print("[QuicClient] Sent encrypted text message (\(msg.count) bytes)")
     }
+
+    // MARK: - E2EE File Transfer
+
+    /// Encrypts `url` with a fresh XChaCha20-Poly1305 key, announces its
+    /// `FileManifest` inside an E2EE text message (`MSG_TEXT_PACKET`), and
+    /// streams the encrypted chunks over a dedicated QUIC bidirectional stream.
+    public func sendFileAttachment(
+        url: URL,
+        caption: String,
+        messageId: String,
+        replyToId: String? = nil
+    ) async throws {
+        guard let stream = controlStream, let group = quicGroup else {
+            throw QuicClientError.notConnected
+        }
+        guard let channelId = currentChannelId else {
+            throw QuicClientError.protocolError("Not in a channel")
+        }
+        guard let mls = mlsWrapper else {
+            throw QuicClientError.protocolError("MLS not initialized")
+        }
+
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+        }
+
+        let fileData = try Data(contentsOf: url, options: .mappedIfSafe)
+        let maxSize = maxFilePlaintextSize()
+        guard UInt64(fileData.count) <= maxSize else {
+            throw QuicClientError.protocolError("File exceeds the \(maxSize / (1024 * 1024)) MiB limit")
+        }
+
+        let sanitizedName = FileAttachmentInfo.sanitizeFileName(url.lastPathComponent)
+        let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        let chunkSize = Int(fileChunkSize())
+
+        let hasher = FileHasherWrapper()
+        var offset = 0
+        while offset < fileData.count {
+            let end = min(offset + chunkSize, fileData.count)
+            hasher.update(data: fileData.subdata(in: offset..<end))
+            offset = end
+        }
+        let sha256 = hasher.finish()
+
+        let encryptor = try FileEncryptorWrapper(
+            fileName: sanitizedName,
+            mimeType: mimeType,
+            size: UInt64(fileData.count),
+            sha256: sha256
+        )
+        let manifest = encryptor.manifest()
+        let attachmentInfo = FileAttachmentInfo(manifest: manifest)
+        let fileIdHex = attachmentInfo.fileIdHex
+        fileTransferStates[fileIdHex] = .transferring(progress: 0)
+
+        // Update the optimistic message with the real manifest fileId so progress & ready states match.
+        if let idx = receivedMessages.firstIndex(where: { $0.id == messageId }) {
+            let existing = receivedMessages[idx]
+            receivedMessages[idx] = ReceivedTextMessage(
+                id: existing.id,
+                senderSessionId: existing.senderSessionId,
+                senderName: existing.senderName,
+                channelId: existing.channelId,
+                content: existing.content,
+                timestamp: existing.timestamp,
+                rawPacket: existing.rawPacket,
+                replyToId: existing.replyToId,
+                attachment: attachmentInfo
+            )
+        }
+
+        let senderSessionId = sessionId ?? userId
+        let myKey = try mls.exportTextKey(channelId: channelId, senderSessionId: senderSessionId, epoch: nil)
+        let epoch = try mls.currentEpoch(channelId: channelId, isVoice: false)
+
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"]
+        let mediaType: Int32 = imageExtensions.contains(url.pathExtension.lowercased()) ? 1 : 2
+
+        let textMsg = TextMessageRecord(
+            senderUuid: "user-\(senderSessionId)",
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            content: caption,
+            replyToId: replyToId ?? "",
+            messageId: messageId,
+            mediaType: mediaType,
+            fileSize: manifest.size,
+            sha256Hash: manifest.sha256.map { String(format: "%02x", $0) }.joined()
+        )
+
+        let encryptedPacket = try encryptTextWithAttachment(
+            daveKey: myKey,
+            epoch: epoch,
+            channelId: channelId,
+            senderSessionId: senderSessionId,
+            message: textMsg,
+            manifest: manifest
+        )
+
+        let packetRecord = EncryptedTextPacketRecord(
+            senderSessionId: encryptedPacket.senderSessionId,
+            channelId: String(encryptedPacket.channelId),
+            epoch: encryptedPacket.epoch,
+            messageId: messageId,
+            ciphertext: encryptedPacket.ciphertext,
+            nonce: encryptedPacket.nonce,
+            tag: encryptedPacket.tag,
+            replyToId: replyToId ?? ""
+        )
+
+        let payload = encodeEncryptedTextPacket(packet: packetRecord)
+        var msg = Data([Self.MSG_TEXT_PACKET])
+        let len = UInt32(payload.count).littleEndian
+        msg.append(withUnsafeBytes(of: len) { Data($0) })
+        msg.append(payload)
+        try await send(data: msg, on: stream)
+
+        // Open a client-initiated bidirectional stream for the encrypted chunks.
+        guard let uploadStream = NWConnection(from: group) else {
+            fileTransferStates[fileIdHex] = .failed("Failed to open upload stream")
+            throw QuicClientError.notConnected
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            uploadStream.stateUpdateHandler = { state in
+                guard !resumed.withLock({ $0 }) else { return }
+                switch state {
+                case .ready:
+                    resumed.withLock { $0 = true }
+                    cont.resume()
+                case .failed(let error):
+                    resumed.withLock { $0 = true }
+                    cont.resume(throwing: error)
+                case .cancelled:
+                    resumed.withLock { $0 = true }
+                    cont.resume(throwing: QuicClientError.connectionClosed)
+                default:
+                    break
+                }
+            }
+            uploadStream.start(queue: DispatchQueue.global(qos: .userInitiated))
+        }
+
+        do {
+            let header = try encryptor.streamHeader(channelId: channelId)
+            try await send(data: header, on: uploadStream)
+
+            var uploadOffset = 0
+            let totalBytes = max(1, fileData.count)
+            while let nextLen = encryptor.nextPlaintextLen() {
+                let n = Int(nextLen)
+                let end = min(uploadOffset + n, fileData.count)
+                let slice = fileData.subdata(in: uploadOffset..<end)
+                let framed = try encryptor.encryptNextFramed(plaintext: slice)
+                try await send(data: framed, on: uploadStream)
+                uploadOffset = end
+                fileTransferStates[fileIdHex] = .transferring(progress: Double(uploadOffset) / Double(totalBytes))
+            }
+            try encryptor.finish()
+
+            // Finish our send side so the server knows the stream is complete.
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                uploadStream.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else {
+                        cont.resume()
+                    }
+                })
+            }
+
+            // Read 8-byte server status: [code: u32 LE][recipients: u32 LE]
+            let statusData = try await receiveExact(8, on: uploadStream)
+            let code = statusData.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+            if code != 0 {
+                fileTransferStates[fileIdHex] = .failed("Upload rejected (code \(code))")
+                uploadStream.cancel()
+                throw QuicClientError.protocolError("File upload failed with code \(code)")
+            }
+
+            let destURL = try Self.saveDecryptedFile(fileData, fileIdHex: fileIdHex, fileName: sanitizedName)
+            fileTransferStates[fileIdHex] = .ready(url: destURL)
+            uploadStream.cancel()
+        } catch {
+            fileTransferStates[fileIdHex] = .failed(error.localizedDescription)
+            uploadStream.cancel()
+            throw error
+        }
+    }
+
+    private func receiveFileDeliveryStream(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                Task { @MainActor [weak self] in
+                    await self?.readFileDelivery(on: connection)
+                }
+            case .failed(let error):
+                print("[QuicClient] File delivery stream failed: \(error)")
+                connection.cancel()
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+    }
+
+    private func readFileDelivery(on connection: NWConnection) async {
+        var fileIdHexForFailure: String?
+        do {
+            let fixedLen = Int(fileStreamHeaderFixedLen())
+            let prefix = try await receiveExact(fixedLen, on: connection)
+            let channelIdLen = Int(try fileStreamHeaderChannelIdLen(prefix: prefix))
+            let suffix = channelIdLen > 0 ? try await receiveExact(channelIdLen, on: connection) : Data()
+            var headerBytes = prefix
+            headerBytes.append(suffix)
+            let header = try decodeFileStreamHeader(data: headerBytes)
+            let fileIdHex = header.fileId.map { String(format: "%02x", $0) }.joined()
+            fileIdHexForFailure = fileIdHex
+
+            let chunkPlaintextSize = Int(fileChunkSize())
+            let maxChunks = UInt32((maxFilePlaintextSize() + UInt64(chunkPlaintextSize) - 1) / UInt64(chunkPlaintextSize))
+            let maxChunkCiphertext = chunkPlaintextSize + 16
+            guard header.chunkCount >= 1, header.chunkCount <= maxChunks else {
+                fileTransferStates[fileIdHex] = .failed("Invalid chunk count")
+                connection.cancel()
+                return
+            }
+
+            if fileTransferStates[fileIdHex] == nil {
+                fileTransferStates[fileIdHex] = .transferring(progress: 0)
+            }
+            scheduleTransferTimeout(fileIdHex: fileIdHex)
+
+            // If manifest already arrived, verify sender and decrypt incrementally chunk-by-chunk.
+            var streamingDecryptor: FileDecryptorWrapper?
+            var streamingPlaintext: Data?
+            var streamingManifest: FileManifestRecord?
+            if let pendingManifest = pendingManifests[fileIdHex] {
+                guard header.senderSessionId == pendingManifest.senderSessionId else {
+                    fileTransferStates[fileIdHex] = .failed("Sender mismatch")
+                    connection.cancel()
+                    return
+                }
+                let decryptor = try FileDecryptorWrapper(manifest: pendingManifest.manifest)
+                try decryptor.checkHeader(header: headerBytes)
+                streamingDecryptor = decryptor
+                streamingPlaintext = Data()
+                streamingPlaintext?.reserveCapacity(Int(pendingManifest.manifest.size))
+                streamingManifest = pendingManifest.manifest
+            }
+
+            var bufferedChunks: [Data] = []
+            if streamingDecryptor == nil {
+                bufferedChunks.reserveCapacity(Int(header.chunkCount))
+            }
+
+            var receivedCiphertext: UInt64 = 0
+            for _ in 0..<header.chunkCount {
+                let lenData = try await receiveExact(4, on: connection)
+                let chunkLen = Int(lenData.withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+                guard chunkLen >= 16, chunkLen <= maxChunkCiphertext else {
+                    fileTransferStates[fileIdHex] = .failed("Invalid chunk length")
+                    connection.cancel()
+                    return
+                }
+                let chunk = try await receiveExact(chunkLen, on: connection)
+                scheduleTransferTimeout(fileIdHex: fileIdHex)
+                if let decryptor = streamingDecryptor {
+                    let decrypted = try decryptor.decryptNext(ciphertext: chunk)
+                    streamingPlaintext?.append(decrypted)
+                } else {
+                    bufferedChunks.append(chunk)
+                }
+                receivedCiphertext += UInt64(chunkLen)
+                if header.totalCiphertextLen > 0 {
+                    let progress = min(1.0, Double(receivedCiphertext) / Double(header.totalCiphertextLen))
+                    fileTransferStates[fileIdHex] = .transferring(progress: progress)
+                }
+            }
+
+            connection.cancel()
+
+            if let decryptor = streamingDecryptor, let plaintext = streamingPlaintext, let manifest = streamingManifest {
+                try decryptor.finish()
+                let sanitized = FileAttachmentInfo.sanitizeFileName(manifest.fileName)
+                let destURL = try Self.saveDecryptedFile(plaintext, fileIdHex: fileIdHex, fileName: sanitized)
+                fileTransferStates[fileIdHex] = .ready(url: destURL)
+                cancelTransferTimeout(fileIdHex: fileIdHex)
+                pendingManifests.removeValue(forKey: fileIdHex)
+                pendingDeliveries.removeValue(forKey: fileIdHex)
+                print("[QuicClient] ✓ Decrypted and verified file \(sanitized) (\(plaintext.count) bytes)")
+            } else {
+                pendingDeliveries[fileIdHex] = PendingDelivery(header: header, chunks: bufferedChunks)
+                scheduleTransferTimeout(fileIdHex: fileIdHex)
+                processPendingDelivery(fileIdHex: fileIdHex)
+            }
+        } catch {
+            print("[QuicClient] File delivery error: \(error)")
+            if let fileIdHex = fileIdHexForFailure {
+                cancelTransferTimeout(fileIdHex: fileIdHex)
+                fileTransferStates[fileIdHex] = .failed("Transfer failed")
+                pendingDeliveries.removeValue(forKey: fileIdHex)
+            }
+            connection.cancel()
+        }
+    }
+
+    private func scheduleTransferTimeout(fileIdHex: String) {
+        transferTimeoutTasks[fileIdHex]?.cancel()
+        transferTimeoutTasks[fileIdHex] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            guard !Task.isCancelled, let self else { return }
+            self.transferTimeoutTasks.removeValue(forKey: fileIdHex)
+            let stillPending = self.pendingManifests[fileIdHex] != nil || self.pendingDeliveries[fileIdHex] != nil
+            guard stillPending else { return }
+            self.pendingManifests.removeValue(forKey: fileIdHex)
+            self.pendingDeliveries.removeValue(forKey: fileIdHex)
+            if case .ready = self.fileTransferStates[fileIdHex] {
+                return
+            }
+            self.fileTransferStates[fileIdHex] = .failed("Transfer timed out")
+        }
+    }
+
+    private func cancelTransferTimeout(fileIdHex: String) {
+        transferTimeoutTasks.removeValue(forKey: fileIdHex)?.cancel()
+    }
+
+    private func processPendingDelivery(fileIdHex: String) {
+        guard let pendingManifest = pendingManifests[fileIdHex],
+              let delivery = pendingDeliveries[fileIdHex]
+        else { return }
+
+        // Per protocol §3.5: delivery header's sender_session_id must match the announcing message.
+        guard delivery.header.senderSessionId == pendingManifest.senderSessionId else {
+            print("[QuicClient] Rejecting file delivery \(fileIdHex): sender mismatch")
+            pendingDeliveries.removeValue(forKey: fileIdHex)
+            fileTransferStates[fileIdHex] = .failed("Sender mismatch")
+            return
+        }
+
+        do {
+            let decryptor = try FileDecryptorWrapper(manifest: pendingManifest.manifest)
+            let headerBytes = try encodeFileStreamHeader(header: delivery.header)
+            try decryptor.checkHeader(header: headerBytes)
+
+            var plaintext = Data()
+            plaintext.reserveCapacity(Int(pendingManifest.manifest.size))
+            for chunk in delivery.chunks {
+                let decrypted = try decryptor.decryptNext(ciphertext: chunk)
+                plaintext.append(decrypted)
+            }
+            try decryptor.finish()
+
+            let sanitized = FileAttachmentInfo.sanitizeFileName(pendingManifest.manifest.fileName)
+            let destURL = try Self.saveDecryptedFile(plaintext, fileIdHex: fileIdHex, fileName: sanitized)
+            fileTransferStates[fileIdHex] = .ready(url: destURL)
+            cancelTransferTimeout(fileIdHex: fileIdHex)
+            pendingManifests.removeValue(forKey: fileIdHex)
+            pendingDeliveries.removeValue(forKey: fileIdHex)
+            print("[QuicClient] ✓ Decrypted and verified file \(sanitized) (\(plaintext.count) bytes)")
+        } catch {
+            print("[QuicClient] File decryption failed for \(fileIdHex): \(error)")
+            cancelTransferTimeout(fileIdHex: fileIdHex)
+            fileTransferStates[fileIdHex] = .failed("Decryption failed")
+            pendingDeliveries.removeValue(forKey: fileIdHex)
+        }
+    }
+
+    private func receiveExact(_ length: Int, on connection: NWConnection) async throws -> Data {
+        if length == 0 { return Data() }
+        var accumulated = Data()
+        accumulated.reserveCapacity(length)
+        while accumulated.count < length {
+            let needed = length - accumulated.count
+            let chunk: Data = try await withCheckedThrowingContinuation { cont in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: needed) { data, _, isComplete, error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else if let data, !data.isEmpty {
+                        cont.resume(returning: data)
+                    } else if isComplete {
+                        cont.resume(throwing: QuicClientError.connectionClosed)
+                    } else {
+                        cont.resume(returning: Data())
+                    }
+                }
+            }
+            if chunk.isEmpty {
+                throw QuicClientError.connectionClosed
+            }
+            accumulated.append(chunk)
+        }
+        return accumulated
+    }
+
+    nonisolated private static func downloadsSessionDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("AuraDownloads", isDirectory: true)
+            .appendingPathComponent(String(ProcessInfo.processInfo.processIdentifier), isDirectory: true)
+    }
+
+    nonisolated static func cleanupDownloadsCache() {
+        try? FileManager.default.removeItem(at: downloadsSessionDirectory())
+    }
+
+    private static func saveDecryptedFile(_ data: Data, fileIdHex: String, fileName: String) throws -> URL {
+        let dir = downloadsSessionDirectory()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent("\(fileIdHex.prefix(8))_\(fileName)")
+        try data.write(to: dest, options: .atomic)
+        return dest
+    }
     
     // MARK: - Account
 
@@ -3154,6 +3647,62 @@ public struct ChannelModel: Identifiable, Hashable {
     }
 }
 
+// MARK: - File Transfer Models
+
+public struct FileAttachmentInfo: Equatable, Sendable {
+    public let fileId: Data
+    public let fileIdHex: String
+    public let fileName: String
+    public let mimeType: String
+    public let size: UInt64
+
+    public init(fileId: Data, fileName: String, mimeType: String, size: UInt64) {
+        self.fileId = fileId
+        self.fileIdHex = fileId.map { String(format: "%02x", $0) }.joined()
+        self.fileName = Self.sanitizeFileName(fileName)
+        self.mimeType = mimeType
+        self.size = size
+    }
+
+    init(manifest: FileManifestRecord) {
+        self.init(
+            fileId: manifest.fileId,
+            fileName: manifest.fileName,
+            mimeType: manifest.mimeType,
+            size: manifest.size
+        )
+    }
+
+    /// Strips path separators, control characters, and bidi overrides so
+    /// untrusted sender-chosen filenames cannot escape the download directory.
+    public static func sanitizeFileName(_ raw: String) -> String {
+        let stripped = raw.unicodeScalars.filter { scalar in
+            if scalar == "/" || scalar == "\\" || scalar == "\0" { return false }
+            if CharacterSet.controlCharacters.contains(scalar) { return false }
+            let v = scalar.value
+            if (0x202A...0x202E).contains(v) || (0x2066...0x2069).contains(v) { return false }
+            return true
+        }
+        var name = String(String.UnicodeScalarView(stripped))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") {
+            name.removeFirst()
+        }
+        if name.isEmpty { return "attachment" }
+        if name.count > 200 {
+            name = String(name.prefix(200))
+        }
+        return name
+    }
+}
+
+public enum FileTransferState: Equatable {
+    case pending
+    case transferring(progress: Double)
+    case ready(url: URL)
+    case failed(String)
+}
+
 // MARK: - Received Text Message Model
 
 /// Represents a received text message from the server
@@ -3166,6 +3715,29 @@ public struct ReceivedTextMessage: Identifiable, Equatable {
     public let timestamp: Date
     public let rawPacket: Data  // For future decryption
     public let replyToId: String?  // ID of message being replied to
+    public let attachment: FileAttachmentInfo?
+
+    public init(
+        id: String,
+        senderSessionId: UInt32,
+        senderName: String,
+        channelId: String,
+        content: String,
+        timestamp: Date,
+        rawPacket: Data,
+        replyToId: String? = nil,
+        attachment: FileAttachmentInfo? = nil
+    ) {
+        self.id = id
+        self.senderSessionId = senderSessionId
+        self.senderName = senderName
+        self.channelId = channelId
+        self.content = content
+        self.timestamp = timestamp
+        self.rawPacket = rawPacket
+        self.replyToId = replyToId
+        self.attachment = attachment
+    }
     
     public var formattedTime: String {
         let formatter = DateFormatter()

@@ -17,6 +17,9 @@ struct AuraApp: App {
                 forName: NSApplication.willTerminateNotification, object: nil, queue: .main
             ) { _ in telemetryShutdown() }
         }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in QuicNetworkClient.cleanupDownloadsCache() }
     }
 
     var body: some Scene {
