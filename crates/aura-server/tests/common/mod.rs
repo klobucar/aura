@@ -377,6 +377,7 @@ impl TestClient {
             signature: signature.as_bytes().to_vec(),
             server_password: None,
             challenge: challenge.to_vec(),
+            ..Default::default()
         };
         write_frame(&mut send, 0x03, &request.encode_to_vec()).await?;
 

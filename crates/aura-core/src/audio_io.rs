@@ -48,9 +48,88 @@ impl std::ops::Deref for SendableStream {
     }
 }
 
+/// Metadata for an available audio input or output device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+fn device_display_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
+fn find_input_device(
+    host: &cpal::Host,
+    device_name: Option<&str>,
+) -> Result<cpal::Device, AudioError> {
+    match device_name.filter(|n| !n.is_empty()) {
+        Some(name) => host
+            .input_devices()
+            .map_err(|e| AudioError::Device(e.to_string()))?
+            .find(|d| device_display_name(d).as_deref() == Some(name))
+            .ok_or_else(|| AudioError::Device(format!("Input device not found: {name}"))),
+        None => host.default_input_device().ok_or(AudioError::NoDevice),
+    }
+}
+
+fn find_output_device(
+    host: &cpal::Host,
+    device_name: Option<&str>,
+) -> Result<cpal::Device, AudioError> {
+    match device_name.filter(|n| !n.is_empty()) {
+        Some(name) => host
+            .output_devices()
+            .map_err(|e| AudioError::Device(e.to_string()))?
+            .find(|d| device_display_name(d).as_deref() == Some(name))
+            .ok_or_else(|| AudioError::Device(format!("Output device not found: {name}"))),
+        None => host.default_output_device().ok_or(AudioError::NoDevice),
+    }
+}
+
+/// List available audio input (microphone) devices.
+pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, AudioError> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| device_display_name(&d));
+    let devices = host
+        .input_devices()
+        .map_err(|e| AudioError::Device(e.to_string()))?;
+
+    let mut result = Vec::new();
+    for device in devices {
+        if let Some(name) = device_display_name(&device) {
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            result.push(AudioDeviceInfo { name, is_default });
+        }
+    }
+    Ok(result)
+}
+
+/// List available audio output (speaker) devices.
+pub fn list_output_devices() -> Result<Vec<AudioDeviceInfo>, AudioError> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_output_device()
+        .and_then(|d| device_display_name(&d));
+    let devices = host
+        .output_devices()
+        .map_err(|e| AudioError::Device(e.to_string()))?;
+
+    let mut result = Vec::new();
+    for device in devices {
+        if let Some(name) = device_display_name(&device) {
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            result.push(AudioDeviceInfo { name, is_default });
+        }
+    }
+    Ok(result)
+}
+
 /// Microphone capture
 ///
-/// Captures audio from the default input device and sends 20ms frames
+/// Captures audio from the default or selected input device and sends 20ms frames
 /// through a channel for processing.
 pub struct AudioCapture {
     stream: SendableStream,
@@ -62,8 +141,15 @@ impl AudioCapture {
     ///
     /// Returns the capture handle and a receiver for 20ms PCM frames (960 samples)
     pub fn new() -> Result<(Self, Receiver<Vec<i16>>), AudioError> {
+        Self::new_with_device(None)
+    }
+
+    /// Create a new audio capture from a named input device (or default if `None`).
+    pub fn new_with_device(
+        device_name: Option<&str>,
+    ) -> Result<(Self, Receiver<Vec<i16>>), AudioError> {
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or(AudioError::NoDevice)?;
+        let device = find_input_device(&host, device_name)?;
 
         let config = StreamConfig {
             channels: 1,
@@ -147,8 +233,15 @@ impl AudioPlayback {
     ///
     /// Returns the playback handle and a sender for 20ms PCM frames (960 samples)
     pub fn new() -> Result<(Self, Sender<Vec<i16>>), AudioError> {
+        Self::new_with_device(None)
+    }
+
+    /// Create a new audio playback to a named output device (or default if `None`).
+    pub fn new_with_device(
+        device_name: Option<&str>,
+    ) -> Result<(Self, Sender<Vec<i16>>), AudioError> {
         let host = cpal::default_host();
-        let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
+        let device = find_output_device(&host, device_name)?;
 
         let config = StreamConfig {
             channels: 1,
@@ -239,10 +332,18 @@ pub struct AudioDevice {
 }
 
 impl AudioDevice {
-    /// Create a new full-duplex audio device
+    /// Create a new full-duplex audio device using system defaults.
     pub fn new() -> Result<Self, AudioError> {
-        let (capture, capture_rx) = AudioCapture::new()?;
-        let (playback, playback_tx) = AudioPlayback::new()?;
+        Self::new_with_devices(None, None)
+    }
+
+    /// Create a new full-duplex audio device using optional named input/output devices.
+    pub fn new_with_devices(
+        input_device: Option<&str>,
+        output_device: Option<&str>,
+    ) -> Result<Self, AudioError> {
+        let (capture, capture_rx) = AudioCapture::new_with_device(input_device)?;
+        let (playback, playback_tx) = AudioPlayback::new_with_device(output_device)?;
 
         Ok(Self {
             capture,

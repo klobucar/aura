@@ -18,6 +18,9 @@ pub struct JitterBufferConfig {
     pub max_age_ms: u32,
     /// Frame duration in milliseconds (default: 20ms for Opus)
     pub frame_duration_ms: u32,
+    /// Maximum consecutive PLC frames before considering the sender silent
+    /// and resetting `started` (default: 5 frames = 100ms).
+    pub max_plc_frames: u32,
 }
 
 impl Default for JitterBufferConfig {
@@ -27,6 +30,7 @@ impl Default for JitterBufferConfig {
             max_packets: 100,      // ~2 seconds of audio
             max_age_ms: 100,       // Drop packets older than 100ms
             frame_duration_ms: 20, // Standard Opus frame
+            max_plc_frames: 5,     // 100ms of PLC before returning Empty
         }
     }
 }
@@ -39,6 +43,7 @@ impl JitterBufferConfig {
             max_packets: 50,
             max_age_ms: 100,
             frame_duration_ms: 20,
+            max_plc_frames: 5,
         }
     }
 
@@ -49,6 +54,7 @@ impl JitterBufferConfig {
             max_packets: 200,
             max_age_ms: 400,
             frame_duration_ms: 20,
+            max_plc_frames: 10,
         }
     }
 }
@@ -105,6 +111,8 @@ pub struct JitterBuffer {
     jitter_ema: f32,
     /// Last packet arrival time for jitter calculation
     last_arrival: Option<Instant>,
+    /// Number of consecutive PLC frames generated since the last real packet
+    consecutive_plc: u32,
 }
 
 impl JitterBuffer {
@@ -119,6 +127,7 @@ impl JitterBuffer {
             stats: JitterBufferStats::default(),
             jitter_ema: 0.0,
             last_arrival: None,
+            consecutive_plc: 0,
         }
     }
 
@@ -216,6 +225,7 @@ impl JitterBuffer {
         if let Some(pkt) = self.packets.remove(&self.next_seq) {
             self.last_played_seq = Some(self.next_seq);
             self.next_seq += 1;
+            self.consecutive_plc = 0;
             self.stats.packets_played += 1;
             self.stats.current_buffer_size = self.packets.len();
             return PopResult::Packet(pkt.data);
@@ -236,6 +246,7 @@ impl JitterBuffer {
                 if let Some(pkt) = self.packets.remove(&self.next_seq) {
                     self.last_played_seq = Some(self.next_seq);
                     self.next_seq += 1;
+                    self.consecutive_plc = 0;
                     self.stats.packets_played += 1;
                     self.stats.current_buffer_size = self.packets.len();
                     return PopResult::PacketWithGap {
@@ -247,9 +258,21 @@ impl JitterBuffer {
         }
 
         // No packet available, check if buffer is empty
-        if self.packets.is_empty() && !self.started {
-            PopResult::Empty
+        if self.packets.is_empty() {
+            if !self.started {
+                return PopResult::Empty;
+            }
+            self.consecutive_plc += 1;
+            if self.consecutive_plc > self.config.max_plc_frames {
+                // Sender went silent; reset started so they stop ghosting as an
+                // active speaker via infinite NeedPLC frames.
+                self.started = false;
+                self.consecutive_plc = 0;
+                return PopResult::Empty;
+            }
+            PopResult::NeedPLC
         } else {
+            self.consecutive_plc += 1;
             PopResult::NeedPLC
         }
     }
@@ -278,6 +301,7 @@ impl JitterBuffer {
         self.stats = JitterBufferStats::default();
         self.jitter_ema = 0.0;
         self.last_arrival = None;
+        self.consecutive_plc = 0;
     }
 }
 
@@ -471,5 +495,47 @@ mod tests {
         assert_eq!(stats.packets_received, 3);
         assert_eq!(stats.packets_played, 2);
         assert_eq!(stats.packets_dropped_duplicate, 1);
+    }
+
+    #[test]
+    fn test_plc_exhaustion_resets_started() {
+        let config = JitterBufferConfig {
+            max_plc_frames: 3,
+            ..Default::default()
+        };
+        let mut jb = JitterBuffer::new(config);
+
+        // Before any packet, pop() is Empty
+        assert!(matches!(jb.pop(), PopResult::Empty));
+
+        // Push and pop one packet
+        assert!(jb.push(0, 0, make_packet(0)));
+        assert!(matches!(jb.pop(), PopResult::Packet(_)));
+
+        // Next 3 pops should yield NeedPLC
+        for _ in 0..3 {
+            assert!(matches!(jb.pop(), PopResult::NeedPLC));
+        }
+
+        // 4th pop exceeds max_plc_frames -> Empty and started is reset
+        assert!(matches!(jb.pop(), PopResult::Empty));
+        assert!(!jb.started);
+
+        // Subsequent pops remain Empty
+        assert!(matches!(jb.pop(), PopResult::Empty));
+
+        // Sender resumes talking (even with a skipped sequence number, e.g. after VAD/PTT).
+        // JitterBuffer plays the first packet of the new talk spurt immediately on the next
+        // pop() without prefill delay or clipping.
+        assert!(jb.push(42, 42 * 960, make_packet(42)));
+        assert!(jb.push(43, 43 * 960, make_packet(43)));
+        match jb.pop() {
+            PopResult::Packet(data) => assert_eq!(data[0], 42),
+            other => panic!("Expected immediate Packet after resume, got {:?}", other),
+        }
+        match jb.pop() {
+            PopResult::Packet(data) => assert_eq!(data[0], 43),
+            other => panic!("Expected second Packet after resume, got {:?}", other),
+        }
     }
 }
