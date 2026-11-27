@@ -49,6 +49,7 @@ fuzz_target!(|input: Input| {
         // by the packet count, so arbitrary values only find overflows
         // that cannot happen.
         frame_duration_ms: input.config.frame_duration_ms % 1001,
+        ..Default::default()
     });
     let mut last = 0u16;
     for op in input.ops {
