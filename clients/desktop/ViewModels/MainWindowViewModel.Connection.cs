@@ -385,7 +385,14 @@ public partial class MainWindowViewModel
         // Per-user playback gain is local-only state the network client owns
         // (it holds the session → UUID mapping the preference is keyed on).
         client.LoadLocalMixerPrefs(_settings.LocalVolumes, _settings.LocallyMutedUsers);
-        client.OnLocalMixerPrefsChanged += () => Ui(SaveLocalMixerPrefs);
+        client.OnLocalMixerPrefsChanged += () => Ui(() =>
+        {
+            SaveLocalMixerPrefs();
+            // Volume can change from the row menu, the profile card or the
+            // speaker card; the client owns it, so every row re-reads it.
+            foreach (var user in Channels.SelectMany(c => c.Users).Where(u => !u.IsSelf))
+                user.LocalVolume = client.LocalVolumeForSession(user.Id);
+        });
         VoiceRail.LocalVolumeProvider = sid => _client?.LocalVolumeForSession(sid) ?? 1f;
         VoiceRail.LocalVolumeSetter = (sid, gain) => _client?.SetLocalVolume(sid, gain);
     }

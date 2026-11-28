@@ -741,8 +741,26 @@ public partial class User : ObservableObject
     /// </summary>
     public bool NeedsKeyCheck => Trust == TrustState.KeyChanged;
 
+    /// <summary>Key seen but never compared out of band (not shown on your own row).</summary>
+    public bool ShowUncheckedKey => !IsSelf && Trust == TrustState.Tofu;
+
+    public bool IsBlocked => Trust == TrustState.Blocked;
+
+    /// <summary>
+    /// This member's local playback gain (1 = unchanged), mirrored from the
+    /// network client, which owns it, so the row can show it.
+    /// </summary>
+    [ObservableProperty] private float _localVolume = 1f;
+
+    /// <summary>`140%`, shown when the gain isn't 100% and they aren't muted locally.</summary>
+    public bool ShowLocalVolume => !IsSelf && !IsLocallyMuted && Math.Abs(LocalVolume - 1f) >= 0.01f;
+    public string LocalVolumeLabel => $"{Math.Round(LocalVolume * 100)}%";
+
     /// <summary>The trailing mic.slash glyph (deafen implies muted).</summary>
-    public bool ShowMuted => IsMuted || IsDeafened;
+    // One state icon per row, as on macOS: muted locally outranks deafened,
+    // which outranks muted.
+    public bool ShowDeafened => !IsLocallyMuted && IsDeafened;
+    public bool ShowMuted => !IsLocallyMuted && !IsDeafened && IsMuted;
 
     public string Initial => string.IsNullOrWhiteSpace(Name) ? "?" : Name.Trim()[..1].ToUpperInvariant();
 
@@ -755,11 +773,31 @@ public partial class User : ObservableObject
 
     public string LocalMuteLabel => IsLocallyMuted ? "Unmute locally" : "Mute locally";
 
-    partial void OnTrustChanged(TrustState value) => OnPropertyChanged(nameof(NeedsKeyCheck));
+    partial void OnTrustChanged(TrustState value)
+    {
+        OnPropertyChanged(nameof(NeedsKeyCheck));
+        OnPropertyChanged(nameof(ShowUncheckedKey));
+        OnPropertyChanged(nameof(IsBlocked));
+    }
     partial void OnIsMutedChanged(bool value) => OnPropertyChanged(nameof(ShowMuted));
-    partial void OnIsDeafenedChanged(bool value) => OnPropertyChanged(nameof(ShowMuted));
+    partial void OnIsDeafenedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowMuted));
+        OnPropertyChanged(nameof(ShowDeafened));
+    }
+    partial void OnLocalVolumeChanged(float value)
+    {
+        OnPropertyChanged(nameof(ShowLocalVolume));
+        OnPropertyChanged(nameof(LocalVolumeLabel));
+    }
     partial void OnNameChanged(string value) => OnPropertyChanged(nameof(Initial));
-    partial void OnIsLocallyMutedChanged(bool value) => OnPropertyChanged(nameof(LocalMuteLabel));
+    partial void OnIsLocallyMutedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(LocalMuteLabel));
+        OnPropertyChanged(nameof(ShowMuted));
+        OnPropertyChanged(nameof(ShowDeafened));
+        OnPropertyChanged(nameof(ShowLocalVolume));
+    }
     partial void OnIsServerMutedChanged(bool value) => OnPropertyChanged(nameof(ServerMuteLabel));
     partial void OnCustomStatusChanged(string value) => OnPropertyChanged(nameof(HasCustomStatus));
     partial void OnPresenceChanged(UserPresence value) => OnPropertyChanged(nameof(PresenceTooltip));

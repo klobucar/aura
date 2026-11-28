@@ -334,7 +334,7 @@
                                             Padding="6,0"
                                             Command="{Binding OpenModerationCommand}"
                                             ToolTip.Tip="Moderate server members">
-                                        <TextBlock Text="MODERATE" Classes="monoLabel"/>
+                                        <controls:AuraIcon Data="{StaticResource AuraIconUsers}" Width="14" Height="14"/>
                                     </Button>
                                     <Button Classes="icon"
                                             Padding="6,0"
@@ -479,38 +479,52 @@
                                                                 <StackPanel Grid.Column="2" Orientation="Horizontal"
                                                                             Spacing="{StaticResource AuraSpace5}"
                                                                             VerticalAlignment="Center">
-                                                                    <!-- server-muted badge -->
-                                                                    <Border Classes="badge"
-                                                                            Background="{DynamicResource AuraDangerBrush}"
-                                                                            IsVisible="{Binding IsServerMuted}"
-                                                                            ToolTip.Tip="Server muted by an administrator">
-                                                                        <TextBlock Classes="mono" Text="S-MUTED"
-                                                                                   FontSize="{StaticResource AuraMono9}"
-                                                                                   FontWeight="Bold"
-                                                                                   Foreground="White"/>
-                                                                    </Border>
-                                                                    <!-- speaking dot -->
-                                                                    <Ellipse Width="6" Height="6"
-                                                                             Fill="{DynamicResource AuraAccentBrush}"
-                                                                             IsVisible="{Binding IsSpeaking}"/>
-                                                                    <!-- muted for me only -->
+                                                                    <!-- As the macOS roster: local volume, server mute, one of muted
+                                                                         locally / deafened / muted, key state, speaking dot. -->
+                                                                    <TextBlock Classes="mono" Text="{Binding LocalVolumeLabel}"
+                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                               Foreground="{DynamicResource AuraTextFaintBrush}"
+                                                                               VerticalAlignment="Center"
+                                                                               IsVisible="{Binding ShowLocalVolume}"
+                                                                               ToolTip.Tip="Local volume"/>
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconMicOff}"
+                                                                               Width="11" Height="11"
+                                                                               Foreground="{DynamicResource AuraDangerBrush}"
+                                                                               IsVisible="{Binding IsServerMuted}"
+                                                                               ToolTip.Tip="Server muted by an administrator"/>
                                                                     <controls:AuraIcon Data="{StaticResource AuraIconVolumeX}"
                                                                                Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraWarnBrush}"
                                                                                IsVisible="{Binding IsLocallyMuted}"
                                                                                ToolTip.Tip="Muted locally"/>
-                                                                    <!-- mic.slash.fill in warn (deafened implies muted) -->
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconHeadphoneOff}"
+                                                                               Width="11" Height="11"
+                                                                               Foreground="{DynamicResource AuraWarnBrush}"
+                                                                               IsVisible="{Binding ShowDeafened}"
+                                                                               ToolTip.Tip="Deafened"/>
                                                                     <controls:AuraIcon Data="{StaticResource AuraIconMicOff}"
                                                                                Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraWarnBrush}"
                                                                                IsVisible="{Binding ShowMuted}"
                                                                                ToolTip.Tip="Muted"/>
-                                                                    <!-- key.fill in caution: key changed since first seen -->
                                                                     <controls:AuraIcon Data="{StaticResource AuraIconKeyRound}"
                                                                                Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraCautionBrush}"
                                                                                IsVisible="{Binding NeedsKeyCheck}"
-                                                                               ToolTip.Tip="Key changed — verify"/>
+                                                                               ToolTip.Tip="Identity key changed — compare keys"/>
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconKeyRound}"
+                                                                               Width="11" Height="11" Opacity="0.7"
+                                                                               Foreground="{DynamicResource AuraCautionBrush}"
+                                                                               IsVisible="{Binding ShowUncheckedKey}"
+                                                                               ToolTip.Tip="Key not compared yet"/>
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconBan}"
+                                                                               Width="11" Height="11"
+                                                                               Foreground="{DynamicResource AuraDangerBrush}"
+                                                                               IsVisible="{Binding IsBlocked}"
+                                                                               ToolTip.Tip="Blocked key"/>
+                                                                    <Ellipse Width="6" Height="6"
+                                                                             Fill="{DynamicResource AuraAccentBrush}"
+                                                                             IsVisible="{Binding IsSpeaking}"/>
                                                                 </StackPanel>
                                                             </Grid>
                                                         </Border>
@@ -617,8 +631,15 @@
                                     Command="{Binding OpenInviteCommand}"
                                     IsVisible="{Binding IsAuthenticated}"
                                     ToolTip.Tip="Invite someone">
-                                <TextBlock Text="Invite" FontSize="{StaticResource AuraFont12}"
-                                           Foreground="{DynamicResource AuraLinkBrush}"/>
+                                <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace5}">
+                                    <controls:AuraIcon Data="{StaticResource AuraIconUserPlus}" Width="14" Height="14"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource AuraLinkBrush}"/>
+                                    <TextBlock Text="Invite" FontSize="{StaticResource AuraFont12}"
+                                               FontWeight="SemiBold"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource AuraLinkBrush}"/>
+                                </StackPanel>
                                 <Button.Flyout>
                                     <Flyout Placement="BottomEdgeAlignedRight">
                                         <StackPanel Width="380" Spacing="{StaticResource AuraSpace9}">
@@ -669,8 +690,10 @@
                                 ToolTip.Tip="{Binding LayoutToggleTip}"
                                 VerticalAlignment="Center">
                             <Panel>
-                                <controls:AuraIcon Data="{StaticResource AuraIconAudioLines}" IsVisible="{Binding IsChatFirst}"/>
-                                <controls:AuraIcon Data="{StaticResource AuraIconMessageSquare}" IsVisible="{Binding !IsChatFirst}"/>
+                                <controls:AuraIcon Data="{StaticResource AuraIconAudioLines}" IsVisible="{Binding IsChatFirst}"
+                                                   Foreground="{DynamicResource AuraLinkBrush}"/>
+                                <controls:AuraIcon Data="{StaticResource AuraIconMessageSquare}" IsVisible="{Binding !IsChatFirst}"
+                                                   Foreground="{DynamicResource AuraLinkBrush}"/>
                             </Panel>
                         </Button>
                     </Grid>

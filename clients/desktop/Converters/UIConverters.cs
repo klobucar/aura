@@ -215,7 +215,8 @@ public class AvatarBrushConverter : IValueConverter
 /// </summary>
 public class TrustRowBrushConverter : IValueConverter
 {
-    public static readonly TrustRowBrushConverter Fill = new() { TrueKey = "AuraCautionFillBrush" };
+    // Silent rows sit on a faint track fill, as on macOS; a key to check tints it.
+    public static readonly TrustRowBrushConverter Fill = new() { TrueKey = "AuraCautionFillBrush", FalseKey = "AuraTrackBrush" };
     public static readonly TrustRowBrushConverter Border = new() { TrueKey = "AuraCautionBorderBrush" };
     public static readonly TrustRowBrushConverter Text = new() { TrueKey = "AuraCautionTextBrush", FalseKey = "AuraWarnBrush" };
 
