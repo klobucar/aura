@@ -878,6 +878,13 @@ public partial class MainWindowViewModel
             user.Avatar = avatar;
             if (ProfileCard.IsOpen && ProfileCard.SessionId == user.Id) ProfileCard.Refresh(user);
         }
+
+        // Messages already on screen follow the change too, including ones
+        // from someone who has since left the roster.
+        foreach (var message in _history.All)
+        {
+            if (message.SenderUuid == profile.UserId) message.Avatar = avatar;
+        }
     }
 
     private Channel GetOrCreateChannel(string channelId)

@@ -120,6 +120,62 @@
         <Setter Property="Foreground" Value="White"/>
     </Style>
 
+    <!-- Destructive and cautionary actions, held through hover and press for
+         the same reason as Button.brand. `danger` is the tinted form (Block,
+         Ban, Leave server); `dangerSolid` is the final confirm; `caution` is
+         amber with dark text in both variants. -->
+    <Style Selector="Button.danger">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBorderBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraDangerBrush}"/>
+    </Style>
+    <Style Selector="Button.danger:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBorderBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraDangerBrush}"/>
+    </Style>
+    <Style Selector="Button.dangerSolid">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.dangerSolid:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.dangerSolid:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraDangerBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.caution">
+        <Setter Property="Background" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Foreground" Value="#12141A"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.caution:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="Foreground" Value="#12141A"/>
+    </Style>
+    <Style Selector="Button.caution:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraCautionBrush}"/>
+        <Setter Property="Foreground" Value="#12141A"/>
+    </Style>
+
     <!-- ===================== Command HUD segments ==================== -->
 
     <!-- Mic / deafen pair. The active segment is 42×34 on the brand gradient;

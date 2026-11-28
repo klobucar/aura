@@ -18,6 +18,30 @@ public partial class User
     }
 }
 
+/// <summary>
+/// The sender's avatar beside an incoming message. Our own messages don't use
+/// this: their tile binds the view model's avatar directly.
+/// </summary>
+public partial class ChatMessage
+{
+    /// <summary>
+    /// The sender's account. Session ids change with every connection, so this
+    /// is what a later profile update is matched on.
+    /// </summary>
+    public string? SenderUuid { get; init; }
+
+    [ObservableProperty] private Bitmap? _avatar;
+
+    public bool HasAvatar => Avatar != null;
+    public bool ShowInitial => Avatar == null;
+
+    partial void OnAvatarChanged(Bitmap? value)
+    {
+        OnPropertyChanged(nameof(HasAvatar));
+        OnPropertyChanged(nameof(ShowInitial));
+    }
+}
+
 public partial class ProfileCardViewModel
 {
     [ObservableProperty] private Bitmap? _avatar;
