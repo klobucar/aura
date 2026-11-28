@@ -26,6 +26,13 @@ public partial class ChatMessage : ObservableObject
     /// <summary>Mentions us (by @name or a notify keyword): caution tint + `mentions you`.</summary>
     public bool IsMention { get; init; }
 
+    /// <summary>
+    /// The "Joined #channel" notice for our own arrival. A channel keeps only
+    /// the latest one (see <see cref="ChatHistory.AddJoinMarker"/>), so it
+    /// marks where this visit's history starts.
+    /// </summary>
+    public bool IsJoinMarker { get; init; }
+
     /// <summary>The message this one replies to, if any.</summary>
     public string? ReplyToId { get; init; }
 
@@ -157,6 +164,21 @@ public sealed class ChatHistory
         list.Add(message);
         while (list.Count > MaxPerChannel) list.RemoveAt(0);
         return true;
+    }
+
+    /// <summary>
+    /// Record that we joined a channel, dropping the channel's earlier join
+    /// marker. Hopping between channels, or a reconnect rejoining, would
+    /// otherwise stack a "Joined #channel" for every visit.
+    /// </summary>
+    public void AddJoinMarker(ChatMessage marker)
+    {
+        var list = For(marker.ChannelId);
+        for (var i = list.Count - 1; i >= 0; i--)
+        {
+            if (list[i].IsJoinMarker) list.RemoveAt(i);
+        }
+        Add(marker);
     }
 
     public ChatMessage? Find(string? channelId, string? messageId)

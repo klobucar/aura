@@ -589,7 +589,13 @@ public partial class MainWindowViewModel
             PlaceSelf(channel.Id);
             await _client.JoinChannelAsync(channel.Id);
             if (VoiceSoundCuesEnabled) VoiceSoundCues.Play(_audioManager, _audioEngine, VoiceSoundCues.CueKind.Join);
-            AddNotice(channel.Id, $"Joined #{channel.Name}");
+            _history.AddJoinMarker(new ChatMessage
+            {
+                ChannelId = channel.Id,
+                Content = $"Joined #{channel.Name}",
+                System = true,
+                IsJoinMarker = true,
+            });
         }
         catch (Exception ex)
         {
