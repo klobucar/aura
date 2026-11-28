@@ -270,6 +270,25 @@ public class PushToTalkTests
     }
 
     [Fact]
+    public void X11KeysymsMatchKeysymdef()
+    {
+        Assert.Equal(0x20, PushToTalkBinding.Default.X11Keysym);
+        Assert.Equal(0x61, new PushToTalkBinding(Key.A, KeyModifiers.None).X11Keysym);
+        Assert.Equal(0xffca, new PushToTalkBinding(Key.F13, KeyModifiers.None).X11Keysym);
+        Assert.Equal(0x60, new PushToTalkBinding(Key.OemTilde, KeyModifiers.None).X11Keysym);
+        Assert.Equal(0xffb5, new PushToTalkBinding(Key.NumPad5, KeyModifiers.None).X11Keysym);
+    }
+
+    [Fact]
+    public void PortalTriggersUseTheShortcutsSpecFormat()
+    {
+        Assert.Equal("CTRL+space", PushToTalkBinding.Default.PortalTrigger);
+        Assert.Equal("ALT+SHIFT+F13", new PushToTalkBinding(Key.F13, KeyModifiers.Alt | KeyModifiers.Shift).PortalTrigger);
+        Assert.Equal("LOGO+grave", new PushToTalkBinding(Key.OemTilde, KeyModifiers.Meta).PortalTrigger);
+        Assert.Equal("KP_0", new PushToTalkBinding(Key.NumPad0, KeyModifiers.None).PortalTrigger);
+    }
+
+    [Fact]
     public void MacKeyCodesMatchHIToolbox()
     {
         Assert.Equal(0x31, PushToTalkBinding.Default.MacKeyCode);

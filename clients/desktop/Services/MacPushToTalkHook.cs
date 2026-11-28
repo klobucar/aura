@@ -98,6 +98,8 @@ public sealed class MacPushToTalkHook : IGlobalPushToTalkHook
 
     public event Action? Pressed;
     public event Action? Released;
+    // Installs synchronously; IsInstalled never changes later.
+    public event Action? StateChanged { add { } remove { } }
 
     public PushToTalkBinding Binding { get; set; } = PushToTalkBinding.Default;
     public bool Enabled { get; set; }
