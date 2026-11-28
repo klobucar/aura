@@ -20,8 +20,10 @@ struct ContentView: View {
     @State private var isDeafened = false
     @State private var showingSettings = false
     @State private var showingProfileEditor = false
-    @State private var showingChannelEditor = false
-    @State private var editingChannel: ChannelModel?
+    /// What the channel editor sheet is showing; nil when closed. One
+    /// optional item (not a flag plus a channel) so the sheet is built with
+    /// the channel it was opened for rather than a stale capture.
+    @State private var channelEditorTarget: ChannelEditorTarget?
     @State private var channelPendingDeletion: ChannelModel?
     @State private var pttCancellable: AnyCancellable?
     @State private var pttErrorMessage: String?
@@ -314,8 +316,8 @@ struct ContentView: View {
         .sheet(isPresented: $showingProfileEditor) {
             ProfileView(client: client)
         }
-        .sheet(isPresented: $showingChannelEditor) {
-            ChannelEditView(client: client, channel: editingChannel)
+        .sheet(item: $channelEditorTarget) { target in
+            ChannelEditView(client: client, channel: target.channel)
         }
         .sheet(isPresented: $showingModeration, onDismiss: { moderationFocusUuid = nil }) {
             ModerationView(client: client, initialSelection: moderationFocusUuid)
@@ -339,14 +341,8 @@ struct ContentView: View {
             editProfile: { showingProfileEditor = true },
             disconnect: disconnect,
             openSettings: { showingSettings = true },
-            createChannel: {
-                editingChannel = nil
-                showingChannelEditor = true
-            },
-            editChannel: { channel in
-                editingChannel = channel
-                showingChannelEditor = true
-            },
+            createChannel: { channelEditorTarget = .create },
+            editChannel: { channelEditorTarget = .edit($0) },
             deleteChannel: { channelPendingDeletion = $0 },
             compareKeys: { openTrustSheet(focusUuid: $0) },
             leaveServer: { confirmingLeave = true },
@@ -1425,6 +1421,24 @@ struct ContentView: View {
 
 // MARK: - Channel Edit View
 
+/// Which form the channel editor sheet opens with.
+enum ChannelEditorTarget: Identifiable {
+    case create
+    case edit(ChannelModel)
+
+    var id: String {
+        switch self {
+        case .create: return "create"
+        case .edit(let channel): return "edit-\(channel.id)"
+        }
+    }
+
+    var channel: ChannelModel? {
+        if case .edit(let channel) = self { return channel }
+        return nil
+    }
+}
+
 struct ChannelEditView: View {
     @Environment(\.dismiss) var dismiss
     let client: QuicNetworkClient
@@ -1450,10 +1464,9 @@ struct ChannelEditView: View {
                 .font(.title2.bold())
 
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
+                HStack(spacing: 8) {
                     Text("Icon")
-                    TextField("Emoji", text: $emoji)
-                        .frame(width: 50)
+                    EmojiPickerButton(emoji: $emoji)
                     Spacer()
                 }
 
@@ -1502,6 +1515,82 @@ struct ChannelEditView: View {
         }
         .padding(30)
         .frame(width: 380)
+    }
+}
+
+// MARK: - Emoji Picker
+
+/// The channel icon control: shows the current emoji and opens a grid of
+/// common picks. "More…" focuses a text field and opens the system
+/// Character Viewer, which inserts into whatever has focus.
+struct EmojiPickerButton: View {
+    @Binding var emoji: String
+    @State private var showingPicker = false
+    @FocusState private var fieldFocused: Bool
+
+    static let choices: [String] = [
+        "📁", "💬", "🔊", "🎙️", "🎧", "🎵", "🎮", "🕹️",
+        "🏠", "🛋️", "☕️", "🍕", "🍻", "🎉", "🎨", "📚",
+        "💻", "🛠️", "🧪", "🚀", "📢", "📌", "🔒", "🛡️",
+        "⭐️", "🔥", "⚡️", "🌙", "🌈", "🌿", "🐱", "🐶",
+        "❤️", "💜", "💙", "💚", "😀", "😎", "🤖", "👾",
+    ]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                showingPicker.toggle()
+            } label: {
+                Text(emoji.isEmpty ? "📁" : emoji)
+                    .font(.system(size: 22))
+                    .frame(width: 40, height: 32)
+            }
+            .buttonStyle(.bordered)
+            .help("Choose an icon")
+            .popover(isPresented: $showingPicker, arrowEdge: .bottom) {
+                grid
+            }
+
+            // Typed or pasted emoji, and the Character Viewer's target.
+            TextField("", text: $emoji)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 56)
+                .focused($fieldFocused)
+                .onChange(of: emoji) { _, new in
+                    // Keep one emoji; the Character Viewer appends.
+                    if new.count > 1, let last = new.last { emoji = String(last) }
+                }
+        }
+    }
+
+    private var grid: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(34), spacing: 4), count: 8), spacing: 4) {
+                ForEach(Self.choices, id: \.self) { choice in
+                    Button {
+                        emoji = choice
+                        showingPicker = false
+                    } label: {
+                        Text(choice)
+                            .font(.system(size: 22))
+                            .frame(width: 34, height: 34)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(choice == emoji ? Color.accentColor.opacity(0.25) : .clear)
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Button("More…") {
+                showingPicker = false
+                fieldFocused = true
+                DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
+            }
+            .buttonStyle(.link)
+        }
+        .padding(12)
     }
 }
 
