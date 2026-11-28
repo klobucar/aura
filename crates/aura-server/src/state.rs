@@ -1093,12 +1093,43 @@ impl ServerState {
         });
     }
 
+    /// Send everyone else a newly connected user's avatar, as a
+    /// `ProfileUpdated`. Snapshots carry no avatars, and a user logging in is
+    /// not a profile change, so without this the sessions already online
+    /// would never see the newcomer's avatar. Skipped when the account has
+    /// another live session: everyone online already has it then, from that
+    /// session's login or from their own.
+    fn announce_avatar_of_new_session(&self, session_id: u32, user_uuid: &str) {
+        let Some(profile) = self.profiles.get(user_uuid).map(|p| p.value().clone()) else {
+            return;
+        };
+        if profile.avatar_data.is_empty() {
+            return;
+        }
+        if self
+            .sessions
+            .iter()
+            .any(|s| s.session_id != session_id && s.user_uuid == user_uuid)
+        {
+            return;
+        }
+        for other in self.sessions.iter() {
+            if other.session_id != session_id {
+                let _ = other
+                    .sender
+                    .send(ServiceMessage::ProfileUpdated(profile.clone()));
+            }
+        }
+    }
+
     /// Send the full server state snapshot to a newly connected user
     pub async fn send_server_snapshot(&self, session_id: u32) {
         if let Some(sess) = self.sessions.get(&session_id) {
             let snapshot = self.get_server_snapshot().await;
             let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
             self.send_avatars_after_snapshot(sess.sender.clone());
+            let user_uuid = sess.user_uuid.clone();
+            self.announce_avatar_of_new_session(session_id, &user_uuid);
 
             // Status the snapshot doesn't carry: presence, custom status and
             // server mute. The session's own entry is included when it is
@@ -3241,6 +3272,51 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].user_id, "U_alice");
         assert_eq!(updates[0].avatar_data, avatar);
+    }
+
+    #[tokio::test]
+    async fn a_new_sessions_avatar_reaches_everyone_already_online() {
+        fn profile_updates(msgs: &[ServiceMessage]) -> Vec<String> {
+            msgs.iter()
+                .filter_map(|m| match m {
+                    ServiceMessage::ProfileUpdated(p) => Some(p.user_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let state = create_test_state();
+        for (uuid, avatar) in [("U_carol", vec![7u8; 4096]), ("U_dave", Vec::new())] {
+            state.profiles.insert(
+                uuid.into(),
+                UserProfile {
+                    user_id: uuid.into(),
+                    avatar_data: avatar,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let (_alice, mut alice_rx) = session(&state, "U_alice");
+        let (_bob, mut bob_rx) = session(&state, "U_bob");
+
+        // Carol logs in with an avatar: both sessions already online get it
+        // straight away, without waiting for a profile change.
+        let (carol, _carol_rx) = session(&state, "U_carol");
+        state.send_server_snapshot(carol).await;
+        assert_eq!(profile_updates(&drain(&mut alice_rx)), vec!["U_carol"]);
+        assert_eq!(profile_updates(&drain(&mut bob_rx)), vec!["U_carol"]);
+
+        // A second session for Carol isn't news to anyone.
+        let (carol2, _carol2_rx) = session(&state, "U_carol");
+        state.send_server_snapshot(carol2).await;
+        assert!(profile_updates(&drain(&mut alice_rx)).is_empty());
+
+        // Dave has no avatar, so there is nothing to send.
+        let (dave, _dave_rx) = session(&state, "U_dave");
+        state.send_server_snapshot(dave).await;
+        assert!(profile_updates(&drain(&mut alice_rx)).is_empty());
+        assert!(profile_updates(&drain(&mut bob_rx)).is_empty());
     }
 
     #[tokio::test]
