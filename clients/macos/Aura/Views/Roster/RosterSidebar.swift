@@ -262,9 +262,12 @@ private struct IdentityCard: View {
     let actions: RosterActions
     @ObservedObject private var appSettings = AppSettings.shared
 
+    /// Online is green (`good`), as in the moderation view and the desktop
+    /// client. The theme accent was used before, and Frost's accent is orange,
+    /// which read as idle.
     private var presenceColor: Color {
         switch appSettings.presenceStatus {
-        case .online: return AuraTheme.Colors.accent
+        case .online: return AuraTheme.Colors.good
         case .idle: return AuraTheme.Colors.caution
         case .dnd: return AuraTheme.Colors.danger
         }
@@ -553,9 +556,12 @@ private struct RosterMemberRow: View {
         }
     }
 
+    /// Online is green (`good`), as in the moderation view and the desktop
+    /// client. The theme accent was used before, and Frost's accent is orange,
+    /// which read as idle.
     private var presenceColor: Color {
         switch member.presence {
-        case .online: return AuraTheme.Colors.accent
+        case .online: return AuraTheme.Colors.good
         case .idle: return AuraTheme.Colors.caution
         case .dnd: return AuraTheme.Colors.danger
         }
