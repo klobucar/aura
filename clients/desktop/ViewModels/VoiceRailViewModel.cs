@@ -111,6 +111,7 @@ public partial class VoiceRailViewModel : ObservableObject
         OnPropertyChanged(nameof(EmptyStateText));
         OnPropertyChanged(nameof(ShowLanes));
         OnPropertyChanged(nameof(ShowLatency));
+        OnPropertyChanged(nameof(ShowSilent));
     }
 
     /// <summary>Lanes are a comparison; with nobody to compare against, hide them.</summary>
@@ -134,6 +135,7 @@ public partial class VoiceRailViewModel : ObservableObject
     partial void OnCurrentSpeakerChanged(SpeakerCardViewModel? value) => OnPropertyChanged(nameof(ShowEmptyState));
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowSilent))]
     private bool _hasSilentMembers;
 
     /// <summary>Newest-last level history for the speaker card waveform.</summary>

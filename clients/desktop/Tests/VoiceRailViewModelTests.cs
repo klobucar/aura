@@ -28,6 +28,23 @@ public class VoiceRailViewModelTests
         new(id, name, IsMuted: false, IsDeafened: false, Trust: TrustState.Tofu, IsLocal: isLocal);
 
     [Fact]
+    public void SilentList_TellsTheViewWhenItAppears()
+    {
+        // ShowSilent is computed; the view only re-reads it when told. It was
+        // never announced, so the SILENT list stayed hidden in the app.
+        var rail = new VoiceRailViewModel();
+        var clock = new FakeClock();
+        var store = new TalkSegmentStore(clock.Get) { LocalSessionId = 1 };
+        var changed = new List<string?>();
+        rail.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+
+        rail.Rebuild(new List<VoiceParticipant> { Person(1, "You", isLocal: true), Person(2, "Sol") }, store);
+
+        Assert.True(rail.ShowSilent);
+        Assert.Contains(nameof(VoiceRailViewModel.ShowSilent), changed);
+    }
+
+    [Fact]
     public void Alone_HidesLanesLatencyAndSilentList()
     {
         var rail = new VoiceRailViewModel();
