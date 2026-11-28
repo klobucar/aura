@@ -92,9 +92,9 @@ public class ProfileManager: ObservableObject {
         
         do {
             profiles = try JSONDecoder().decode([UserProfileModel].self, from: data)
-            print("[ProfileManager] Loaded \\(profiles.count) profiles")
+            print("[ProfileManager] Loaded \(profiles.count) profiles")
         } catch {
-            print("[ProfileManager] Failed to load profiles: \\(error)")
+            print("[ProfileManager] Failed to load profiles: \(error)")
         }
     }
     
@@ -102,9 +102,9 @@ public class ProfileManager: ObservableObject {
         do {
             let data = try JSONEncoder().encode(profiles)
             UserDefaults.standard.set(data, forKey: storageKey)
-            print("[ProfileManager] Saved \\(profiles.count) profiles")
+            print("[ProfileManager] Saved \(profiles.count) profiles")
         } catch {
-            print("[ProfileManager] Failed to save profiles: \\(error)")
+            print("[ProfileManager] Failed to save profiles: \(error)")
         }
     }
 }

@@ -66,9 +66,9 @@ public class ServerManager: ObservableObject {
         
         do {
             servers = try JSONDecoder().decode([ServerProfile].self, from: data)
-            print("[ServerManager] Loaded \\(servers.count) servers")
+            print("[ServerManager] Loaded \(servers.count) servers")
         } catch {
-            print("[ServerManager] Failed to load servers: \\(error)")
+            print("[ServerManager] Failed to load servers: \(error)")
         }
     }
     
@@ -76,9 +76,9 @@ public class ServerManager: ObservableObject {
         do {
             let data = try JSONEncoder().encode(servers)
             UserDefaults.standard.set(data, forKey: storageKey)
-            print("[ServerManager] Saved \\(servers.count) servers")
+            print("[ServerManager] Saved \(servers.count) servers")
         } catch {
-            print("[ServerManager] Failed to save servers: \\(error)")
+            print("[ServerManager] Failed to save servers: \(error)")
         }
     }
 }
