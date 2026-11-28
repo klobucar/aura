@@ -17,6 +17,9 @@ primary_region = 'ord'
   # Fly delivers UDP only to fly-global-services (needs a dedicated IPv4);
   # TCP listeners (ACME HTTP-01, health check) must use 0.0.0.0 instead.
   AURA_BIND_ADDRESS = 'fly-global-services:8443'
+  # Fly's UDP path dropped everything sent to a client for about a minute
+  # after a packet larger than ~1350 bytes, so the server does not probe.
+  AURA_MTU_DISCOVERY = 'false'
   AURA_HTTP_BIND_IP = '0.0.0.0'
   # Prometheus metrics for Fly's managed Grafana (fly-metrics.net). Aggregate
   # counts only; the port is not in [[services]], so only Fly's scraper reaches it.
