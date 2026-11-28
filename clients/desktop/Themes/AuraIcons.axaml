@@ -33,4 +33,7 @@
     <StreamGeometry x:Key="AuraIconMessageSquare">M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z</StreamGeometry>
     <StreamGeometry x:Key="AuraIconVolumeX">M11 4.702a.7.7 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.7.7 0 0 0 11 19.298z M0 0 m16.5 14.5 5-5 M0 0 m16.5 9.5 5 5</StreamGeometry>
     <StreamGeometry x:Key="AuraIconPaperclip">M0 0 m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551</StreamGeometry>
+    <StreamGeometry x:Key="AuraIconBan">M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0 M4.929 4.929 19.07 19.071</StreamGeometry>
+    <StreamGeometry x:Key="AuraIconUsers">M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M16 3.128a4 4 0 0 1 0 7.744 M22 21v-2a4 4 0 0 0-3-3.87 M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0</StreamGeometry>
+    <StreamGeometry x:Key="AuraIconUserPlus">M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0 M19 8L19 14 M22 11L16 11</StreamGeometry>
 </ResourceDictionary>

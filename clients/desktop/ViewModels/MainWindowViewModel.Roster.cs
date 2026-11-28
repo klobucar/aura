@@ -34,6 +34,7 @@ public partial class MainWindowViewModel
     {
         var user = new User { Id = sessionId, Name = name, Comment = comment };
         user.IsLocallyMuted = _client?.IsLocallyMuted(sessionId) ?? false;
+        user.LocalVolume = _client?.LocalVolumeForSession(sessionId) ?? 1f;
         user.CanModerate = IsAdmin;
         user.ModerateCommand = new RelayCommand(() => _ = OpenModerationFor(user));
         user.ServerMuteCommand = new RelayCommand(() => _ = ToggleServerMuteAsync(user));
