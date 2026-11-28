@@ -2,7 +2,35 @@
      flat panels with a single 1px rim, `white @ 6%` hover with no scale,
      8/6/4 radii, accent-underlined TextBox. -->
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="using:Aura.Desktop.Controls">
+
+    <!-- ========================= Settings rows ========================= -->
+
+    <!-- Label left, switch right, one row per setting. Fluent's own ToggleSwitch
+         stacks a larger header above the switch and reserves 154px for
+         On/Off text the settings sheet never shows. -->
+    <Style Selector="TextBlock.settingLabel">
+        <Setter Property="FontSize" Value="{StaticResource AuraFont12}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style Selector="ToggleSwitch.settingSwitch">
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="OnContent" Value="{x:Null}"/>
+        <Setter Property="OffContent" Value="{x:Null}"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <!-- ============================ Icons ============================ -->
+
+    <!-- Lucide outlines (Themes/AuraIcons.axaml). 16 is the toolbar size;
+         sites that need another size set Width/Height. -->
+    <Style Selector="controls|AuraIcon">
+        <Setter Property="Width" Value="16"/>
+        <Setter Property="Height" Value="16"/>
+    </Style>
 
     <!-- ============================ Type ============================ -->
 
@@ -50,6 +78,29 @@
         <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
     </Style>
 
+    <!-- The dimmed layer behind a sheet. Opening fades the scrim in, then the
+         sheet a beat behind it; a style animation runs each time its selector
+         starts matching, so it replays on every open. -->
+    <Style Selector="Border.scrim">
+        <Setter Property="Background" Value="#99000000"/>
+    </Style>
+    <Style Selector="Border.scrim[IsVisible=True]">
+        <Style.Animations>
+            <Animation Duration="0:0:0.14" Easing="CubicEaseOut" FillMode="Forward">
+                <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0"/></KeyFrame>
+                <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1"/></KeyFrame>
+            </Animation>
+        </Style.Animations>
+    </Style>
+    <Style Selector="Border.scrim[IsVisible=True] > Border.sheet">
+        <Style.Animations>
+            <Animation Duration="0:0:0.18" Easing="CubicEaseOut" FillMode="Forward">
+                <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0"/></KeyFrame>
+                <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1"/></KeyFrame>
+            </Animation>
+        </Style.Animations>
+    </Style>
+
     <!-- Inset well for segmented controls and meters -->
     <Style Selector="Border.well">
         <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
@@ -66,6 +117,17 @@
 
     <!-- Channel / member / silent rows. Hover is a white @ 6% overlay with no
          scale — the desktop translation of macOS's auraFluidHover. -->
+    <!-- Every button eases its fill and rim instead of snapping on hover and
+         press. Classes that set their own Transitions (Button.row) win. -->
+    <Style Selector="Button /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Transitions">
+            <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.12"/>
+                <BrushTransition Property="BorderBrush" Duration="0:0:0.12"/>
+            </Transitions>
+        </Setter>
+    </Style>
+
     <Style Selector="Button.row">
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="BorderThickness" Value="0"/>

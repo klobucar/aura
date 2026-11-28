@@ -9,6 +9,14 @@
             <!-- Palette (handoff: Design tokens > Themes) -->
             <Color x:Key="AuraBackgroundColor">#0A0A0D</Color>
             <Color x:Key="AuraPrimaryColor">#33A1FF</Color>
+            <!-- Fluent accent (toggles, sliders, checkboxes, focus) follows the palette, not the OS. -->
+            <Color x:Key="SystemAccentColor">#33A1FF</Color>
+            <Color x:Key="SystemAccentColorLight1">#52AFFF</Color>
+            <Color x:Key="SystemAccentColorLight2">#70BDFF</Color>
+            <Color x:Key="SystemAccentColorLight3">#8FCBFF</Color>
+            <Color x:Key="SystemAccentColorDark1">#2B89D9</Color>
+            <Color x:Key="SystemAccentColorDark2">#2471B2</Color>
+            <Color x:Key="SystemAccentColorDark3">#1C598C</Color>
             <Color x:Key="AuraSecondaryColor">#8C54FF</Color>
             <Color x:Key="AuraAccentColor">#00FFC2</Color>
             <Color x:Key="AuraLushIndigoColor">#1A4DFF</Color>
@@ -48,6 +56,14 @@
             <!-- Palette (handoff: Design tokens > Themes) -->
             <Color x:Key="AuraBackgroundColor">#F5F5FA</Color>
             <Color x:Key="AuraPrimaryColor">#1A73E6</Color>
+            <!-- Fluent accent (toggles, sliders, checkboxes, focus) follows the palette, not the OS. -->
+            <Color x:Key="SystemAccentColor">#1A73E6</Color>
+            <Color x:Key="SystemAccentColorLight1">#3C88EA</Color>
+            <Color x:Key="SystemAccentColorLight2">#5F9DEE</Color>
+            <Color x:Key="SystemAccentColorLight3">#81B2F1</Color>
+            <Color x:Key="SystemAccentColorDark1">#1662C4</Color>
+            <Color x:Key="SystemAccentColorDark2">#1250A1</Color>
+            <Color x:Key="SystemAccentColorDark3">#0E3F7F</Color>
             <Color x:Key="AuraSecondaryColor">#6633CC</Color>
             <Color x:Key="AuraAccentColor">#00B380</Color>
             <Color x:Key="AuraLushIndigoColor">#3366E6</Color>

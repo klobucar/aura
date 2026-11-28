@@ -107,7 +107,7 @@
                                         <MenuItem Header="Leave server…" Command="{Binding AskLeaveServerCommand}"/>
                                     </MenuFlyout>
                                 </Button.Flyout>
-                                <TextBlock Text="⋯" FontSize="{StaticResource AuraFont13}"/>
+                                <controls:AuraIcon Data="{StaticResource AuraIconEllipsis}"/>
                             </Button>
                         </Grid>
                     </Border>
@@ -314,7 +314,7 @@
                                             Padding="6,0"
                                             Command="{Binding NewChannelCommand}"
                                             ToolTip.Tip="Create channel">
-                                        <TextBlock Text="+" FontSize="{StaticResource AuraFont14}"/>
+                                        <controls:AuraIcon Data="{StaticResource AuraIconPlus}" Width="14" Height="14"/>
                                     </Button>
                                 </StackPanel>
                             </Grid>
@@ -470,20 +470,20 @@
                                                                              Fill="{DynamicResource AuraAccentBrush}"
                                                                              IsVisible="{Binding IsSpeaking}"/>
                                                                     <!-- muted for me only -->
-                                                                    <TextBlock Text="🔇"
-                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconVolumeX}"
+                                                                               Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraWarnBrush}"
                                                                                IsVisible="{Binding IsLocallyMuted}"
                                                                                ToolTip.Tip="Muted locally"/>
                                                                     <!-- mic.slash.fill in warn (deafened implies muted) -->
-                                                                    <TextBlock Text="🎙"
-                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconMicOff}"
+                                                                               Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraWarnBrush}"
                                                                                IsVisible="{Binding ShowMuted}"
                                                                                ToolTip.Tip="Muted"/>
                                                                     <!-- key.fill in caution: key changed since first seen -->
-                                                                    <TextBlock Text="🔑"
-                                                                               FontSize="{StaticResource AuraMono9}"
+                                                                    <controls:AuraIcon Data="{StaticResource AuraIconKeyRound}"
+                                                                               Width="11" Height="11"
                                                                                Foreground="{DynamicResource AuraCautionBrush}"
                                                                                IsVisible="{Binding NeedsKeyCheck}"
                                                                                ToolTip.Tip="Key changed — verify"/>
@@ -520,8 +520,9 @@
                                 HorizontalContentAlignment="Center"
                                 ToolTip.Tip="Settings (Ctrl+, / Cmd+,)">
                             <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
-                                <TextBlock Text="⚙" FontSize="{StaticResource AuraFont12}"
-                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                <controls:AuraIcon Data="{StaticResource AuraIconSettings}" Width="14" Height="14"
+                                                  VerticalAlignment="Center"
+                                                  Foreground="{DynamicResource AuraTextDimBrush}"/>
                                 <TextBlock Text="Settings" FontSize="{StaticResource AuraFont12}"
                                            FontWeight="SemiBold"
                                            Foreground="{DynamicResource AuraTextDimBrush}"/>
@@ -646,8 +647,10 @@
                                 Command="{Binding ToggleLayoutModeCommand}"
                                 ToolTip.Tip="{Binding LayoutToggleTip}"
                                 VerticalAlignment="Center">
-                            <TextBlock Text="{Binding LayoutToggleGlyph}"
-                                       FontSize="{StaticResource AuraFont14}"/>
+                            <Panel>
+                                <controls:AuraIcon Data="{StaticResource AuraIconAudioLines}" IsVisible="{Binding IsChatFirst}"/>
+                                <controls:AuraIcon Data="{StaticResource AuraIconMessageSquare}" IsVisible="{Binding !IsChatFirst}"/>
+                            </Panel>
                         </Button>
                     </Grid>
                 </Border>
@@ -660,11 +663,17 @@
                             Background="{DynamicResource AuraDangerBrush}"
                             BorderBrush="{DynamicResource AuraDangerBrush}"
                             IsVisible="{Binding IsServerMuted}">
-                        <TextBlock Text="🔇 You are server-muted by an administrator. Other members cannot hear you."
-                                   FontSize="{StaticResource AuraFont12}"
-                                   FontWeight="SemiBold"
-                                   Foreground="White"
-                                   TextWrapping="Wrap"/>
+                        <Grid ColumnDefinitions="Auto,*">
+                            <controls:AuraIcon Grid.Column="0" Data="{StaticResource AuraIconMicOff}"
+                                               Width="14" Height="14" Margin="0,0,8,0"
+                                               VerticalAlignment="Center" Foreground="White"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="You are server-muted by an administrator. Other members cannot hear you."
+                                       FontSize="{StaticResource AuraFont12}"
+                                       FontWeight="SemiBold"
+                                       Foreground="White"
+                                       TextWrapping="Wrap"/>
+                        </Grid>
                     </Border>
                     <Border Padding="12,9"
                             CornerRadius="{StaticResource AuraRadiusTile}"
@@ -690,11 +699,9 @@
                                 Command="{Binding CancelReconnectCommand}"
                                 IsVisible="{Binding IsReconnecting}"/>
                         <Button Grid.Column="3" Classes="icon"
-                                Content="✕"
-                                FontSize="{StaticResource AuraFont12}"
                                 Command="{Binding DismissBannerCommand}"
                                 IsVisible="{Binding !IsReconnecting}"
-                                ToolTip.Tip="Dismiss"/>
+                                ToolTip.Tip="Dismiss"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                     </Grid>
                     </Border>
                 </StackPanel>
@@ -984,9 +991,8 @@
                                        TextTrimming="CharacterEllipsis"/>
                         </StackPanel>
                         <Button Grid.Column="2" Classes="icon"
-                                Content="✕"
                                 Command="{Binding CancelReplyCommand}"
-                                ToolTip.Tip="Cancel reply (Esc)"/>
+                                ToolTip.Tip="Cancel reply (Esc)"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                     </Grid>
                 </Border>
 
@@ -1004,8 +1010,8 @@
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 ToolTip.Tip="Send encrypted file (max 25 MiB)">
-                            <TextBlock Text="+" FontSize="{StaticResource AuraFont16}" FontWeight="SemiBold"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <controls:AuraIcon Data="{StaticResource AuraIconPlus}" Width="18" Height="18"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Button>
 
                         <TextBox x:Name="Composer"
@@ -1039,8 +1045,9 @@
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 ToolTip.Tip="Send (Enter)">
-                            <TextBlock Text="➤" FontSize="{StaticResource AuraFont14}" Foreground="White"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <controls:AuraIcon Data="{StaticResource AuraIconSendHorizontal}" Width="16" Height="16"
+                                               Foreground="White"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Button>
                     </Grid>
                 </Border>
@@ -1167,8 +1174,9 @@
                                          hear themselves. -->
                                     <Grid ColumnDefinitions="Auto,*,Auto"
                                           IsVisible="{Binding VoiceRail.CurrentSpeaker.CanAdjustVolume, FallbackValue=False}">
-                                        <TextBlock Grid.Column="0" Text="🔊"
-                                                   FontSize="{StaticResource AuraFont12}"
+                                        <controls:AuraIcon Grid.Column="0" Data="{StaticResource AuraIconVolume2}"
+                                                   Width="14" Height="14"
+                                                   Foreground="{DynamicResource AuraTextDimBrush}"
                                                    VerticalAlignment="Center"
                                                    Margin="0,0,8,0"/>
                                         <Slider Grid.Column="1" Minimum="0" Maximum="100"
@@ -1283,8 +1291,9 @@
                                                        Text="{Binding VoiceRail.OverflowLabel}"
                                                        FontSize="{StaticResource AuraMono9}"
                                                        Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                            <TextBlock Text="▾" FontSize="{StaticResource AuraMono9}"
-                                                       Foreground="{DynamicResource AuraTextFaintBrush}"/>
+                                            <controls:AuraIcon Data="{StaticResource AuraIconChevronDown}" Width="10" Height="10"
+                                                              VerticalAlignment="Center"
+                                                              Foreground="{DynamicResource AuraTextFaintBrush}"/>
                                         </StackPanel>
                                     </Button>
 
@@ -1384,17 +1393,19 @@
                                                 Classes="hudSegment"
                                                 Classes.on="{Binding IsMicEnabled}"
                                                 ToolTip.Tip="Microphone (Ctrl+M / Cmd+M)">
-                                            <TextBlock Text="{Binding IsMicEnabled, Converter={x:Static converters:MicIconConverter.Instance}}"
-                                                       FontSize="{StaticResource AuraFont16}"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            <Panel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                <controls:AuraIcon Data="{StaticResource AuraIconMic}" IsVisible="{Binding IsMicEnabled}"/>
+                                                <controls:AuraIcon Data="{StaticResource AuraIconMicOff}" IsVisible="{Binding !IsMicEnabled}"/>
+                                            </Panel>
                                         </Button>
                                         <Button Command="{Binding ToggleDeafenCommand}"
                                                 Classes="hudSegment"
                                                 Classes.on="{Binding IsDeafened}"
                                                 ToolTip.Tip="Deafen (Ctrl+D / Cmd+D)">
-                                            <TextBlock Text="{Binding IsDeafened, Converter={x:Static converters:DeafenIconConverter.Instance}}"
-                                                       FontSize="{StaticResource AuraFont16}"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            <Panel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                <controls:AuraIcon Data="{StaticResource AuraIconHeadphoneOff}" IsVisible="{Binding IsDeafened}"/>
+                                                <controls:AuraIcon Data="{StaticResource AuraIconHeadphones}" IsVisible="{Binding !IsDeafened}"/>
+                                            </Panel>
                                         </Button>
                                     </StackPanel>
                                 </Border>
@@ -1468,7 +1479,7 @@
              scrim also swallows clicks, so the sheet is modal without a dialog.
              ================================================================ -->
         <Border IsVisible="{Binding TrustSheet.IsOpen}"
-                Background="#99000000">
+                Classes="scrim">
             <Border Width="560"
                     MaxHeight="720"
                     VerticalAlignment="Center"
@@ -1487,8 +1498,7 @@
                             <Button Grid.Column="1"
                                     Classes="icon"
                                     Command="{Binding TrustSheet.CloseCommand}"
-                                    Content="✕"
-                                    ToolTip.Tip="Close (Esc)"/>
+                                    ToolTip.Tip="Close (Esc)"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                         </Grid>
 
                         <TextBlock FontSize="{StaticResource AuraFont14}"
@@ -1694,7 +1704,7 @@
              trust sheet: a searchable member table on the left, the selected
              member's actions on the right.
              ================================================================ -->
-        <Border IsVisible="{Binding Moderation.IsOpen}" Background="#99000000">
+        <Border IsVisible="{Binding Moderation.IsOpen}" Classes="scrim">
             <!-- 600 high when there is room, less when the window is shorter:
                  stretched within a margin and capped, which also centres it. -->
             <Border Width="900"
@@ -1713,10 +1723,10 @@
                                        Foreground="{DynamicResource AuraTextDimBrush}"/>
                             <TextBlock Text="Server members" Classes="title"/>
                         </StackPanel>
-                        <Button Grid.Column="1" Classes="icon" Content="✕"
+                        <Button Grid.Column="1" Classes="icon"
                                 Command="{Binding Moderation.CloseCommand}"
                                 VerticalAlignment="Top"
-                                ToolTip.Tip="Close (Esc)"/>
+                                ToolTip.Tip="Close (Esc)"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                     </Grid>
 
                     <Grid ColumnDefinitions="*,16,300">
@@ -2008,7 +2018,7 @@
              Settings sheet. Same scrim-over-the-room pattern as the trust
              sheet; replaces the panel that used to squeeze into the roster.
              ================================================================ -->
-        <Border IsVisible="{Binding ShowSettings}" Background="#99000000">
+        <Border IsVisible="{Binding ShowSettings}" Classes="scrim">
             <Border Width="520" MaxHeight="720"
                     VerticalAlignment="Center" HorizontalAlignment="Center"
                     Classes="sheet"
@@ -2016,11 +2026,12 @@
                 <DockPanel>
                     <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
                         <TextBlock Grid.Column="0" Classes="title" Text="Settings" VerticalAlignment="Center"/>
-                        <Button Grid.Column="1" Classes="icon" Content="✕"
-                                Command="{Binding ToggleSettingsCommand}" ToolTip.Tip="Close (Esc)"/>
+                        <Button Grid.Column="1" Classes="icon"
+                                Command="{Binding ToggleSettingsCommand}" ToolTip.Tip="Close (Esc)"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                     </Grid>
                     <ScrollViewer HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel Spacing="{StaticResource AuraSpace12}">
+                        <!-- Right margin: Fluent scrollbars overlay content and would cover the controls' edges. -->
+                        <StackPanel Spacing="{StaticResource AuraSpace12}" Margin="0,0,14,0">
 
                             <TextBlock Classes="monoLabel" Text="APPEARANCE"/>
                             <Grid ColumnDefinitions="*,*" >
@@ -2078,10 +2089,26 @@
 
                             <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
                             <TextBlock Classes="monoLabel" Text="PROCESSING"/>
-                            <ToggleSwitch IsChecked="{Binding RnnoiseEnabled}" Content="RNNoise suppression" OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding AecEnabled}" Content="Echo cancellation" OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding WebrtcNsEnabled}" Content="WebRTC noise suppression" OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding AgcEnabled}" Content="Auto gain control" OnContent="" OffContent=""/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="RNNoise suppression"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding RnnoiseEnabled}"
+                                              AutomationProperties.Name="RNNoise suppression"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Echo cancellation"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding AecEnabled}"
+                                              AutomationProperties.Name="Echo cancellation"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="WebRTC noise suppression"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding WebrtcNsEnabled}"
+                                              AutomationProperties.Name="WebRTC noise suppression"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Auto gain control"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding AgcEnabled}"
+                                              AutomationProperties.Name="Auto gain control"/>
+                            </Grid>
 
                             <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
                             <TextBlock Classes="monoLabel" Text="OUTPUT"/>
@@ -2155,12 +2182,16 @@
                                           ItemsSource="{Binding BitrateOptions}"
                                           SelectedIndex="{Binding BitrateIndex}"/>
                             </Grid>
-                            <ToggleSwitch IsChecked="{Binding VoiceSoundCuesEnabled}"
-                                          Content="Voice Sound Cues"
-                                          OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding IsMicLoopbackActive}"
-                                          Content="Test Mic (Loopback)"
-                                          OnContent="" OffContent=""/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Voice Sound Cues"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding VoiceSoundCuesEnabled}"
+                                              AutomationProperties.Name="Voice Sound Cues"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Test Mic (Loopback)"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding IsMicLoopbackActive}"
+                                              AutomationProperties.Name="Test Mic (Loopback)"/>
+                            </Grid>
                             <ProgressBar Minimum="0" Maximum="100"
                                          Value="{Binding LoopbackLevel}"
                                          Height="6"
@@ -2184,9 +2215,21 @@
                                 <TextBox Classes="aura" Text="{Binding NotifyKeywords}"
                                          PlaceholderText="raid, standup, deploy"/>
                             </StackPanel>
-                            <ToggleSwitch IsChecked="{Binding NotifyShowText}" Content="Show message text in banners" OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding NotifyBadge}" Content="Count mentions on the app icon" OnContent="" OffContent=""/>
-                            <ToggleSwitch IsChecked="{Binding NotifyJoinLeave}" Content="Join and leave banners" OnContent="" OffContent=""/>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Show message text in banners"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding NotifyShowText}"
+                                              AutomationProperties.Name="Show message text in banners"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Count mentions on the app icon"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding NotifyBadge}"
+                                              AutomationProperties.Name="Count mentions on the app icon"/>
+                            </Grid>
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0" Classes="settingLabel" Text="Join and leave banners"/>
+                                <ToggleSwitch Grid.Column="1" Classes="settingSwitch" IsChecked="{Binding NotifyJoinLeave}"
+                                              AutomationProperties.Name="Join and leave banners"/>
+                            </Grid>
 
                             <Separator Background="{DynamicResource AuraDividerBrush}" Height="1"/>
                             <TextBlock Classes="monoLabel" Text="IDENTITY"/>
@@ -2283,7 +2326,7 @@
         <!-- ================================================================
              Profile / comment card (§6). Click any roster name.
              ================================================================ -->
-        <Border IsVisible="{Binding ProfileCard.IsOpen}" Background="#99000000">
+        <Border IsVisible="{Binding ProfileCard.IsOpen}" Classes="scrim">
             <Border Width="330"
                     VerticalAlignment="Center" HorizontalAlignment="Center"
                     Classes="sheet"
@@ -2317,9 +2360,9 @@
                                            Foreground="{Binding ProfileCard.IsVerified, Converter={x:Static converters:VerifiedPillTextConverter.Instance}}"/>
                             </Border>
                         </StackPanel>
-                        <Button Grid.Column="2" Classes="icon" Content="✕" VerticalAlignment="Top"
+                        <Button Grid.Column="2" Classes="icon" VerticalAlignment="Top"
                                 Command="{Binding ProfileCard.CloseCommand}"
-                                ToolTip.Tip="Close (Esc)"/>
+                                ToolTip.Tip="Close (Esc)"><controls:AuraIcon Data="{StaticResource AuraIconX}" Width="14" Height="14"/></Button>
                     </Grid>
 
                     <SelectableTextBlock Classes="mono" Text="{Binding ProfileCard.FingerprintOrHint}"
@@ -2416,7 +2459,7 @@
         <!-- ================================================================
              Channel editor (admin): create / edit / delete.
              ================================================================ -->
-        <Border IsVisible="{Binding ChannelEditor.IsOpen}" Background="#99000000">
+        <Border IsVisible="{Binding ChannelEditor.IsOpen}" Classes="scrim">
             <Border Width="400"
                     VerticalAlignment="Center" HorizontalAlignment="Center"
                     Classes="sheet"
@@ -2465,7 +2508,7 @@
         <!-- ================================================================
              Leave server: destructive confirm.
              ================================================================ -->
-        <Border IsVisible="{Binding ShowLeaveConfirm}" Background="#99000000">
+        <Border IsVisible="{Binding ShowLeaveConfirm}" Classes="scrim">
             <Border Width="420"
                     VerticalAlignment="Center" HorizontalAlignment="Center"
                     Classes="sheet"
@@ -2495,7 +2538,7 @@
         <!-- ================================================================
              Restore identity: confirm before replacing the identity file.
              ================================================================ -->
-        <Border IsVisible="{Binding ShowRestoreConfirm}" Background="#99000000">
+        <Border IsVisible="{Binding ShowRestoreConfirm}" Classes="scrim">
             <Border Width="440"
                     VerticalAlignment="Center" HorizontalAlignment="Center"
                     Classes="sheet"
