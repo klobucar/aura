@@ -1,4 +1,5 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Security.Authentication;
 using System.Threading.Tasks;
@@ -43,6 +44,67 @@ public partial class MainWindowViewModel
 
     /// <summary>Join a channel when the first snapshot after login arrives.</summary>
     private bool _autoJoinPending;
+
+    /// <summary>Saved server bookmarks loaded from servers.json.</summary>
+    public ObservableCollection<ServerBookmark> SavedServers { get; } = new();
+
+    public bool HasSavedServers => SavedServers.Count > 0;
+
+    [ObservableProperty] private string _bookmarkName = "";
+
+    private readonly System.Collections.Generic.Dictionary<string, (UserPresence? Presence, string? CustomStatus, bool IsServerMuted)> _userStatusCache = new();
+
+    private void LoadSavedServers()
+    {
+        SavedServers.Clear();
+        foreach (var bookmark in AppSettings.LoadSavedServers())
+        {
+            SavedServers.Add(bookmark);
+        }
+        OnPropertyChanged(nameof(HasSavedServers));
+    }
+
+    [RelayCommand]
+    private void SaveCurrentServer()
+    {
+        var host = ServerAddress.Trim();
+        if (string.IsNullOrEmpty(host))
+        {
+            ShowBanner("Enter a server address before saving.", isError: true);
+            return;
+        }
+
+        var port = ServerPort is > 0 and < 65536 ? ServerPort : 8443;
+        var bookmark = new ServerBookmark
+        {
+            Name = string.IsNullOrWhiteSpace(BookmarkName) ? host : BookmarkName.Trim(),
+            Host = host,
+            Port = port,
+        };
+        AppSettings.UpsertSavedServer(SavedServers, bookmark);
+        AppSettings.SaveSavedServers(SavedServers);
+        BookmarkName = "";
+        OnPropertyChanged(nameof(HasSavedServers));
+    }
+
+    [RelayCommand]
+    private void SelectSavedServer(ServerBookmark? bookmark)
+    {
+        if (bookmark == null) return;
+        ServerAddress = bookmark.Host;
+        ServerPort = bookmark.Port is > 0 and < 65536 ? bookmark.Port : 8443;
+    }
+
+    [RelayCommand]
+    private void RemoveSavedServer(ServerBookmark? bookmark)
+    {
+        if (bookmark == null) return;
+        if (SavedServers.Remove(bookmark))
+        {
+            AppSettings.SaveSavedServers(SavedServers);
+            OnPropertyChanged(nameof(HasSavedServers));
+        }
+    }
 
     private void ShowBanner(string text, bool isError)
     {
@@ -181,8 +243,9 @@ public partial class MainWindowViewModel
             _settings.LastServerPort = port;
             SaveSettings();
 
-            // Deafen survives a reconnect; tell the server so others see it.
-            if (IsDeafened) await client.UpdateStatusAsync(true, true);
+            // Send initial mute/deafen/presence/custom status so others see it immediately.
+            await client.UpdateStatusAsync(!IsMicEnabled, IsDeafened, CurrentPresenceStatus, CustomStatus);
+            if (IsAdmin) _ = RefreshUserInfoFromServerAsync();
             return true;
         }
         catch (Exception ex) when (FindInner<CertificateMismatchException>(ex) != null)
@@ -295,7 +358,8 @@ public partial class MainWindowViewModel
             Ui(() => HandleFileAnnouncement(mid, sid, cid, caption, reply, manifest));
         client.OnFileTransferUpdated += (cid, fileIdHex, status, localPath) =>
             Ui(() => HandleFileTransferUpdated(cid, fileIdHex, status, localPath));
-        client.OnUserStatusUpdated += (sid, muted, deafened) => Ui(() => HandleUserStatusUpdate(sid, muted, deafened));
+        client.OnUserStatusUpdated += (sid, muted, deafened, presence, customStatus) =>
+            Ui(() => HandleUserStatusUpdate(sid, muted, deafened, presence, customStatus));
         client.OnChannelDeleted += removal => Ui(() => _ = HandleChannelDeletedAsync(removal));
         client.OnBanned += () => Ui(() => _ = HandleBannedAsync());
         client.OnProfileUpdated += profile => Ui(() => HandleProfileUpdated(profile));
@@ -346,9 +410,14 @@ public partial class MainWindowViewModel
     [RelayCommand]
     private async Task DisconnectAsync()
     {
+        var wasAuthenticated = IsAuthenticated;
         CancelReconnectInternal();
         _rejoinChannelId = null;
         await DisconnectInternalAsync();
+        if (wasAuthenticated && VoiceSoundCuesEnabled)
+        {
+            VoiceSoundCues.Play(null, _audioEngine, VoiceSoundCues.CueKind.Leave);
+        }
         ConnectionStatus = "Disconnected";
         BannerText = "";
     }
@@ -358,6 +427,7 @@ public partial class MainWindowViewModel
         await EndPushToTalkAsync();
         StopMic();
         IsMicEnabled = false;
+        IsServerMuted = false;
 
         var client = _client;
         _client = null;
@@ -369,6 +439,7 @@ public partial class MainWindowViewModel
         _autoJoinPending = false;
         SelectedChannel = null;
         Channels.Clear();
+        _userStatusCache.Clear();
         _talkStore.Clear();
         VoiceRail.Rebuild(BuildParticipants(), _talkStore);
         EpochLabel = "";
@@ -499,6 +570,7 @@ public partial class MainWindowViewModel
             channel.IsExpanded = true;
             PlaceSelf(channel.Id);
             await _client.JoinChannelAsync(channel.Id);
+            if (VoiceSoundCuesEnabled) VoiceSoundCues.Play(_audioManager, _audioEngine, VoiceSoundCues.CueKind.Join);
             AddNotice(channel.Id, $"Joined #{channel.Name}");
         }
         catch (Exception ex)
@@ -556,12 +628,71 @@ public partial class MainWindowViewModel
         ShowBanner(ModerationLogic.BannedNotice, isError: true);
     }
 
-    private void HandleUserStatusUpdate(uint sessionId, bool isMuted, bool isDeafened)
+    private void HandleUserStatusUpdate(
+        uint sessionId,
+        bool isMuted,
+        bool isDeafened,
+        UserPresence? presence,
+        string? customStatus)
     {
+        if (_client?.UuidForSession(sessionId) is { } uuid)
+        {
+            _userStatusCache.TryGetValue(uuid, out var prev);
+            _userStatusCache[uuid] = (presence ?? prev.Presence, customStatus ?? prev.CustomStatus, prev.IsServerMuted);
+        }
+
         var user = Channels.SelectMany(c => c.Users).FirstOrDefault(u => !u.IsSelf && u.Id == sessionId);
         if (user == null) return;
         user.IsMuted = isMuted;
         user.IsDeafened = isDeafened;
+        if (presence.HasValue) user.Presence = presence.Value;
+        if (customStatus != null) user.CustomStatus = customStatus;
+    }
+
+    private async Task RefreshUserInfoFromServerAsync()
+    {
+        var client = _client;
+        if (client == null || !IsAdmin) return;
+        try
+        {
+            var resp = await client.ListUsersAsync(0, 500);
+            if (!resp.Success || !ReferenceEquals(_client, client)) return;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!ReferenceEquals(_client, client)) return;
+                foreach (var info in resp.Users)
+                {
+                    UserPresence? presence = info.HasPresence
+                        ? info.Presence switch
+                        {
+                            Aura.V1Alpha1.PresenceStatus.PresenceIdle => UserPresence.Idle,
+                            Aura.V1Alpha1.PresenceStatus.PresenceDnd => UserPresence.Dnd,
+                            _ => UserPresence.Online,
+                        }
+                        : null;
+                    var customStatus = info.HasCustomStatus ? info.CustomStatus : null;
+                    _userStatusCache[info.UserUuid] = (presence, customStatus, info.IsServerMuted);
+
+                    if (info.UserUuid == client.UserUuid)
+                    {
+                        IsServerMuted = info.IsServerMuted;
+                        UpdateSelfRow();
+                        continue;
+                    }
+
+                    foreach (var u in Channels.SelectMany(c => c.Users).Where(u => !u.IsSelf && client.UuidForSession(u.Id) == info.UserUuid))
+                    {
+                        if (presence.HasValue) u.Presence = presence.Value;
+                        if (customStatus != null) u.CustomStatus = customStatus;
+                        u.IsServerMuted = info.IsServerMuted;
+                    }
+                }
+            });
+        }
+        catch
+        {
+            // Non-critical enrichment for admin roster metadata.
+        }
     }
 
     private void HandleUserJoined(string channelId, uint sessionId, string name)
@@ -579,12 +710,22 @@ public partial class MainWindowViewModel
         if (channel.Users.Any(u => !u.IsSelf && u.Id == sessionId)) return;
 
         var joined = NewUser(sessionId, name, "");
-        joined.Avatar = _avatars.Get(_client?.UuidForSession(sessionId));
+        var uuid = _client?.UuidForSession(sessionId);
+        joined.Avatar = _avatars.Get(uuid);
+        if (uuid != null && _userStatusCache.TryGetValue(uuid, out var cached))
+        {
+            if (cached.Presence.HasValue) joined.Presence = cached.Presence.Value;
+            if (cached.CustomStatus != null) joined.CustomStatus = cached.CustomStatus;
+            joined.IsServerMuted = cached.IsServerMuted;
+        }
         channel.Users.Add(joined);
         OnPropertyChanged(nameof(RosterLabel));
         _moderation?.RefreshPresence();
         AddNotice(channelId, $"{name} joined");
-        if (channelId == SelectedChannel?.Id) NotifyForPresence($"{name} joined {channel.Name}");
+        if (channelId == SelectedChannel?.Id)
+        {
+            NotifyForPresence($"{name} joined {channel.Name}");
+        }
     }
 
     private void HandleUserLeft(string channelId, uint sessionId)
@@ -598,7 +739,10 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(RosterLabel));
         _moderation?.RefreshPresence();
         AddNotice(channelId, $"{user.Name} left");
-        if (channelId == SelectedChannel?.Id) NotifyForPresence($"{user.Name} left {channel.Name}");
+        if (channelId == SelectedChannel?.Id)
+        {
+            NotifyForPresence($"{user.Name} left {channel.Name}");
+        }
         if (ProfileCard.IsOpen && ProfileCard.SessionId == sessionId) ProfileCard.Close();
     }
 
@@ -635,6 +779,12 @@ public partial class MainWindowViewModel
                 user.Avatar = _avatars.Get(status.UserUuid);
                 user.IsMuted = status.IsMuted;
                 user.IsDeafened = status.IsDeafened;
+                if (_userStatusCache.TryGetValue(status.UserUuid, out var cached))
+                {
+                    if (cached.Presence.HasValue) user.Presence = cached.Presence.Value;
+                    if (cached.CustomStatus != null) user.CustomStatus = cached.CustomStatus;
+                    user.IsServerMuted = cached.IsServerMuted;
+                }
                 channel.Users.Add(user);
             }
             Channels.Add(channel);

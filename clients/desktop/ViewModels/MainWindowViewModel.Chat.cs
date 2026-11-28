@@ -263,7 +263,10 @@ public partial class MainWindowViewModel
             IsMention = IsMentionForMe(content),
         });
 
-        if (_history.Add(message)) NotifyForMessage(message);
+        if (_history.Add(message))
+        {
+            NotifyForMessage(message);
+        }
     }
 
     private void HandleFileAnnouncement(
@@ -297,7 +300,10 @@ public partial class MainWindowViewModel
             AttachmentStatus = "Receiving…",
         });
 
-        if (_history.Add(message)) NotifyForMessage(message);
+        if (_history.Add(message))
+        {
+            NotifyForMessage(message);
+        }
     }
 
     private void HandleFileTransferUpdated(string channelId, string fileIdHex, string status, string? localPath)

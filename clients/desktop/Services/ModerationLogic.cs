@@ -6,6 +6,7 @@ using System.Net.Quic;
 using System.Threading;
 using System.Threading.Tasks;
 using Aura.V1Alpha1;
+using uniffi.aura_core;
 
 namespace Aura.Desktop.Services;
 
@@ -36,13 +37,24 @@ public sealed record OnlinePresence(string ChannelId, string ChannelName, bool I
 
 /// <summary>One account as the console sees it: the server's UserInfo plus where they are online.</summary>
 public sealed record ModMember(
-    string Uuid, string Name, bool Verified, bool Banned, bool IsAdmin, long CreatedAt, OnlinePresence? Presence)
+    string Uuid, string Name, bool Verified, bool Banned, bool IsAdmin, long CreatedAt, OnlinePresence? Presence,
+    UserPresence? PresenceStatus = null, string? CustomStatus = null, bool IsServerMuted = false)
 {
     public bool IsOnline => Presence != null;
 
     public static ModMember From(UserInfo info, IReadOnlyDictionary<string, OnlinePresence> online) =>
         new(info.UserUuid, info.DisplayName, info.Verified, info.Banned, info.IsAdmin, info.CreatedAt,
-            online.TryGetValue(info.UserUuid, out var p) ? p : null);
+            online.TryGetValue(info.UserUuid, out var p) ? p : null,
+            info.HasPresence
+                ? info.Presence switch
+                {
+                    Aura.V1Alpha1.PresenceStatus.PresenceIdle => UserPresence.Idle,
+                    Aura.V1Alpha1.PresenceStatus.PresenceDnd => UserPresence.Dnd,
+                    _ => UserPresence.Online,
+                }
+                : null,
+            info.HasCustomStatus ? info.CustomStatus : null,
+            info.IsServerMuted);
 }
 
 /// <summary>The STANDING badge. A ban outranks everything, then admin.</summary>

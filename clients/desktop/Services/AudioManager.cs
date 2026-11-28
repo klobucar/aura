@@ -33,8 +33,11 @@ public class AudioManager : IDisposable
     private bool _agc = true;
     private int _dredFrames = 10;
     private uint _jitterMs = 40;
+    private int _opusBitrateKbps = 64;
     private bool _vadEnabled;
     private float _vadThresholdDb = -35f;
+    private readonly Queue<short> _cueSamples = new();
+    private readonly object _cueLock = new();
 
     /// <summary>
     /// Event fired when active speakers change (for UI indicators).
@@ -93,6 +96,7 @@ public class AudioManager : IDisposable
             _sender.SetNoiseSuppressionEnabled(_noiseSuppression && !_webrtcNs);
             _sender.SetVadThresholdDb(_vadThresholdDb);
             _sender.SetVadEnabled(_vadEnabled);
+            _sender.SetBitrate((uint)(_opusBitrateKbps * 1000));
         }
         _receiver?.SetJitterBufferMs(_jitterMs);
     }
@@ -215,24 +219,57 @@ public class AudioManager : IDisposable
         _receiver?.NoteLegacyPacket(data);
     }
 
+    /// <summary>Queue a short PCM cue to be mixed into the next 20ms playback frames.</summary>
+    public void EnqueueSoundCue(short[] samples)
+    {
+        if (samples.Length == 0) return;
+        lock (_cueLock)
+        {
+            foreach (var s in samples) _cueSamples.Enqueue(s);
+        }
+    }
+
     /// <summary>
     /// Pop mixed audio for playback, returns PCM samples
-    /// Also updates active speaker tracking
+    /// Also updates active speaker tracking and mixes any queued sound cues.
     /// </summary>
     public short[]? PopMixed()
     {
         var result = _receiver?.PopMixed();
-        if (result == null) return null;
-
-        // Check if speakers changed
-        var newSpeakers = new HashSet<uint>(result.ActiveSpeakers);
-        if (!newSpeakers.SetEquals(_lastActiveSpeakers))
+        if (result != null)
         {
-            _lastActiveSpeakers = newSpeakers;
-            OnActiveSpeakersChanged?.Invoke(newSpeakers);
+            // Check if speakers changed
+            var newSpeakers = new HashSet<uint>(result.ActiveSpeakers);
+            if (!newSpeakers.SetEquals(_lastActiveSpeakers))
+            {
+                _lastActiveSpeakers = newSpeakers;
+                OnActiveSpeakersChanged?.Invoke(newSpeakers);
+            }
         }
 
-        return result.Pcm;
+        var pcm = result?.Pcm;
+        lock (_cueLock)
+        {
+            if (_cueSamples.Count == 0) return pcm;
+
+            const int frameSize = 960; // 20ms at 48kHz
+            if (pcm == null || pcm.Length == 0)
+            {
+                var count = Math.Min(frameSize, _cueSamples.Count);
+                var cueFrame = new short[count];
+                for (int i = 0; i < count; i++) cueFrame[i] = _cueSamples.Dequeue();
+                return cueFrame;
+            }
+
+            var mixed = new short[pcm.Length];
+            for (int i = 0; i < pcm.Length; i++)
+            {
+                int sample = pcm[i];
+                if (_cueSamples.Count > 0) sample += _cueSamples.Dequeue();
+                mixed[i] = (short)Math.Clamp(sample, short.MinValue, short.MaxValue);
+            }
+            return mixed;
+        }
     }
 
     // Settings API
@@ -275,6 +312,21 @@ public class AudioManager : IDisposable
         _receiver?.SetJitterBufferMs(ms);
     }
 
+    /// <summary>Set Opus encoder bitrate in kbps (clamped to 12–128 kbps).</summary>
+    public void SetOpusBitrate(int kbps)
+    {
+        _opusBitrateKbps = Math.Clamp(kbps, 12, 128);
+        _sender?.SetBitrate((uint)(_opusBitrateKbps * 1000));
+    }
+
+    /// <summary>Poll receiver call quality stats from AudioReceiverWrapper.</summary>
+    public CallQualityStats? GetReceiverStats()
+    {
+        if (_receiver == null) return null;
+        var s = _receiver.GetStats();
+        return new CallQualityStats(s.PacketsReceived, s.PacketsLost, s.PlcCount, s.EstimatedJitterMs);
+    }
+
     /// <summary>
     /// Voice-activity gate. On, silent frames produce no packet at all (and the
     /// sequence number holds), which is what "voice activity" transmission means.
@@ -298,5 +350,78 @@ public class AudioManager : IDisposable
         _hasGroupKey = false;
         _sender = null;
         _receiver = null;
+    }
+}
+
+/// <summary>Snapshot of receiver call quality metrics.</summary>
+public sealed record CallQualityStats(
+    ulong PacketsReceived,
+    ulong PacketsLost,
+    ulong PlcCount,
+    double JitterMs)
+{
+    public double LossPercent
+    {
+        get
+        {
+            var total = PacketsReceived + PacketsLost;
+            return total == 0 ? 0.0 : (PacketsLost * 100.0) / total;
+        }
+    }
+
+    public string FormatSummary() =>
+        $"Loss: {LossPercent:0.0}% ({PacketsLost} lost) · PLC: {PlcCount} · Jitter: {JitterMs:0.0} ms";
+}
+
+/// <summary>
+/// Generates subtle, non-blocking synthesized PCM audio cues for voice events
+/// (mute, unmute, join, leave), mixing into <see cref="AudioManager"/> frames
+/// during a call or playing via <see cref="RustAudioEngine"/> on disconnect.
+/// </summary>
+public static class VoiceSoundCues
+{
+    public enum CueKind { Mute, Unmute, Join, Leave }
+
+    public static void Play(AudioManager? audioManager, RustAudioEngine? engine, CueKind kind)
+    {
+        if (engine is { OutputMuted: true }) return;
+        var samples = Synthesize(kind);
+        if (audioManager is { IsInitialized: true })
+        {
+            audioManager.EnqueueSoundCue(samples);
+            return;
+        }
+        if (engine != null)
+        {
+            _ = System.Threading.Tasks.Task.Run(() => engine.PlayAudio(samples));
+        }
+    }
+
+    public static short[] Synthesize(CueKind kind)
+    {
+        const int sampleRate = 48000;
+        var (f1, f2) = kind switch
+        {
+            CueKind.Mute => (520.0, 390.0),
+            CueKind.Unmute => (390.0, 560.0),
+            CueKind.Join => (440.0, 660.0),
+            CueKind.Leave => (587.0, 392.0),
+            _ => (440.0, 440.0),
+        };
+
+        const int halfSamples = sampleRate * 35 / 1000; // 35ms per tone = 70ms total
+        var pcm = new short[halfSamples * 2];
+        const double amp = 2200.0; // subtle, ~ -23 dBFS
+
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            bool second = i >= halfSamples;
+            int localIdx = second ? i - halfSamples : i;
+            double freq = second ? f2 : f1;
+            double env = Math.Sin(Math.PI * localIdx / halfSamples);
+            double t = (double)localIdx / sampleRate;
+            pcm[i] = (short)(Math.Sin(2.0 * Math.PI * freq * t) * env * amp);
+        }
+        return pcm;
     }
 }

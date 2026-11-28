@@ -32,6 +32,7 @@ public enum MdBlockKind
     Paragraph,
     Bullet,
     Quote,
+    CodeBlock,
 }
 
 /// <summary>A line-level block for comment cards: paragraph, bullet, or quote.</summary>
@@ -80,11 +81,37 @@ public static class InlineMarkdown
         var blocks = new List<MdBlock>();
         if (string.IsNullOrEmpty(text)) return blocks;
 
-        foreach (var raw in text.Replace("\r\n", "\n").Split('\n'))
+        var lines = text.Replace("\r\n", "\n").Split('\n');
+        for (int i = 0; i < lines.Length; i++)
         {
-            var line = raw.TrimEnd();
+            var line = lines[i].TrimEnd();
             var trimmed = line.TrimStart();
             if (trimmed.Length == 0) continue;
+
+            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            {
+                var tag = trimmed[3..].Trim();
+                var codeLines = new List<string>();
+                if (tag.Length > 0 && !IsLanguageTag(tag))
+                {
+                    codeLines.Add(trimmed[3..]);
+                }
+                int j = i + 1;
+                for (; j < lines.Length; j++)
+                {
+                    if (lines[j].TrimStart().StartsWith("```", StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+                    codeLines.Add(lines[j]);
+                }
+                blocks.Add(new MdBlock(MdBlockKind.CodeBlock, new[]
+                {
+                    new MdSpan(string.Join("\n", codeLines), MdStyle.Code),
+                }));
+                i = j;
+                continue;
+            }
 
             if (trimmed.StartsWith("- ") || trimmed.StartsWith("* "))
             {
@@ -140,6 +167,34 @@ public static class InlineMarkdown
             {
                 buffer.Append(s[i + 1]);
                 i += 2;
+                continue;
+            }
+
+            // Fenced code block: ```[lang]\n...\n``` (or unterminated to EOF) — contents are literal, no nested parsing.
+            if (c == '`' && i + 2 < end && s[i + 1] == '`' && s[i + 2] == '`')
+            {
+                int close = s.IndexOf("```", i + 3, end - (i + 3), StringComparison.Ordinal);
+                bool terminated = close >= i + 3;
+                int contentEnd = terminated ? close : end;
+                int bodyStart = i + 3;
+                int nl = s.IndexOf('\n', bodyStart, contentEnd - bodyStart);
+                if (nl >= bodyStart)
+                {
+                    var firstLine = s.Substring(bodyStart, nl - bodyStart).TrimEnd('\r');
+                    if (firstLine.Length == 0 || IsLanguageTag(firstLine))
+                    {
+                        bodyStart = nl + 1;
+                    }
+                }
+                int bodyEnd = contentEnd;
+                if (bodyEnd > bodyStart && s[bodyEnd - 1] == '\n')
+                {
+                    bodyEnd--;
+                    if (bodyEnd > bodyStart && s[bodyEnd - 1] == '\r') bodyEnd--;
+                }
+                Flush();
+                output.Add(new MdSpan(s.Substring(bodyStart, bodyEnd - bodyStart), style | MdStyle.Code, link));
+                i = terminated ? close + 3 : end;
                 continue;
             }
 
@@ -273,6 +328,16 @@ public static class InlineMarkdown
         labelEnd = close;
         target = candidate;
         after = targetEnd + 1;
+        return true;
+    }
+
+    private static bool IsLanguageTag(string token)
+    {
+        if (token.Length == 0) return false;
+        foreach (char c in token)
+        {
+            if (!char.IsLetterOrDigit(c) && c != '_') return false;
+        }
         return true;
     }
 
