@@ -93,6 +93,10 @@ const MAX_MLS_PACKET_SIZE: usize = 1024 * 1024;
 /// Upper bound on a login request. A real one is about 5.5 KB: a 1,984-byte
 /// identity key, a 3,373-byte signature, the challenge, name and password.
 const MAX_AUTH_REQUEST_SIZE: usize = 16 * 1024;
+/// QUIC's base UDP payload size: every path must carry it, and it is what the
+/// server holds both directions to when `server.mtu_discovery` is off.
+const BASE_UDP_PAYLOAD_SIZE: u16 = 1200;
+
 // Hard ceiling on how long a single control frame body may take to arrive.
 // Prevents drip-feed (Slowloris-style) attacks that stay under the byte cap.
 const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,14 +142,27 @@ impl QuicServer {
         };
 
         let mut server_config = server_config;
+        let mut endpoint_config = quinn::EndpointConfig::default();
         if !state.config.server.mtu_discovery {
-            info!("Path MTU discovery disabled; packets stay at 1200 bytes");
+            info!("Path MTU discovery disabled; packets stay at 1200 bytes in both directions");
             server_config.transport_config(Arc::new(Self::transport_config(false)?));
+            // Our own packets are capped by the transport config above. This
+            // caps the peer's: it is the max_udp_payload_size we advertise,
+            // and a client may not send, or probe with, anything larger. The
+            // default (1472) invites exactly the oversized packets this
+            // setting exists to keep off the path.
+            endpoint_config
+                .max_udp_payload_size(BASE_UDP_PAYLOAD_SIZE)
+                .map_err(|e| anyhow!("Invalid max UDP payload size: {}", e))?;
         }
 
         info!("Creating QUIC endpoint on {}...", bind_addr);
-        let endpoint = Endpoint::server(server_config, bind_addr)
+        let socket = std::net::UdpSocket::bind(bind_addr)
             .map_err(|e| anyhow!("Failed to bind QUIC endpoint to {}: {}", bind_addr, e))?;
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| anyhow!("No async runtime for the QUIC endpoint"))?;
+        let endpoint = Endpoint::new(endpoint_config, Some(server_config), socket, runtime)
+            .map_err(|e| anyhow!("Failed to create QUIC endpoint on {}: {}", bind_addr, e))?;
 
         let local_addr = endpoint
             .local_addr()
