@@ -529,6 +529,18 @@ impl AudioHardware {
         Ok(())
     }
 
+    /// Start the output stream. Without this (or `start`) everything
+    /// written with `write_playback` is queued and silence is played.
+    pub fn start_playback(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.start_playback().map_err(map_audio_io_error)
+    }
+
+    pub fn stop_playback(&self) -> Result<(), AudioError> {
+        let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
+        device.stop_playback().map_err(map_audio_io_error)
+    }
+
     pub fn start_capture(&self) -> Result<(), AudioError> {
         let device = self.device.lock().map_err(|_| AudioError::OpusError)?;
         device.start_capture().map_err(|_| AudioError::OpusError)?;

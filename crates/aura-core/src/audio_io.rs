@@ -381,6 +381,17 @@ impl AudioDevice {
             .map_err(|_| AudioError::Stream("Playback channel closed".into()))
     }
 
+    /// Start playback only. Until this (or `start`) is called the output
+    /// stream plays silence and frames sent to it queue up.
+    pub fn start_playback(&self) -> Result<(), AudioError> {
+        self.playback.start()
+    }
+
+    /// Stop playback only.
+    pub fn stop_playback(&self) -> Result<(), AudioError> {
+        self.playback.stop()
+    }
+
     /// Start capture only (for push-to-talk)
     pub fn start_capture(&self) -> Result<(), AudioError> {
         self.capture.start()
