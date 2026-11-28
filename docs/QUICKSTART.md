@@ -10,7 +10,7 @@ Install stable Rust and the Protocol Buffers compiler (`protoc`).
 
 - On macOS, run `brew install protobuf`. If Cargo cannot find it, set `PROTOC` to the path returned by `command -v protoc`.
 - On Debian or Ubuntu, install `protobuf-compiler`, `libasound2-dev`, and `pkg-config`.
-- For the native macOS app, use Xcode on macOS 14 or later.
+- For the native macOS app, use Xcode on macOS 15 or later.
 - For the desktop app, install the .NET 10 SDK. Windows requires Windows 11 or Windows Server 2022 or later. Linux requires `libmsquic` 2.2 or later.
 
 ## 1. Start the server

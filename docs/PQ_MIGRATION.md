@@ -46,7 +46,7 @@ connection is hybrid depends on the client's TLS stack:
 | Client | Hybrid TLS? |
 |---|---|
 | macOS app on macOS 26+ | Yes. Apple's TLS stack offers `X25519MLKEM768` by default from macOS 26. |
-| macOS app on macOS 14–15 | No, classical X25519. There is no API to add the group. |
+| macOS app on macOS 15 | No, classical X25519. There is no API to add the group. |
 | Desktop app (.NET / MsQuic) | Depends on the TLS library MsQuic uses on that platform. OpenSSL 3.5+ (Linux) offers it by default; Schannel support depends on the Windows version. |
 | `aura-ping` | Yes, it uses the server's provider. |
 
