@@ -16,6 +16,7 @@ using System.Security.Authentication;
 using Aura.V1Alpha1;
 using Google.Protobuf;
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using uniffi.aura_core;
 
 namespace Aura.Desktop.Services;
@@ -998,6 +999,15 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     private CancellationTokenSource? _listenCts;
 
     /// <summary>
+    /// Received audio packets waiting to be decrypted and decoded. The receive
+    /// loop runs on the UI thread (it is started from Connect), so it only
+    /// queues them; a single worker decodes them in order. At most a second
+    /// of audio is held: if decoding falls behind, the oldest is dropped and
+    /// the jitter buffer conceals the gap.
+    /// </summary>
+    private Channel<byte[]>? _incomingAudio;
+
+    /// <summary>
     /// Session IDs we've seen in each channel, used to warm retained text keys.
     /// </summary>
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<uint, byte>> _channelMembers = new();
@@ -1148,7 +1158,52 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     {
         _listenCts?.Cancel();
         _listenCts = new CancellationTokenSource();
-        _ = ReceiveLoopAsync(_listenCts.Token);
+        var token = _listenCts.Token;
+
+        var audio = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(50)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = true,
+        });
+        _incomingAudio = audio;
+        _ = Task.Run(() => DecodeIncomingAudioAsync(audio.Reader, token));
+
+        _ = ReceiveLoopAsync(token);
+    }
+
+    private async Task DecodeIncomingAudioAsync(ChannelReader<byte[]> reader, CancellationToken ct)
+    {
+        var lastLogged = DateTime.MinValue;
+        var dropped = 0;
+        try
+        {
+            await foreach (var packet in reader.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    _audioManager?.OnPacket(packet);
+                }
+                catch (Exception ex)
+                {
+                    // A packet the core rejects (a sender whose key hasn't
+                    // arrived yet, a replay) is dropped. It used to escape into
+                    // the receive loop and end the connection. Logged at most
+                    // every 5s: an unknown sender rejects 50 packets a second.
+                    dropped++;
+                    var now = DateTime.UtcNow;
+                    if (now - lastLogged >= TimeSpan.FromSeconds(5))
+                    {
+                        Console.WriteLine($"[AuraClient] Dropped {dropped} audio packet(s): {ex.Message}");
+                        lastLogged = now;
+                        dropped = 0;
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)
@@ -1335,11 +1390,12 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
             return;
         }
         
-        // Decrypt and decode into the jitter buffer; the 20ms playback clock
-        // drains PopMixed() on a steady timer so PLC/DRED runs in real time.
+        // Decrypt and decode into the jitter buffer, off this (UI) thread; the
+        // 20ms playback clock drains PopMixed() on a steady timer so PLC/DRED
+        // runs in real time.
         if (_audioManager != null)
         {
-            _audioManager.OnPacket(packet);
+            _incomingAudio?.Writer.TryWrite(packet);
         }
         else
         {

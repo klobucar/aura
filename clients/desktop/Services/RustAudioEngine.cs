@@ -141,7 +141,11 @@ public class RustAudioEngine : IDisposable
 
         _isCapturing = true;
         _captureCts = new CancellationTokenSource();
-        _ = CaptureLoop(_captureCts.Token);
+        // On the thread pool, not the caller's: StartCapture is called from
+        // the UI thread, and the loop's awaits would otherwise resume there,
+        // putting every frame's read, encode, encrypt and send on it.
+        var token = _captureCts.Token;
+        _ = Task.Run(() => CaptureLoop(token));
     }
 
     public void StopCapture()
@@ -177,7 +181,7 @@ public class RustAudioEngine : IDisposable
             else
             {
                 // Small sleep to avoid spinning if no data is ready
-                try { await Task.Delay(5, ct); } catch (OperationCanceledException) { break; }
+                try { await Task.Delay(5, ct).ConfigureAwait(false); } catch (OperationCanceledException) { break; }
             }
         }
     }
