@@ -202,7 +202,8 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
 
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
-    public event Action<uint, bool, bool, UserPresence?, string?>? OnUserStatusUpdated;
+    /// <summary>sessionId, isMuted, isDeafened, presence, customStatus, isServerMuted (null when the server didn't say).</summary>
+    public event Action<uint, bool, bool, UserPresence?, string?, bool?>? OnUserStatusUpdated;
 
     /// <summary>
     /// The control stream ended or failed while we still meant to be connected.
@@ -723,7 +724,8 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
             isMuted,
             isDeafened,
             presenceRecord,
-            trimmedStatus));
+            trimmedStatus,
+            null)); // is_server_muted is set by the server only
 
         try
         {
@@ -1497,7 +1499,7 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
             };
             Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}, Presence={presence}");
 
-            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened, presence, update.CustomStatus);
+            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened, presence, update.CustomStatus, update.IsServerMuted);
         }
         catch (Exception ex)
         {

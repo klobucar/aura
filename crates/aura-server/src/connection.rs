@@ -1761,6 +1761,7 @@ impl ConnectionContext {
                 is_deafened,
                 presence,
                 custom_status,
+                is_server_muted,
             } => {
                 let update = aura_protocol::UserStatusUpdate {
                     session_id,
@@ -1768,6 +1769,7 @@ impl ConnectionContext {
                     is_deafened,
                     presence: presence.map(|p| p as i32),
                     custom_status,
+                    is_server_muted: Some(is_server_muted),
                 };
                 self.send_proto_response(MSG_UPDATE_STATUS, update).await?;
             }

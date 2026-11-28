@@ -812,6 +812,9 @@ pub struct UserStatusUpdate {
     pub is_deafened: bool,
     pub presence: Option<PresenceStatusRecord>,
     pub custom_status: Option<String>,
+    /// Set by the server: a moderator has muted this user. Never sent by a
+    /// client.
+    pub is_server_muted: Option<bool>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -1077,6 +1080,8 @@ pub fn encode_user_status_update(update: UserStatusUpdate) -> Vec<u8> {
         custom_status: update
             .custom_status
             .map(|s| s.chars().take(128).collect::<String>()),
+        // Server-set; a client has nothing to say here.
+        is_server_muted: None,
     };
     proto.encode_to_vec()
 }
@@ -1096,6 +1101,7 @@ pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, Audi
         is_deafened: proto.is_deafened,
         presence,
         custom_status: proto.custom_status,
+        is_server_muted: proto.is_server_muted,
     })
 }
 
@@ -1830,11 +1836,14 @@ mod tests {
             is_deafened: false,
             presence: Some(PresenceStatusRecord::Dnd),
             custom_status: Some(long_status),
+            is_server_muted: Some(true),
         });
         let decoded = decode_user_status_update(encoded).unwrap();
         assert_eq!(decoded.session_id, 9);
         assert_eq!(decoded.presence, Some(PresenceStatusRecord::Dnd));
         assert_eq!(decoded.custom_status.as_deref().map(str::len), Some(128));
+        // A client cannot claim or clear a server mute.
+        assert_eq!(decoded.is_server_muted, None);
     }
 
     #[test]

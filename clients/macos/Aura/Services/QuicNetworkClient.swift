@@ -2753,7 +2753,8 @@ public class QuicNetworkClient {
             isMuted: isMuted,
             isDeafened: isDeafened,
             presence: presence,
-            customStatus: customStatus
+            customStatus: customStatus,
+            isServerMuted: nil  // set by the server only
         )
         
         do {
@@ -2834,7 +2835,16 @@ public class QuicNetworkClient {
                 let mappedPresence = update.presence.map(Self.mapPresence)
                 let normalizedCustomStatus = update.customStatus.map { $0.isEmpty ? nil : $0 }
 
+                // Our own update: this is how a non-admin learns a moderator
+                // muted them.
+                if update.sessionId == self.sessionId, let serverMuted = update.isServerMuted {
+                    self.isServerMuted = serverMuted
+                }
+
                 if let uuid = self.uuidForSession(update.sessionId) {
+                    if let serverMuted = update.isServerMuted {
+                        self.userServerMutedByUuid[uuid] = serverMuted
+                    }
                     if let mappedPresence {
                         self.userPresenceByUuid[uuid] = mappedPresence
                     }
@@ -2857,6 +2867,9 @@ public class QuicNetworkClient {
                         }
                         if let normalizedCustomStatus {
                             usersByChannel[channelId]?[index].customStatus = normalizedCustomStatus
+                        }
+                        if let serverMuted = update.isServerMuted {
+                            usersByChannel[channelId]?[index].isServerMuted = serverMuted
                         }
                         print("[QuicClient] Updated status for user \(update.sessionId) in channel \(channelId): muted=\(update.isMuted), deafened=\(update.isDeafened)")
                     }

@@ -449,6 +449,9 @@ message UserStatusUpdate {
     bool is_deafened = 3;
     optional PresenceStatus presence = 4;
     optional string custom_status = 5;
+    // Set by the server only: a moderator has muted this user. The server
+    // ignores it on updates a client sends.
+    optional bool is_server_muted = 6;
 }
 
 // User visibility updates (replaces manual MSG_USER_JOINED/MSG_USER_LEFT)

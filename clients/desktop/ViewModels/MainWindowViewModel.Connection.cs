@@ -358,8 +358,8 @@ public partial class MainWindowViewModel
             Ui(() => HandleFileAnnouncement(mid, sid, cid, caption, reply, manifest));
         client.OnFileTransferUpdated += (cid, fileIdHex, status, localPath) =>
             Ui(() => HandleFileTransferUpdated(cid, fileIdHex, status, localPath));
-        client.OnUserStatusUpdated += (sid, muted, deafened, presence, customStatus) =>
-            Ui(() => HandleUserStatusUpdate(sid, muted, deafened, presence, customStatus));
+        client.OnUserStatusUpdated += (sid, muted, deafened, presence, customStatus, serverMuted) =>
+            Ui(() => HandleUserStatusUpdate(sid, muted, deafened, presence, customStatus, serverMuted));
         client.OnChannelDeleted += removal => Ui(() => _ = HandleChannelDeletedAsync(removal));
         client.OnBanned += () => Ui(() => _ = HandleBannedAsync());
         client.OnProfileUpdated += profile => Ui(() => HandleProfileUpdated(profile));
@@ -633,12 +633,25 @@ public partial class MainWindowViewModel
         bool isMuted,
         bool isDeafened,
         UserPresence? presence,
-        string? customStatus)
+        string? customStatus,
+        bool? isServerMuted)
     {
+        // Our own update: the server-mute flag is the only part we don't
+        // already know. This is how a non-admin learns a moderator muted them.
+        if (_client != null && sessionId == _client.UserId)
+        {
+            if (isServerMuted is { } selfMuted && selfMuted != IsServerMuted)
+            {
+                IsServerMuted = selfMuted;
+                UpdateSelfRow();
+            }
+            return;
+        }
+
         if (_client?.UuidForSession(sessionId) is { } uuid)
         {
             _userStatusCache.TryGetValue(uuid, out var prev);
-            _userStatusCache[uuid] = (presence ?? prev.Presence, customStatus ?? prev.CustomStatus, prev.IsServerMuted);
+            _userStatusCache[uuid] = (presence ?? prev.Presence, customStatus ?? prev.CustomStatus, isServerMuted ?? prev.IsServerMuted);
         }
 
         var user = Channels.SelectMany(c => c.Users).FirstOrDefault(u => !u.IsSelf && u.Id == sessionId);
@@ -647,6 +660,7 @@ public partial class MainWindowViewModel
         user.IsDeafened = isDeafened;
         if (presence.HasValue) user.Presence = presence.Value;
         if (customStatus != null) user.CustomStatus = customStatus;
+        if (isServerMuted.HasValue) user.IsServerMuted = isServerMuted.Value;
     }
 
     private async Task RefreshUserInfoFromServerAsync()

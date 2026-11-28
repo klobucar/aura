@@ -110,6 +110,9 @@ pub enum ServiceMessage {
         is_deafened: bool,
         presence: Option<aura_protocol::PresenceStatus>,
         custom_status: Option<String>,
+        /// A moderator has muted this user. Sent so the muted user's own
+        /// client can say so, not only admins.
+        is_server_muted: bool,
     },
     /// A user's profile (bio, avatar, display name) changed - broadcast to everyone
     /// so other clients can refresh their local caches without a full snapshot.
@@ -1007,7 +1010,7 @@ impl ServerState {
         let capped_custom_status = custom_status.map(|s| s.chars().take(128).collect::<String>());
 
         // Update in-memory session state
-        let (effective_muted, effective_presence, effective_custom_status) =
+        let (effective_muted, effective_presence, effective_custom_status, server_muted) =
             if let Some(mut sess) = self.sessions.get_mut(&session_id) {
                 sess.is_muted = is_muted;
                 sess.is_deafened = is_deafened;
@@ -1025,9 +1028,10 @@ impl ServerState {
                     } else {
                         Some(sess.custom_status.clone())
                     },
+                    sess.is_server_muted,
                 )
             } else {
-                (is_muted, presence, capped_custom_status)
+                (is_muted, presence, capped_custom_status, false)
             };
 
         // Broadcast to ALL connected users
@@ -1038,6 +1042,7 @@ impl ServerState {
                 is_deafened,
                 presence: effective_presence,
                 custom_status: effective_custom_status.clone(),
+                is_server_muted: server_muted,
             });
         }
     }
@@ -1048,12 +1053,15 @@ impl ServerState {
             let snapshot = self.get_server_snapshot().await;
             let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
 
+            // Status the snapshot doesn't carry: presence, custom status and
+            // server mute. The session's own entry is included when it is
+            // server-muted, so a muted user who reconnects is told.
             for other in self.sessions.iter() {
-                if other.session_id == session_id {
-                    continue;
-                }
-                if other.presence != aura_protocol::PresenceStatus::PresenceOnline
-                    || !other.custom_status.is_empty()
+                let is_self = other.session_id == session_id;
+                if other.is_server_muted
+                    || (!is_self
+                        && (other.presence != aura_protocol::PresenceStatus::PresenceOnline
+                            || !other.custom_status.is_empty()))
                 {
                     let _ = sess.sender.send(ServiceMessage::UserStatusUpdate {
                         session_id: other.session_id,
@@ -1065,6 +1073,7 @@ impl ServerState {
                         } else {
                             Some(other.custom_status.clone())
                         },
+                        is_server_muted: other.is_server_muted,
                     });
                 }
             }
@@ -2270,6 +2279,7 @@ impl ServerState {
                     is_deafened,
                     presence: Some(presence),
                     custom_status: custom_status.clone(),
+                    is_server_muted: muted,
                 });
             }
         }
@@ -3186,12 +3196,15 @@ mod tests {
         // Server-mute Bob
         state.set_server_muted(&admin_uuid, bob_sess, true).unwrap();
 
-        // Both Bob and Carol receive UserStatusUpdate with is_muted = true
+        // Both Bob and Carol receive UserStatusUpdate with is_muted = true.
+        // Bob is not an admin; the server-mute flag on his own update is how
+        // his client knows to tell him.
         assert!(drain(&mut rx_bob).iter().any(|m| matches!(
             m,
             ServiceMessage::UserStatusUpdate {
                 session_id,
                 is_muted: true,
+                is_server_muted: true,
                 ..
             } if *session_id == bob_sess
         )));
@@ -3223,10 +3236,40 @@ mod tests {
 
         // Reconnect Bob -> still server-muted
         state.remove_session(bob_sess).await;
-        let (bob_sess2, _rx_bob2) = session(&state, &bob_uuid);
+        let (bob_sess2, mut rx_bob2) = session(&state, &bob_uuid);
         join_voice(&state, "C", bob_sess2, &bob_uuid).await;
         drain(&mut rx_carol);
         assert!(state.sessions.get(&bob_sess2).unwrap().is_server_muted);
+
+        // The snapshot a reconnecting client asks for is followed by his own
+        // status, so he is told he is still muted.
+        drain(&mut rx_bob2);
+        state.send_server_snapshot(bob_sess2).await;
+        assert!(drain(&mut rx_bob2).iter().any(|m| matches!(
+            m,
+            ServiceMessage::UserStatusUpdate {
+                session_id,
+                is_server_muted: true,
+                ..
+            } if *session_id == bob_sess2
+        )));
+
+        // Unmuting clears the flag for him too.
+        state
+            .set_server_muted(&admin_uuid, bob_sess2, false)
+            .unwrap();
+        assert!(drain(&mut rx_bob2).iter().any(|m| matches!(
+            m,
+            ServiceMessage::UserStatusUpdate {
+                session_id,
+                is_server_muted: false,
+                ..
+            } if *session_id == bob_sess2
+        )));
+        state
+            .set_server_muted(&admin_uuid, bob_sess2, true)
+            .unwrap();
+        drain(&mut rx_carol);
 
         let mut buf2 = bytes::BytesMut::new();
         let pkt2 = FastAudioPacket {
