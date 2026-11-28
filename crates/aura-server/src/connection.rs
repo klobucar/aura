@@ -412,6 +412,13 @@ impl QuicServer {
         transport.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?));
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
 
+        // Send each packet with its own syscall instead of batching them with
+        // UDP segmentation offload. On Fly's UDP path, batched sends arrived
+        // at clients corrupted: the reply after login failed AEAD decryption
+        // and the connection stalled. A voice server sends small, paced
+        // packets, so the batching saves almost nothing here.
+        transport.enable_segmentation_offload(false);
+
         // Enable QUIC datagrams for unreliable audio packets
         transport.datagram_receive_buffer_size(Some(65536));
         transport.datagram_send_buffer_size(65536);
