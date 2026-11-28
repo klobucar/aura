@@ -4,6 +4,7 @@ import AVFoundation
 import CoreAudio
 import AudioToolbox
 import os
+import Synchronization
 
 /// Audio capture service using AVAudioEngine.
 /// Captures 48kHz, 16-bit, mono PCM audio.
@@ -35,13 +36,11 @@ public class AudioCapture: ObservableObject {
     private var boundChannelCount: AVAudioChannelCount = 0
     private var pendingRestartTask: Task<Void, Never>?
 
-    nonisolated private struct ObserverBox: @unchecked Sendable {
-        let token: NSObjectProtocol
-    }
-
+    /// Notification listeners, kept as tasks so they can be cancelled from
+    /// `deinit` without an unchecked wrapper around an observer token.
     nonisolated private struct Observers: Sendable {
-        var deviceChange: ObserverBox?
-        var configChange: ObserverBox?
+        var deviceChange: Task<Void, Never>?
+        var configChange: Task<Void, Never>?
     }
     private nonisolated let observers = OSAllocatedUnfairLock(initialState: Observers())
 
@@ -52,29 +51,26 @@ public class AudioCapture: ObservableObject {
     private nonisolated let sentFrames = OSAllocatedUnfairLock(initialState: UInt64(0))
     
     public init() {
-        let token = NotificationCenter.default.addObserver(
-            forName: .audioInputDeviceChanged,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
+        let task = Task { [weak self] in
+            let changes = NotificationCenter.default
+                .notifications(named: .audioInputDeviceChanged)
+                .map { _ in () }
+            for await _ in changes {
                 self?.scheduleRestartForHardwareChange()
             }
         }
-        let box = ObserverBox(token: token)
-        observers.withLock { $0.deviceChange = box }
+        observers.withLock { $0.deviceChange = task }
     }
 
     deinit {
         frameHandler.withLock { $0 = nil }
-        let removed = observers.withLock { state -> (ObserverBox?, ObserverBox?) in
-            let pair = (state.deviceChange, state.configChange)
-            state.deviceChange = nil
-            state.configChange = nil
-            return pair
+        let tasks = observers.withLock { state -> Observers in
+            let current = state
+            state = Observers()
+            return current
         }
-        if let box = removed.0 { NotificationCenter.default.removeObserver(box.token) }
-        if let box = removed.1 { NotificationCenter.default.removeObserver(box.token) }
+        tasks.deviceChange?.cancel()
+        tasks.configChange?.cancel()
     }
     
     // MARK: - Public API
@@ -153,17 +149,14 @@ public class AudioCapture: ObservableObject {
             input.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { @Sendable buffer, time in
                 guard frameHandler.withLock({ $0 }) != nil else { return }
 
-                let convertedBuffer: AVAudioPCMBuffer
+                let samples: [Float]
                 if needsConversion {
-                    guard let output = tapConverter?.convert(buffer) else { return }
-                    convertedBuffer = output
+                    guard let converted = tapConverter?.convert(buffer) else { return }
+                    samples = converted
                 } else {
-                    convertedBuffer = buffer
+                    guard let floatData = buffer.floatChannelData else { return }
+                    samples = Array(UnsafeBufferPointer(start: floatData[0], count: Int(buffer.frameLength)))
                 }
-                
-                guard let floatData = convertedBuffer.floatChannelData else { return }
-                let frameCount = Int(convertedBuffer.frameLength)
-                let samples = Array(UnsafeBufferPointer(start: floatData[0], count: frameCount))
                 
                 // Chunk into 20ms frames (960 samples)
                 let samplesPerFrame = Int(Self.samplesPerFrame)
@@ -186,25 +179,20 @@ public class AudioCapture: ObservableObject {
 
             // Install after start() so binding kAudioOutputUnitProperty_CurrentDevice
             // during setup cannot self-trigger a configuration-change restart loop.
-            let prevConfigBox = observers.withLock { state -> ObserverBox? in
-                let old = state.configChange
-                state.configChange = nil
-                return old
-            }
-            if let prevConfigBox {
-                NotificationCenter.default.removeObserver(prevConfigBox.token)
-            }
-            let newConfigToken = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange,
-                object: engine,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
+            let configTask = Task { [weak self] in
+                let changes = NotificationCenter.default
+                    .notifications(named: .AVAudioEngineConfigurationChange, object: engine)
+                    .map { _ in () }
+                for await _ in changes {
                     self?.scheduleRestartForHardwareChange()
                 }
             }
-            let newConfigBox = ObserverBox(token: newConfigToken)
-            observers.withLock { $0.configChange = newConfigBox }
+            let previous = observers.withLock { state -> Task<Void, Never>? in
+                let old = state.configChange
+                state.configChange = configTask
+                return old
+            }
+            previous?.cancel()
 
             isRunning = true
             errorMessage = nil
@@ -228,14 +216,12 @@ public class AudioCapture: ObservableObject {
         guard isRunning else { return }
 
         frameHandler.withLock { $0 = nil }
-        let configBox = observers.withLock { state -> ObserverBox? in
+        let configTask = observers.withLock { state -> Task<Void, Never>? in
             let old = state.configChange
             state.configChange = nil
             return old
         }
-        if let configBox {
-            NotificationCenter.default.removeObserver(configBox.token)
-        }
+        configTask?.cancel()
         inputNode?.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
@@ -273,45 +259,95 @@ public class AudioCapture: ObservableObject {
     }
 }
 
-/// Caches `AVAudioConverter` and a reusable output `AVAudioPCMBuffer` for the
-/// lifetime of a single capture tap so 20ms callbacks do not allocate.
-nonisolated private final class TapConverter: @unchecked Sendable {
-    private let converter: AVAudioConverter
-    private let targetFormat: AVAudioFormat
-    private var outputBuffer: AVAudioPCMBuffer
+/// Caches an `AVAudioConverter` and its buffers for the lifetime of a single
+/// capture tap, so the resampler keeps its state between 20ms callbacks.
+///
+/// None of these types is Sendable and the tap is a `@Sendable` closure, so
+/// they live inside a `Mutex`, which may hold non-Sendable state. The tap's
+/// own buffer cannot be handed to that state, so its samples are copied in
+/// as plain arrays and the converted samples are copied out.
+nonisolated private final class TapConverter: Sendable {
+    private struct State {
+        let converter: AVAudioConverter
+        let inputFormat: AVAudioFormat
+        let targetFormat: AVAudioFormat
+        var inputBuffer: AVAudioPCMBuffer
+        var outputBuffer: AVAudioPCMBuffer
+    }
+
+    private let state: Mutex<State>
 
     init?(from inputFormat: AVAudioFormat, to targetFormat: AVAudioFormat, initialCapacity: AVAudioFrameCount) {
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat),
-              let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: initialCapacity) else {
+              let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: initialCapacity),
+              let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: initialCapacity) else {
             return nil
         }
-        self.converter = converter
-        self.targetFormat = targetFormat
-        self.outputBuffer = buffer
+        state = Mutex(State(
+            converter: converter,
+            inputFormat: inputFormat,
+            targetFormat: targetFormat,
+            inputBuffer: input,
+            outputBuffer: output
+        ))
     }
 
-    func convert(_ inputBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        let ratio = targetFormat.sampleRate / max(1, inputBuffer.format.sampleRate)
-        let neededCapacity = AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * ratio)) + 16
-        if outputBuffer.frameCapacity < neededCapacity {
-            guard let grown = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: neededCapacity) else {
-                return nil
+    /// The first channel of `inputBuffer` converted to the target format, or
+    /// nil if the input isn't float PCM or conversion failed.
+    func convert(_ inputBuffer: AVAudioPCMBuffer) -> [Float]? {
+        guard let channels = Self.channelSamples(of: inputBuffer) else { return nil }
+        return state.withLock { state -> [Float]? in
+            let frames = AVAudioFrameCount(channels.first?.count ?? 0)
+            if state.inputBuffer.frameCapacity < frames {
+                guard let grown = AVAudioPCMBuffer(pcmFormat: state.inputFormat, frameCapacity: frames) else {
+                    return nil
+                }
+                state.inputBuffer = grown
             }
-            outputBuffer = grown
-        }
-        outputBuffer.frameLength = 0
-        var error: NSError?
-        var consumed = false
-        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
+            guard let inputData = state.inputBuffer.floatChannelData,
+                  channels.count == Int(state.inputFormat.channelCount) else { return nil }
+            for (index, samples) in channels.enumerated() {
+                samples.withUnsafeBufferPointer { source in
+                    guard let base = source.baseAddress else { return }
+                    inputData[index].update(from: base, count: source.count)
+                }
             }
-            consumed = true
-            outStatus.pointee = .haveData
-            return inputBuffer
+            state.inputBuffer.frameLength = frames
+
+            let ratio = state.targetFormat.sampleRate / max(1, state.inputFormat.sampleRate)
+            let neededCapacity = AVAudioFrameCount(ceil(Double(frames) * ratio)) + 16
+            if state.outputBuffer.frameCapacity < neededCapacity {
+                guard let grown = AVAudioPCMBuffer(pcmFormat: state.targetFormat, frameCapacity: neededCapacity) else {
+                    return nil
+                }
+                state.outputBuffer = grown
+            }
+            state.outputBuffer.frameLength = 0
+
+            let source = state.inputBuffer
+            var error: NSError?
+            var consumed = false
+            state.converter.convert(to: state.outputBuffer, error: &error) { _, outStatus in
+                if consumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                consumed = true
+                outStatus.pointee = .haveData
+                return source
+            }
+            guard error == nil, let outputData = state.outputBuffer.floatChannelData else { return nil }
+            return Array(UnsafeBufferPointer(start: outputData[0], count: Int(state.outputBuffer.frameLength)))
         }
-        if error != nil { return nil }
-        return outputBuffer
+    }
+
+    /// Each channel's samples as an array; nil unless the buffer is float PCM
+    /// with one plane per channel, which is what the input node delivers.
+    private static func channelSamples(of buffer: AVAudioPCMBuffer) -> [[Float]]? {
+        guard !buffer.format.isInterleaved, let data = buffer.floatChannelData else { return nil }
+        let frames = Int(buffer.frameLength)
+        return (0..<Int(buffer.format.channelCount)).map { channel in
+            Array(UnsafeBufferPointer(start: data[channel], count: frames))
+        }
     }
 }
