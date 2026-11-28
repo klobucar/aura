@@ -419,6 +419,14 @@ impl QuicServer {
         // packets, so the batching saves almost nothing here.
         transport.enable_segmentation_offload(false);
 
+        // Keep packets at QUIC's base size instead of probing for a larger
+        // path MTU. On the Fly deployment, the first probe above ~1350 bytes
+        // was followed by the path dropping everything the server sent to
+        // that client address for about a minute, which hung logins right
+        // after the handshake. Voice packets are far below 1200 bytes, so a
+        // larger MTU buys little here.
+        transport.mtu_discovery_config(None);
+
         // Enable QUIC datagrams for unreliable audio packets
         transport.datagram_receive_buffer_size(Some(65536));
         transport.datagram_send_buffer_size(65536);
