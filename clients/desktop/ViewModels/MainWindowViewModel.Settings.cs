@@ -510,12 +510,26 @@ public partial class MainWindowViewModel
         IGlobalPushToTalkHook? hook = null;
         if (OperatingSystem.IsWindows()) hook = new WindowsPushToTalkHook();
         else if (OperatingSystem.IsMacOS()) hook = new MacPushToTalkHook();
+        else if (OperatingSystem.IsLinux())
+        {
+            // Wayland has no way to see other windows' keys except the
+            // portal; an X11 session gets XInput2 raw events.
+            if (PortalPushToTalkHook.IsWaylandSession) hook = new PortalPushToTalkHook();
+            else if (X11PushToTalkHook.IsAvailable) hook = new X11PushToTalkHook();
+        }
         if (hook == null) return;
 
         hook.Binding = PttBinding;
         hook.Enabled = IsPushToTalkMode;
         hook.Pressed += () => Dispatcher.UIThread.Post(() => _ = BeginPushToTalkAsync());
         hook.Released += () => Dispatcher.UIThread.Post(() => _ = EndPushToTalkAsync());
+        hook.StateChanged += () => Dispatcher.UIThread.Post(() =>
+        {
+            // A hold that began in the window won't see its key-up there once
+            // the hook takes over the key.
+            if (hook.IsInstalled && IsPushToTalkHeld) _ = EndPushToTalkAsync();
+            RefreshPttScope();
+        });
         _globalHook = hook;
         // Windows needs no permission, so it installs whatever the mode, as before.
         TryInstallGlobalHook(requestPermission: IsPushToTalkMode);
@@ -530,6 +544,9 @@ public partial class MainWindowViewModel
         if (_globalHook is not { IsInstalled: false } hook) return;
         try
         {
+            // The portal shows a desktop dialog, so only ask once PTT is in use.
+            if (OperatingSystem.IsLinux() && hook is PortalPushToTalkHook && !requestPermission) return;
+
             if (OperatingSystem.IsMacOS() && !MacPushToTalkHook.HasPermission)
             {
                 if (requestPermission) MacPushToTalkHook.RequestPermission();

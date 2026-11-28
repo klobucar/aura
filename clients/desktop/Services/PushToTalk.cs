@@ -174,6 +174,102 @@ public sealed record PushToTalkBinding(Key Key, KeyModifiers Modifiers)
     /// </summary>
     public int? MacKeyCode => MacKeyCodes.TryGetValue(Key, out var code) ? code : null;
 
+    /// <summary>
+    /// The X11 keysym (X11/keysymdef.h) for <see cref="Key"/>, for the X11
+    /// hook, which turns it into a keycode with the user's layout. Null for
+    /// keys the hook can't watch.
+    /// </summary>
+    /// <summary>
+    /// The binding as a preferred trigger for the Wayland GlobalShortcuts
+    /// portal (XDG shortcuts spec: `CTRL+ALT+space`, XKB key names). Null for
+    /// keys without a name here; the desktop then lets the user pick one.
+    /// </summary>
+    public string? PortalTrigger
+    {
+        get
+        {
+            var key = Key switch
+            {
+                >= Key.A and <= Key.Z => ((char)('a' + (Key - Key.A))).ToString(),
+                >= Key.D0 and <= Key.D9 => ((char)('0' + (Key - Key.D0))).ToString(),
+                >= Key.F1 and <= Key.F24 => $"F{Key - Key.F1 + 1}",
+                >= Key.NumPad0 and <= Key.NumPad9 => $"KP_{Key - Key.NumPad0}",
+                Key.Space => "space",
+                Key.Tab => "Tab",
+                Key.Return => "Return",
+                Key.CapsLock => "Caps_Lock",
+                Key.Insert => "Insert",
+                Key.Delete => "Delete",
+                Key.Home => "Home",
+                Key.End => "End",
+                Key.Prior => "Prior",
+                Key.Next => "Next",
+                Key.Pause => "Pause",
+                Key.Scroll => "Scroll_Lock",
+                Key.Left => "Left",
+                Key.Up => "Up",
+                Key.Right => "Right",
+                Key.Down => "Down",
+                Key.OemTilde => "grave",
+                Key.OemMinus => "minus",
+                Key.OemPlus => "equal",
+                Key.OemOpenBrackets => "bracketleft",
+                Key.OemCloseBrackets => "bracketright",
+                Key.OemSemicolon => "semicolon",
+                Key.OemQuotes => "apostrophe",
+                Key.OemComma => "comma",
+                Key.OemPeriod => "period",
+                Key.OemQuestion => "slash",
+                Key.OemPipe => "backslash",
+                _ => null,
+            };
+            if (key == null) return null;
+            var parts = new List<string>();
+            if (Modifiers.HasFlag(KeyModifiers.Control)) parts.Add("CTRL");
+            if (Modifiers.HasFlag(KeyModifiers.Alt)) parts.Add("ALT");
+            if (Modifiers.HasFlag(KeyModifiers.Shift)) parts.Add("SHIFT");
+            if (Modifiers.HasFlag(KeyModifiers.Meta)) parts.Add("LOGO");
+            parts.Add(key);
+            return string.Join("+", parts);
+        }
+    }
+
+    public int? X11Keysym => Key switch
+    {
+        >= Key.A and <= Key.Z => 0x61 + (Key - Key.A),           // a..z
+        >= Key.D0 and <= Key.D9 => 0x30 + (Key - Key.D0),        // 0..9
+        >= Key.F1 and <= Key.F24 => 0xffbe + (Key - Key.F1),     // F1..F24
+        >= Key.NumPad0 and <= Key.NumPad9 => 0xffb0 + (Key - Key.NumPad0),
+        Key.Space => 0x20,
+        Key.Tab => 0xff09,
+        Key.Return => 0xff0d,
+        Key.CapsLock => 0xffe5,
+        Key.Insert => 0xff63,
+        Key.Delete => 0xffff,
+        Key.Home => 0xff50,
+        Key.End => 0xff57,
+        Key.Prior => 0xff55,
+        Key.Next => 0xff56,
+        Key.Pause => 0xff13,
+        Key.Scroll => 0xff14,
+        Key.Left => 0xff51,
+        Key.Up => 0xff52,
+        Key.Right => 0xff53,
+        Key.Down => 0xff54,
+        Key.OemTilde => 0x60,           // grave
+        Key.OemMinus => 0x2d,
+        Key.OemPlus => 0x3d,            // equal
+        Key.OemOpenBrackets => 0x5b,
+        Key.OemCloseBrackets => 0x5d,
+        Key.OemSemicolon => 0x3b,
+        Key.OemQuotes => 0x27,          // apostrophe
+        Key.OemComma => 0x2c,
+        Key.OemPeriod => 0x2e,
+        Key.OemQuestion => 0x2f,        // slash
+        Key.OemPipe => 0x5c,            // backslash
+        _ => null,
+    };
+
     private static readonly Dictionary<Key, int> MacKeyCodes = new()
     {
         [Key.A] = 0x00, [Key.S] = 0x01, [Key.D] = 0x02, [Key.F] = 0x03, [Key.H] = 0x04,
@@ -204,12 +300,20 @@ public sealed record PushToTalkBinding(Key Key, KeyModifiers Modifiers)
 /// <summary>
 /// A system-wide push-to-talk key watcher. Implementations observe only: every
 /// key still reaches the focused application. <see cref="Pressed"/> and
-/// <see cref="Released"/> fire on the UI thread.
+/// <see cref="Released"/> may fire on any thread (the Windows and macOS hooks
+/// use the UI thread, the Linux ones their own); subscribers marshal.
 /// </summary>
 public interface IGlobalPushToTalkHook : IDisposable
 {
     event Action? Pressed;
     event Action? Released;
+
+    /// <summary>
+    /// <see cref="IsInstalled"/> changed after <see cref="Install"/> returned:
+    /// a hook that binds asynchronously (the Wayland portal) became active or
+    /// stopped. May fire on any thread.
+    /// </summary>
+    event Action? StateChanged;
 
     /// <summary>The binding to watch.</summary>
     PushToTalkBinding Binding { get; set; }
@@ -272,6 +376,8 @@ public sealed class WindowsPushToTalkHook : IGlobalPushToTalkHook
 
     public event Action? Pressed;
     public event Action? Released;
+    // Installs synchronously; IsInstalled never changes later.
+    public event Action? StateChanged { add { } remove { } }
 
     /// <summary>The binding to watch. Swapping it mid-hold releases cleanly.</summary>
     public PushToTalkBinding Binding { get; set; } = PushToTalkBinding.Default;
