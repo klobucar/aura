@@ -172,6 +172,24 @@ public class ChatHistoryTests
     }
 
     [Fact]
+    public void OnlyTheLatestJoinMarkerIsKept()
+    {
+        var history = new ChatHistory();
+        ChatMessage Joined(string channel) =>
+            new() { ChannelId = channel, Content = "Joined", System = true, IsJoinMarker = true };
+
+        history.AddJoinMarker(Joined("a"));
+        history.Add(new ChatMessage { ChannelId = "a", Content = "hello" });
+        history.Add(new ChatMessage { ChannelId = "a", Content = "jk-test joined", System = true });
+        history.AddJoinMarker(Joined("b"));
+        history.AddJoinMarker(Joined("a"));
+
+        // One marker, after the messages; other notices are left alone.
+        Assert.Equal(new[] { "hello", "jk-test joined", "Joined" }, history.For("a").Select(m => m.Content));
+        Assert.Single(history.For("b"));
+    }
+
+    [Fact]
     public void HistoryIsBoundedPerChannel()
     {
         var history = new ChatHistory();
