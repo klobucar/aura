@@ -1226,4 +1226,4 @@ The server responds with `AdminResponse` (`success`, `error_message`). Internall
 
 ### Avatars and `ServerState`
 
-`ServerState` snapshots list every profile with an empty `avatar_data`. Avatars reach clients only as `ProfileUpdated` messages: one per profile that has an avatar, spaced out, after the snapshot a session receives at login, and one to everyone whenever a profile changes. A client should treat an empty `avatar_data` in a snapshot as "no information" and keep any avatar it already holds; an empty `avatar_data` in a `ProfileUpdated` means the avatar was removed.
+`ServerState` snapshots list every profile with an empty `avatar_data`. Avatars reach clients only as `ProfileUpdated` messages: one per profile that has an avatar, spaced out, after the snapshot a session receives at login; one to every other session when a user with an avatar logs in and has no other session open; and one to everyone whenever a profile changes. A client should treat an empty `avatar_data` in a snapshot as "no information" and keep any avatar it already holds; an empty `avatar_data` in a `ProfileUpdated` means the avatar was removed.
