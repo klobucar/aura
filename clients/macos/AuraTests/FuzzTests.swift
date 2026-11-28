@@ -3,7 +3,21 @@ import XCTest
 
 @MainActor
 final class FuzzTests: XCTestCase {
-    
+
+    /// These tests write saved servers. The test bundle runs inside the app,
+    /// so the default key would be the user's own server list.
+    private let testStorageKey = "TestAuraFuzzServerProfiles"
+
+    override func setUp() async throws {
+        try await super.setUp()
+        UserDefaults.standard.removeObject(forKey: testStorageKey)
+    }
+
+    override func tearDown() async throws {
+        UserDefaults.standard.removeObject(forKey: testStorageKey)
+        try await super.tearDown()
+    }
+
     // MARK: - Server Profile Fuzzing
     
     func testServerProfileWithRandomData() {
@@ -21,7 +35,9 @@ final class FuzzTests: XCTestCase {
                 isFavorite: Bool.random()
             )
             
-            let manager = ServerManager()
+            // A fresh list each iteration, so the count below is this server.
+            UserDefaults.standard.removeObject(forKey: testStorageKey)
+            let manager = ServerManager(storageKey: testStorageKey)
             
             // Should not crash
             manager.addServer(server)
@@ -133,7 +149,7 @@ final class FuzzTests: XCTestCase {
     // MARK: - Concurrent Access Fuzzing
     
     func testConcurrentServerOperations() async {
-        let manager = ServerManager()
+        let manager = ServerManager(storageKey: testStorageKey)
         
         await withTaskGroup(of: Void.self) { group in
             // Concurrent adds

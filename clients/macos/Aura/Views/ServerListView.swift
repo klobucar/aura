@@ -87,7 +87,7 @@ struct ServerListView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(server.name)
                     .font(.system(size: 14, weight: .semibold))
-                Text("\\(server.host):\\(server.port)")
+                Text("\(server.host):\(server.port)")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }

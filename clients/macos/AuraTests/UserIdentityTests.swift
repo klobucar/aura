@@ -8,7 +8,12 @@ final class UserIdentityTests: XCTestCase {
 
     var identity: UserIdentity!
 
+    /// The test bundle runs inside the app, so `AuraDisplayName` is the
+    /// user's own saved name. Keep it and put it back afterwards.
+    private var savedDisplayName: String?
+
     override func setUp() async throws {
+        savedDisplayName = UserDefaults.standard.string(forKey: "AuraDisplayName")
         identity = UserIdentity()
 
         // Clean up test keychain entries
@@ -22,6 +27,11 @@ final class UserIdentityTests: XCTestCase {
             UserIdentity.deleteFromKeychain(id: id)
         }
         identity = nil
+        if let savedDisplayName {
+            UserDefaults.standard.set(savedDisplayName, forKey: "AuraDisplayName")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "AuraDisplayName")
+        }
     }
 
     // MARK: - Key Generation Tests
