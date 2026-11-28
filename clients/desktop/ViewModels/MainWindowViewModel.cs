@@ -201,7 +201,6 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     /// <summary>34 beside each message in chat-first; 0 in the narrow column.</summary>
     public double MessageAvatarWidth => IsChatFirst ? 34 : 0;
-    public string LayoutToggleGlyph => IsChatFirst ? "◫" : "◉";
     public string LayoutToggleTip => IsChatFirst ? "Voice focus (Ctrl+Alt+V)" : "Chat first (Ctrl+Alt+V)";
 
     partial void OnLayoutModeChanged(LayoutMode value)
@@ -220,7 +219,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
                      nameof(LaneSegmentHeight), nameof(LaneSegmentRadius), nameof(LaneNameColumnWidth),
                      nameof(TimeAxisHeight), nameof(ModeExtrasOpacity), nameof(WaveformBarCount),
                      nameof(WaveformHeight), nameof(HeroAvatarSize), nameof(HeroNameFontSize),
-                     nameof(ChatBubbleMaxWidth), nameof(MessageAvatarWidth), nameof(LayoutToggleGlyph),
+                     nameof(ChatBubbleMaxWidth), nameof(MessageAvatarWidth),
                      nameof(LayoutToggleTip),
                  })
         {

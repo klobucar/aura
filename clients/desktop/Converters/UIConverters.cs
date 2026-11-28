@@ -134,29 +134,6 @@ public class SystemMessagePaddingConverter : IValueConverter
         => throw new NotImplementedException();
 }
 
-/// <summary>Mic icon text for toggle button.</summary>
-public class MicIconConverter : IValueConverter
-{
-    public static readonly MicIconConverter Instance = new();
-
-    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value is bool isEnabled && isEnabled ? "🎤" : "🎙";
-
-    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => throw new NotImplementedException();
-}
-
-/// <summary>Deafen icon text for toggle button.</summary>
-public class DeafenIconConverter : IValueConverter
-{
-    public static readonly DeafenIconConverter Instance = new();
-
-    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value is bool isDeafened && isDeafened ? "🔇" : "🎧";
-
-    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => throw new NotImplementedException();
-}
 
 /// <summary>Speaking user name color: accent while speaking, textMid otherwise.</summary>
 public class StatusToBrushConverter : IValueConverter

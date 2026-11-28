@@ -9,6 +9,7 @@
                 <!-- Slot 0 is the palette; AuraThemeManager swaps it at runtime. -->
                 <ResourceInclude Source="avares://Aura.Desktop/Themes/Zenith.axaml"/>
                 <ResourceInclude Source="avares://Aura.Desktop/Themes/AuraTokens.axaml"/>
+                <ResourceInclude Source="avares://Aura.Desktop/Themes/AuraIcons.axaml"/>
             </ResourceDictionary.MergedDictionaries>
             <conv:BoolToColorConverter x:Key="BoolToColorConverter"/>
         </ResourceDictionary>
