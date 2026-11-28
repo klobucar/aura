@@ -1,8 +1,13 @@
 name: Build Artifacts
 
 # Builds the things people run: the server for Linux on x86_64 and arm64, and
-# the desktop client for Linux, Windows and macOS. Each is uploaded as a
-# workflow artifact. Nothing is signed, notarized or published as a release.
+# the desktop client for Linux, Windows and macOS.
+#
+# - Run by hand, it uploads them as workflow artifacts, which expire.
+# - On a `v*` tag, it also attaches them to a draft GitHub Release, where
+#   they stay. The draft is published by hand once it has been checked.
+#
+# Nothing is signed or notarized.
 #
 # The native macOS (Swift) client is not built here: it needs a signing
 # certificate.
@@ -11,14 +16,10 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/workflows/build.yml'
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -189,3 +190,33 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    # Workflow artifacts expire; release assets do not. A tag build collects
+    # every package into a draft release for a person to check and publish.
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and upload its files
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: create draft release
+        working-directory: dist
+        run: |
+          ls -l
+          # One checksum list for the release, checked against the files
+          # that actually arrived.
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+          sha256sum -c SHA256SUMS
+          gh release create "$TAG" --draft --verify-tag --generate-notes \
+            --title "$TAG" ./*.tar.gz ./*.zip SHA256SUMS
