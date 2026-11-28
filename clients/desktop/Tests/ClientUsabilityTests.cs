@@ -252,6 +252,17 @@ public class PushToTalkTests
     }
 
     [Fact]
+    public void MacKeyCodesMatchHIToolbox()
+    {
+        Assert.Equal(0x31, PushToTalkBinding.Default.MacKeyCode);
+        Assert.Equal(0x00, new PushToTalkBinding(Key.A, KeyModifiers.None).MacKeyCode);
+        Assert.Equal(0x1D, new PushToTalkBinding(Key.D0, KeyModifiers.None).MacKeyCode);
+        Assert.Equal(0x69, new PushToTalkBinding(Key.F13, KeyModifiers.None).MacKeyCode);
+        Assert.Equal(0x32, new PushToTalkBinding(Key.OemTilde, KeyModifiers.None).MacKeyCode);
+        Assert.Null(new PushToTalkBinding(Key.CapsLock, KeyModifiers.None).MacKeyCode);
+    }
+
+    [Fact]
     public void TransmissionModesUseMacOsRawValues()
     {
         foreach (var mode in Enum.GetValues<TransmissionMode>())
