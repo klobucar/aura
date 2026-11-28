@@ -324,13 +324,9 @@ public class QuicNetworkClient {
     private var isIntentionalDisconnect = false
     
     /// Saved connection parameters for retry
-    nonisolated private struct ObserverBox: @unchecked Sendable {
-        let token: NSObjectProtocol
-    }
-    nonisolated private struct ObserverTokens: Sendable {
-        var tokens: [ObserverBox] = []
-    }
-    private nonisolated let notificationObservers = OSAllocatedUnfairLock(initialState: ObserverTokens())
+    /// The notification listeners started in `init`, cancelled in `deinit`.
+    /// Tasks are Sendable, so nothing here needs an unchecked wrapper.
+    private nonisolated let observerTasks = OSAllocatedUnfairLock(initialState: [Task<Void, Never>]())
 
     private var savedHost: String?
     private var savedPort: UInt16?
@@ -340,58 +336,45 @@ public class QuicNetworkClient {
     public init() {
         loadLocalMixerPrefs()
 
-        // Listen for audio settings changes. Everything they touch belongs to
-        // the audio domain, so they go straight there.
-        let settingsToken = NotificationCenter.default.addObserver(
-            forName: .audioSettingsChanged,
-            object: nil,
-            queue: .main
-        ) { [voice] notification in
-            if let change = AudioSettingsChange(notification.object) {
-                voice.post(.applySettings(change))
-            }
-        }
-
         if let initialOutputID = AudioDeviceManager.shared.selectedOutputDeviceID {
             voice.post(.setOutputDevice(initialOutputID))
         }
 
-        let outputDeviceToken = NotificationCenter.default.addObserver(
-            forName: .audioOutputDeviceChanged,
-            object: nil,
-            queue: .main
-        ) { [voice] notification in
-            voice.post(.setOutputDevice(notification.object as? UInt32))
-        }
-
-        let restartOutputToken = NotificationCenter.default.addObserver(
-            forName: .audioOutputNeedsRestart,
-            object: nil,
-            queue: .main
-        ) { [voice] _ in
-            voice.post(.restartOutput)
-        }
-
-        let presenceToken = NotificationCenter.default.addObserver(
-            forName: .presenceStatusChanged,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.updateStatus(isMuted: self.isMuted, isDeafened: self.isDeafened)
-            }
-        }
-
-        let boxes = [
-            ObserverBox(token: settingsToken),
-            ObserverBox(token: outputDeviceToken),
-            ObserverBox(token: restartOutputToken),
-            ObserverBox(token: presenceToken)
+        // Each listener maps its notification to a Sendable value before it
+        // leaves the sequence; `Notification` itself is not Sendable.
+        let center = NotificationCenter.default
+        let tasks: [Task<Void, Never>] = [
+            // Audio settings changes. Everything they touch belongs to the
+            // audio domain, so they go straight there.
+            Task { [voice] in
+                let changes = center.notifications(named: .audioSettingsChanged)
+                    .compactMap { AudioSettingsChange($0.object) }
+                for await change in changes {
+                    voice.post(.applySettings(change))
+                }
+            },
+            Task { [voice] in
+                let devices = center.notifications(named: .audioOutputDeviceChanged)
+                    .map { $0.object as? UInt32 }
+                for await deviceID in devices {
+                    voice.post(.setOutputDevice(deviceID))
+                }
+            },
+            Task { [voice] in
+                let restarts = center.notifications(named: .audioOutputNeedsRestart).map { _ in () }
+                for await _ in restarts {
+                    voice.post(.restartOutput)
+                }
+            },
+            Task { [weak self] in
+                let changes = center.notifications(named: .presenceStatusChanged).map { _ in () }
+                for await _ in changes {
+                    guard let self else { return }
+                    await self.updateStatus(isMuted: self.isMuted, isDeafened: self.isDeafened)
+                }
+            },
         ]
-        notificationObservers.withLock {
-            $0.tokens = boxes
-        }
+        observerTasks.withLock { $0 = tasks }
 
         // Meter snapshots from the audio domain: at most ~30 a second, and
         // only the newest if the main actor falls behind.
@@ -403,13 +386,8 @@ public class QuicNetworkClient {
     }
     
     deinit {
-        let tokens = notificationObservers.withLock { box -> [ObserverBox] in
-            let current = box.tokens
-            box.tokens.removeAll()
-            return current
-        }
-        for item in tokens {
-            NotificationCenter.default.removeObserver(item.token)
+        for task in observerTasks.withLock({ $0 }) {
+            task.cancel()
         }
         voice.shutdown()
     }
@@ -3941,19 +3919,14 @@ nonisolated struct AudioSettingsChange: Sendable {
 
 /// Records, from the TLS verify block's queue, whether the server's
 /// certificate failed an invite's fingerprint pin.
-nonisolated final class CertificatePinCheck: @unchecked Sendable {
-    private let lock = NSLock()
-    private var didMismatch = false
+nonisolated final class CertificatePinCheck: Sendable {
+    private let didMismatch = OSAllocatedUnfairLock(initialState: false)
 
     var mismatched: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return didMismatch
+        didMismatch.withLock { $0 }
     }
 
     func recordMismatch() {
-        lock.lock()
-        didMismatch = true
-        lock.unlock()
+        didMismatch.withLock { $0 = true }
     }
 }

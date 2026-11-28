@@ -20,30 +20,17 @@ class AudioDeviceManager: ObservableObject {
     private var lastSystemDefaultOutputID: AudioDeviceID?
     private var lastSystemDefaultInputID: AudioDeviceID?
 
-    nonisolated private struct BlockBox: @unchecked Sendable {
-        let block: AudioObjectPropertyListenerBlock
-    }
-
-    nonisolated private struct ListenerBlocks: Sendable {
-        var devices: BlockBox?
-        var defaultOutput: BlockBox?
-        var defaultInput: BlockBox?
-    }
-    private nonisolated let listenerBlocks = OSAllocatedUnfairLock(initialState: ListenerBlocks())
-
     struct AudioDevice: Identifiable, Hashable {
         let id: AudioDeviceID
         let name: String
         let uid: String
     }
 
-    init() {
+    /// One instance for the app's lifetime (`shared`), so the CoreAudio
+    /// listeners installed here are never removed.
+    private init() {
         loadDevices()
         installCoreAudioListeners()
-    }
-
-    deinit {
-        removeCoreAudioListeners()
     }
 
     private func installCoreAudioListeners() {
@@ -58,10 +45,7 @@ class AudioDeviceManager: ObservableObject {
         let devicesBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.handleHardwareChange()
         }
-        if AudioObjectAddPropertyListenerBlock(systemObject, &devicesAddr, queue, devicesBlock) == noErr {
-            let box = BlockBox(block: devicesBlock)
-            listenerBlocks.withLock { $0.devices = box }
-        }
+        _ = AudioObjectAddPropertyListenerBlock(systemObject, &devicesAddr, queue, devicesBlock)
 
         var defaultOutAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -71,10 +55,7 @@ class AudioDeviceManager: ObservableObject {
         let defaultOutBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.handleHardwareChange()
         }
-        if AudioObjectAddPropertyListenerBlock(systemObject, &defaultOutAddr, queue, defaultOutBlock) == noErr {
-            let box = BlockBox(block: defaultOutBlock)
-            listenerBlocks.withLock { $0.defaultOutput = box }
-        }
+        _ = AudioObjectAddPropertyListenerBlock(systemObject, &defaultOutAddr, queue, defaultOutBlock)
 
         var defaultInAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -84,47 +65,7 @@ class AudioDeviceManager: ObservableObject {
         let defaultInBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.handleHardwareChange()
         }
-        if AudioObjectAddPropertyListenerBlock(systemObject, &defaultInAddr, queue, defaultInBlock) == noErr {
-            let box = BlockBox(block: defaultInBlock)
-            listenerBlocks.withLock { $0.defaultInput = box }
-        }
-    }
-
-    nonisolated private func removeCoreAudioListeners() {
-        let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        let queue = DispatchQueue.main
-        let blocks = listenerBlocks.withLock { state -> (BlockBox?, BlockBox?, BlockBox?) in
-            let result = (state.devices, state.defaultOutput, state.defaultInput)
-            state.devices = nil
-            state.defaultOutput = nil
-            state.defaultInput = nil
-            return result
-        }
-
-        if let box = blocks.0 {
-            var addr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDevices,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
-        }
-        if let box = blocks.1 {
-            var addr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
-        }
-        if let box = blocks.2 {
-            var addr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectRemovePropertyListenerBlock(systemObject, &addr, queue, box.block)
-        }
+        _ = AudioObjectAddPropertyListenerBlock(systemObject, &defaultInAddr, queue, defaultInBlock)
     }
 
     private func handleHardwareChange() {

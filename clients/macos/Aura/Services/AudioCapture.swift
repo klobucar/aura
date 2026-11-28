@@ -35,13 +35,11 @@ public class AudioCapture: ObservableObject {
     private var boundChannelCount: AVAudioChannelCount = 0
     private var pendingRestartTask: Task<Void, Never>?
 
-    nonisolated private struct ObserverBox: @unchecked Sendable {
-        let token: NSObjectProtocol
-    }
-
+    /// Notification listeners, kept as tasks so they can be cancelled from
+    /// `deinit` without an unchecked wrapper around an observer token.
     nonisolated private struct Observers: Sendable {
-        var deviceChange: ObserverBox?
-        var configChange: ObserverBox?
+        var deviceChange: Task<Void, Never>?
+        var configChange: Task<Void, Never>?
     }
     private nonisolated let observers = OSAllocatedUnfairLock(initialState: Observers())
 
@@ -52,29 +50,26 @@ public class AudioCapture: ObservableObject {
     private nonisolated let sentFrames = OSAllocatedUnfairLock(initialState: UInt64(0))
     
     public init() {
-        let token = NotificationCenter.default.addObserver(
-            forName: .audioInputDeviceChanged,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
+        let task = Task { [weak self] in
+            let changes = NotificationCenter.default
+                .notifications(named: .audioInputDeviceChanged)
+                .map { _ in () }
+            for await _ in changes {
                 self?.scheduleRestartForHardwareChange()
             }
         }
-        let box = ObserverBox(token: token)
-        observers.withLock { $0.deviceChange = box }
+        observers.withLock { $0.deviceChange = task }
     }
 
     deinit {
         frameHandler.withLock { $0 = nil }
-        let removed = observers.withLock { state -> (ObserverBox?, ObserverBox?) in
-            let pair = (state.deviceChange, state.configChange)
-            state.deviceChange = nil
-            state.configChange = nil
-            return pair
+        let tasks = observers.withLock { state -> Observers in
+            let current = state
+            state = Observers()
+            return current
         }
-        if let box = removed.0 { NotificationCenter.default.removeObserver(box.token) }
-        if let box = removed.1 { NotificationCenter.default.removeObserver(box.token) }
+        tasks.deviceChange?.cancel()
+        tasks.configChange?.cancel()
     }
     
     // MARK: - Public API
@@ -186,25 +181,20 @@ public class AudioCapture: ObservableObject {
 
             // Install after start() so binding kAudioOutputUnitProperty_CurrentDevice
             // during setup cannot self-trigger a configuration-change restart loop.
-            let prevConfigBox = observers.withLock { state -> ObserverBox? in
-                let old = state.configChange
-                state.configChange = nil
-                return old
-            }
-            if let prevConfigBox {
-                NotificationCenter.default.removeObserver(prevConfigBox.token)
-            }
-            let newConfigToken = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange,
-                object: engine,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in
+            let configTask = Task { [weak self] in
+                let changes = NotificationCenter.default
+                    .notifications(named: .AVAudioEngineConfigurationChange, object: engine)
+                    .map { _ in () }
+                for await _ in changes {
                     self?.scheduleRestartForHardwareChange()
                 }
             }
-            let newConfigBox = ObserverBox(token: newConfigToken)
-            observers.withLock { $0.configChange = newConfigBox }
+            let previous = observers.withLock { state -> Task<Void, Never>? in
+                let old = state.configChange
+                state.configChange = configTask
+                return old
+            }
+            previous?.cancel()
 
             isRunning = true
             errorMessage = nil
@@ -228,14 +218,12 @@ public class AudioCapture: ObservableObject {
         guard isRunning else { return }
 
         frameHandler.withLock { $0 = nil }
-        let configBox = observers.withLock { state -> ObserverBox? in
+        let configTask = observers.withLock { state -> Task<Void, Never>? in
             let old = state.configChange
             state.configChange = nil
             return old
         }
-        if let configBox {
-            NotificationCenter.default.removeObserver(configBox.token)
-        }
+        configTask?.cancel()
         inputNode?.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
