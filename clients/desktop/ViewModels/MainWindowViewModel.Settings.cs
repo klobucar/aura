@@ -164,10 +164,12 @@ public partial class MainWindowViewModel
     public string HudModeLabel => IsPushToTalkMode ? "PTT ·" : TransmissionModes.DisplayName(TransmissionMode);
     public string HudModeKey => IsPushToTalkMode ? PttBinding.Display : "";
 
-    /// <summary>Global on Windows; honest about in-window everywhere else.</summary>
+    /// <summary>Global where a hook is installed; honest about in-window everywhere else.</summary>
     public string PttScopeNote => _globalHook?.IsInstalled == true
         ? "Works while Aura is in the background."
-        : "Works only while the Aura window is focused on this platform.";
+        : NeedsPttPermission
+            ? "Works only while the Aura window is focused until Aura has Input Monitoring permission."
+            : "Works only while the Aura window is focused on this platform.";
 
     public string HudModeTip => IsPushToTalkMode
         ? $"Hold {PttBinding.Display} to talk. {PttScopeNote}"
@@ -376,6 +378,9 @@ public partial class MainWindowViewModel
         _audioManager?.SetVadThresholdDb(TransmissionModes.VadThresholdDb(VadSensitivity / 100.0));
         if (_globalHook != null) _globalHook.Enabled = TransmissionMode == TransmissionMode.PushToTalk;
         if (TransmissionMode != TransmissionMode.PushToTalk) _ = EndPushToTalkAsync();
+        // Ask for the macOS permission only once someone actually uses PTT.
+        if (TransmissionMode == TransmissionMode.PushToTalk) TryInstallGlobalHook(requestPermission: true);
+        else StopPttPermissionPoll();
     }
 
     private void LoadSettings()
@@ -479,36 +484,107 @@ public partial class MainWindowViewModel
     }
 
     // ==========================================================================
-    // Global push-to-talk (Windows). Elsewhere the window handles the key.
+    // Global push-to-talk (Windows hook, macOS event tap). Elsewhere, or until
+    // the hook installs, the window handles the key.
     // ==========================================================================
 
-    private GlobalPushToTalkHook? _globalHook;
+    private IGlobalPushToTalkHook? _globalHook;
+    private DispatcherTimer? _pttPermissionPoll;
+    private bool _needsPttPermission;
 
     /// <summary>Whether the window should handle the PTT key itself.</summary>
     public bool HandlesPushToTalkInWindow => _globalHook?.IsInstalled != true;
 
+    /// <summary>macOS: the event tap is waiting on Input Monitoring permission.</summary>
+    public bool NeedsPttPermission
+    {
+        get => _needsPttPermission;
+        private set
+        {
+            if (SetProperty(ref _needsPttPermission, value)) RefreshPttScope();
+        }
+    }
+
     private void InstallGlobalPushToTalk()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        IGlobalPushToTalkHook? hook = null;
+        if (OperatingSystem.IsWindows()) hook = new WindowsPushToTalkHook();
+        else if (OperatingSystem.IsMacOS()) hook = new MacPushToTalkHook();
+        if (hook == null) return;
+
+        hook.Binding = PttBinding;
+        hook.Enabled = IsPushToTalkMode;
+        hook.Pressed += () => Dispatcher.UIThread.Post(() => _ = BeginPushToTalkAsync());
+        hook.Released += () => Dispatcher.UIThread.Post(() => _ = EndPushToTalkAsync());
+        _globalHook = hook;
+        // Windows needs no permission, so it installs whatever the mode, as before.
+        TryInstallGlobalHook(requestPermission: IsPushToTalkMode);
+    }
+
+    /// <summary>
+    /// Install the hook if it isn't yet. On macOS without Input Monitoring this
+    /// optionally asks for it, then polls until it is granted.
+    /// </summary>
+    private void TryInstallGlobalHook(bool requestPermission)
+    {
+        if (_globalHook is not { IsInstalled: false } hook) return;
         try
         {
-            var hook = new GlobalPushToTalkHook { Binding = PttBinding, Enabled = IsPushToTalkMode };
-            hook.Pressed += () => Dispatcher.UIThread.Post(() => _ = BeginPushToTalkAsync());
-            hook.Released += () => Dispatcher.UIThread.Post(() => _ = EndPushToTalkAsync());
+            if (OperatingSystem.IsMacOS() && !MacPushToTalkHook.HasPermission)
+            {
+                if (requestPermission) MacPushToTalkHook.RequestPermission();
+                NeedsPttPermission = true;
+                StartPttPermissionPoll();
+                return;
+            }
+
             if (hook.Install())
             {
-                _globalHook = hook;
+                // A hold that began in the window would never see its key-up
+                // there now that the window ignores the key, so end it here.
+                if (IsPushToTalkHeld) _ = EndPushToTalkAsync();
+                NeedsPttPermission = false;
+                StopPttPermissionPoll();
+                Console.WriteLine("[PTT] Global hook installed");
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[PTT] Global hook unavailable: {ex.Message}");
         }
+        RefreshPttScope();
+    }
+
+    private void StartPttPermissionPoll()
+    {
+        if (_pttPermissionPoll != null) return;
+        Console.WriteLine("[PTT] Waiting for Input Monitoring permission");
+        _pttPermissionPoll = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        _pttPermissionPoll.Tick += (_, _) => TryInstallGlobalHook(requestPermission: false);
+        _pttPermissionPoll.Start();
+    }
+
+    private void StopPttPermissionPoll()
+    {
+        _pttPermissionPoll?.Stop();
+        _pttPermissionPoll = null;
+    }
+
+    [RelayCommand]
+    private void OpenPttPermissionSettings()
+    {
+        if (OperatingSystem.IsMacOS()) MacPushToTalkHook.OpenPermissionSettings();
+    }
+
+    private void RefreshPttScope()
+    {
+        OnPropertyChanged(nameof(PttScopeNote));
         OnPropertyChanged(nameof(HudModeTip));
     }
 
     private void DisposeGlobalPushToTalk()
     {
+        StopPttPermissionPoll();
         _globalHook?.Dispose();
         _globalHook = null;
     }

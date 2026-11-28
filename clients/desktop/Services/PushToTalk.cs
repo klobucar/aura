@@ -79,7 +79,7 @@ public sealed record PushToTalkBinding(Key Key, KeyModifiers Modifiers)
             if (Modifiers.HasFlag(KeyModifiers.Control)) parts.Add("Ctrl");
             if (Modifiers.HasFlag(KeyModifiers.Alt)) parts.Add("Alt");
             if (Modifiers.HasFlag(KeyModifiers.Shift)) parts.Add("Shift");
-            if (Modifiers.HasFlag(KeyModifiers.Meta)) parts.Add("Win");
+            if (Modifiers.HasFlag(KeyModifiers.Meta)) parts.Add(OperatingSystem.IsMacOS() ? "Cmd" : "Win");
             parts.Add(KeyName(Key));
             return string.Join("+", parts);
         }
@@ -166,6 +166,61 @@ public sealed record PushToTalkBinding(Key Key, KeyModifiers Modifiers)
         Key.OemPipe => 0xDC,
         _ => null,
     };
+
+    /// <summary>
+    /// The macOS virtual key code (<c>kVK_*</c>, HIToolbox Events.h) for
+    /// <see cref="Key"/>, for the event tap. Null for keys the tap can't watch:
+    /// Caps Lock, for one, arrives as a modifier change with no key-up.
+    /// </summary>
+    public int? MacKeyCode => MacKeyCodes.TryGetValue(Key, out var code) ? code : null;
+
+    private static readonly Dictionary<Key, int> MacKeyCodes = new()
+    {
+        [Key.A] = 0x00, [Key.S] = 0x01, [Key.D] = 0x02, [Key.F] = 0x03, [Key.H] = 0x04,
+        [Key.G] = 0x05, [Key.Z] = 0x06, [Key.X] = 0x07, [Key.C] = 0x08, [Key.V] = 0x09,
+        [Key.B] = 0x0B, [Key.Q] = 0x0C, [Key.W] = 0x0D, [Key.E] = 0x0E, [Key.R] = 0x0F,
+        [Key.Y] = 0x10, [Key.T] = 0x11, [Key.O] = 0x1F, [Key.U] = 0x20, [Key.I] = 0x22,
+        [Key.P] = 0x23, [Key.L] = 0x25, [Key.J] = 0x26, [Key.K] = 0x28, [Key.N] = 0x2D,
+        [Key.M] = 0x2E,
+        [Key.D1] = 0x12, [Key.D2] = 0x13, [Key.D3] = 0x14, [Key.D4] = 0x15, [Key.D6] = 0x16,
+        [Key.D5] = 0x17, [Key.D9] = 0x19, [Key.D7] = 0x1A, [Key.D8] = 0x1C, [Key.D0] = 0x1D,
+        [Key.OemPlus] = 0x18, [Key.OemMinus] = 0x1B, [Key.OemCloseBrackets] = 0x1E,
+        [Key.OemOpenBrackets] = 0x21, [Key.OemQuotes] = 0x27, [Key.OemSemicolon] = 0x29,
+        [Key.OemPipe] = 0x2A, [Key.OemComma] = 0x2B, [Key.OemQuestion] = 0x2C,
+        [Key.OemPeriod] = 0x2F, [Key.OemTilde] = 0x32,
+        [Key.Return] = 0x24, [Key.Tab] = 0x30, [Key.Space] = 0x31,
+        [Key.F1] = 0x7A, [Key.F2] = 0x78, [Key.F3] = 0x63, [Key.F4] = 0x76, [Key.F5] = 0x60,
+        [Key.F6] = 0x61, [Key.F7] = 0x62, [Key.F8] = 0x64, [Key.F9] = 0x65, [Key.F10] = 0x6D,
+        [Key.F11] = 0x67, [Key.F12] = 0x6F, [Key.F13] = 0x69, [Key.F14] = 0x6B, [Key.F15] = 0x71,
+        [Key.F16] = 0x6A, [Key.F17] = 0x40, [Key.F18] = 0x4F, [Key.F19] = 0x50, [Key.F20] = 0x5A,
+        [Key.NumPad0] = 0x52, [Key.NumPad1] = 0x53, [Key.NumPad2] = 0x54, [Key.NumPad3] = 0x55,
+        [Key.NumPad4] = 0x56, [Key.NumPad5] = 0x57, [Key.NumPad6] = 0x58, [Key.NumPad7] = 0x59,
+        [Key.NumPad8] = 0x5B, [Key.NumPad9] = 0x5C,
+        [Key.Home] = 0x73, [Key.Prior] = 0x74, [Key.Delete] = 0x75, [Key.End] = 0x77,
+        [Key.Next] = 0x79, [Key.Left] = 0x7B, [Key.Right] = 0x7C, [Key.Down] = 0x7D, [Key.Up] = 0x7E,
+    };
+}
+
+/// <summary>
+/// A system-wide push-to-talk key watcher. Implementations observe only: every
+/// key still reaches the focused application. <see cref="Pressed"/> and
+/// <see cref="Released"/> fire on the UI thread.
+/// </summary>
+public interface IGlobalPushToTalkHook : IDisposable
+{
+    event Action? Pressed;
+    event Action? Released;
+
+    /// <summary>The binding to watch.</summary>
+    PushToTalkBinding Binding { get; set; }
+
+    /// <summary>When false, key events are ignored (but still passed through).</summary>
+    bool Enabled { get; set; }
+
+    bool IsInstalled { get; }
+
+    /// <summary>Install the hook. Returns false (and leaves PTT in-window) on failure.</summary>
+    bool Install();
 }
 
 /// <summary>
@@ -177,7 +232,7 @@ public sealed record PushToTalkBinding(Key Key, KeyModifiers Modifiers)
 /// It must be installed from a thread with a message loop — the Avalonia UI
 /// thread is one — and its callback runs on that same thread, so it stays tiny.
 /// </summary>
-public sealed class GlobalPushToTalkHook : IDisposable
+public sealed class WindowsPushToTalkHook : IGlobalPushToTalkHook
 {
     private const int WH_KEYBOARD_LL = 13;
     private const int WM_KEYDOWN = 0x0100;
@@ -226,7 +281,7 @@ public sealed class GlobalPushToTalkHook : IDisposable
 
     public bool IsInstalled => _hook != IntPtr.Zero;
 
-    public GlobalPushToTalkHook()
+    public WindowsPushToTalkHook()
     {
         _proc = Callback;
     }

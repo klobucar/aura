@@ -2058,6 +2058,11 @@
                                            FontSize="{StaticResource AuraFont11}"
                                            Foreground="{DynamicResource AuraTextDimBrush}"
                                            TextWrapping="Wrap"/>
+                                <Button Classes="brand" HorizontalAlignment="Left"
+                                        IsVisible="{Binding NeedsPttPermission}"
+                                        Command="{Binding OpenPttPermissionSettingsCommand}"
+                                        Content="Open System Settings"
+                                        ToolTip.Tip="Turn on Aura under Privacy &amp; Security › Input Monitoring"/>
                             </StackPanel>
 
                             <StackPanel Spacing="{StaticResource AuraSpace3}" IsVisible="{Binding IsVoiceActivationMode}">
