@@ -211,6 +211,9 @@ pub struct MlsRoster {
 
 /// Maximum avatar size accepted in a profile update.
 pub const MAX_AVATAR_BYTES: usize = 128 * 1024;
+
+/// Pause before each avatar sent to a session after its login snapshot.
+const AVATAR_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Maximum bio size (UTF-8 bytes) accepted in a profile update.
 pub const MAX_BIO_BYTES: usize = 16 * 1024;
 
@@ -928,7 +931,19 @@ impl ServerState {
                 .then_with(|| a.channel_id.cmp(&b.channel_id))
         });
 
-        let profiles: Vec<UserProfile> = self.profiles.iter().map(|p| p.value().clone()).collect();
+        // Avatars are left out: a snapshot goes to every session on each
+        // channel change, and to a new session before it can do anything
+        // else. A new session is sent them afterwards (see
+        // `send_avatars_after_snapshot`), and a changed one reaches everyone
+        // as a `ProfileUpdated`.
+        let profiles: Vec<UserProfile> = self
+            .profiles
+            .iter()
+            .map(|p| UserProfile {
+                avatar_data: Vec::new(),
+                ..p.value().clone()
+            })
+            .collect();
 
         info!(
             "[Snapshot] Sending {} channels and {} profiles",
@@ -1047,11 +1062,43 @@ impl ServerState {
         }
     }
 
+    /// Send a newly connected session every profile that has an avatar, one
+    /// at a time with a pause between them, as ordinary `ProfileUpdated`
+    /// messages. Login is not held up by them, and they do not arrive as a
+    /// single burst.
+    fn send_avatars_after_snapshot(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<ServiceMessage>,
+    ) {
+        let with_avatars: Vec<UserProfile> = self
+            .profiles
+            .iter()
+            .filter(|p| !p.avatar_data.is_empty())
+            .map(|p| p.value().clone())
+            .collect();
+        if with_avatars.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            for profile in with_avatars {
+                tokio::time::sleep(AVATAR_SEND_INTERVAL).await;
+                if sender
+                    .send(ServiceMessage::ProfileUpdated(profile))
+                    .is_err()
+                {
+                    // The session ended.
+                    return;
+                }
+            }
+        });
+    }
+
     /// Send the full server state snapshot to a newly connected user
     pub async fn send_server_snapshot(&self, session_id: u32) {
         if let Some(sess) = self.sessions.get(&session_id) {
             let snapshot = self.get_server_snapshot().await;
             let _ = sess.sender.send(ServiceMessage::ServerSnapshot(snapshot));
+            self.send_avatars_after_snapshot(sess.sender.clone());
 
             // Status the snapshot doesn't carry: presence, custom status and
             // server mute. The session's own entry is included when it is
@@ -3139,6 +3186,61 @@ mod tests {
             drain(&mut rx_b).as_slice(),
             [ServiceMessage::MlsWelcome { .. }]
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshots_omit_avatars_and_a_new_session_gets_them_afterwards() {
+        let state = create_test_state();
+        let avatar = vec![7u8; 4096];
+        state.profiles.insert(
+            "U_alice".into(),
+            UserProfile {
+                user_id: "U_alice".into(),
+                display_name: "Alice".into(),
+                avatar_data: avatar.clone(),
+                ..Default::default()
+            },
+        );
+        state.profiles.insert(
+            "U_bob".into(),
+            UserProfile {
+                user_id: "U_bob".into(),
+                display_name: "Bob".into(),
+                ..Default::default()
+            },
+        );
+
+        let (carol, mut rx) = session(&state, "U_carol");
+        state.send_server_snapshot(carol).await;
+
+        // The snapshot arrives at once, with both profiles and no avatar bytes.
+        let first = drain(&mut rx);
+        let snapshot = first
+            .iter()
+            .find_map(|m| match m {
+                ServiceMessage::ServerSnapshot(s) => Some(s),
+                _ => None,
+            })
+            .expect("a snapshot");
+        assert_eq!(snapshot.profiles.len(), 2);
+        assert!(snapshot.profiles.iter().all(|p| p.avatar_data.is_empty()));
+        assert!(!first
+            .iter()
+            .any(|m| matches!(m, ServiceMessage::ProfileUpdated(_))));
+
+        // The avatar follows as a profile update; Bob has none, so only one.
+        tokio::time::sleep(AVATAR_SEND_INTERVAL * 3).await;
+        let later = drain(&mut rx);
+        let updates: Vec<_> = later
+            .iter()
+            .filter_map(|m| match m {
+                ServiceMessage::ProfileUpdated(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].user_id, "U_alice");
+        assert_eq!(updates[0].avatar_data, avatar);
     }
 
     #[tokio::test]

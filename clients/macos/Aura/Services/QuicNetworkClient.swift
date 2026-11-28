@@ -2024,9 +2024,17 @@ public class QuicNetworkClient {
             await MainActor.run {
                 self.channels = snapshot.channels.map { ChannelModel(record: $0) }
                 
+                // Snapshots don't carry avatars: the server sends them after
+                // login and on change as profile updates. An empty one here
+                // says nothing, so keep the avatar we already hold.
                 var newProfiles: [String: UserProfileRecord] = [:]
                 for p in snapshot.profiles {
-                    newProfiles[p.userId] = p
+                    var merged = p
+                    if merged.avatarData.isEmpty,
+                       let known = self.profiles[p.userId]?.avatarData, !known.isEmpty {
+                        merged.avatarData = known
+                    }
+                    newProfiles[p.userId] = merged
                 }
                 self.profiles = newProfiles
                 
@@ -3445,6 +3453,9 @@ public class QuicNetworkClient {
         userPresenceByUuid = [:]
         userCustomStatusByUuid = [:]
         userServerMutedByUuid = [:]
+        // Avatars are re-sent after the next login; dropping the cache means
+        // one removed while we were away doesn't linger.
+        profiles = [:]
         resetModeration()
         
         // Cancel any pending retry

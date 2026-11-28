@@ -1223,3 +1223,7 @@ The server responds with `AdminResponse` (`success`, `error_message`). Internall
 - `PresenceStatus` enum: `PRESENCE_ONLINE = 0`, `PRESENCE_IDLE = 1`, `PRESENCE_DND = 2`.
 - `UserStatusUpdate` (`MSG_UPDATE_STATUS`): includes optional `presence` (`PresenceStatus`) and optional `custom_status` (`string`, truncated server-side to 128 characters). It also carries optional `is_server_muted` (`bool`), which only the server sets; a value sent by a client is ignored. Clients use it on their own session's update to tell the user a moderator has muted them. Newly connected clients receive `UserStatusUpdate` messages after `ServerState` for existing sessions with non-default `presence`, non-empty `custom_status` or a server mute, including their own session when it is server-muted.
 - `UserInfo` (returned in `ListUsersResponse`): includes optional `presence`, optional `custom_status`, and `is_server_muted` (`bool`).
+
+### Avatars and `ServerState`
+
+`ServerState` snapshots list every profile with an empty `avatar_data`. Avatars reach clients only as `ProfileUpdated` messages: one per profile that has an avatar, spaced out, after the snapshot a session receives at login, and one to everyone whenever a profile changes. A client should treat an empty `avatar_data` in a snapshot as "no information" and keep any avatar it already holds; an empty `avatar_data` in a `ProfileUpdated` means the avatar was removed.

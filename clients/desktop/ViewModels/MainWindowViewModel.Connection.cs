@@ -440,6 +440,9 @@ public partial class MainWindowViewModel
         SelectedChannel = null;
         Channels.Clear();
         _userStatusCache.Clear();
+        // Avatars are re-sent after the next login; dropping them here means
+        // one removed while we were away doesn't linger.
+        _avatars.Clear();
         _talkStore.Clear();
         VoiceRail.Rebuild(BuildParticipants(), _talkStore);
         EpochLabel = "";
@@ -766,7 +769,14 @@ public partial class MainWindowViewModel
         var profiles = snapshot.Profiles
             .GroupBy(p => p.UserId)
             .ToDictionary(g => g.Key, g => g.Last());
-        foreach (var (uuid, p) in profiles) _avatars.Update(uuid, p.AvatarData.ToByteArray());
+        // Snapshots don't carry avatars: the server sends them after login and
+        // on change as profile updates. An empty one here says nothing, so it
+        // must not clear an image we already hold. (An older server that still
+        // includes them is handled by the non-empty case.)
+        foreach (var (uuid, p) in profiles)
+        {
+            if (!p.AvatarData.IsEmpty) _avatars.Update(uuid, p.AvatarData.ToByteArray());
+        }
 
         var previousSelectedId = SelectedChannel?.Id;
         var ownId = _client?.UserId;
@@ -807,8 +817,12 @@ public partial class MainWindowViewModel
         if (_client?.UserUuid is { } ownUuid && profiles.TryGetValue(ownUuid, out var own))
         {
             MyBio = own.Bio;
-            _myAvatar = own.AvatarData.ToByteArray();
-            MyAvatarImage = _avatars.Get(ownUuid);
+            // Keep our own avatar bytes unless the snapshot actually has some:
+            // they are what a profile save sends back, so emptying them here
+            // would delete the avatar on the next save.
+            if (!own.AvatarData.IsEmpty) _myAvatar = own.AvatarData.ToByteArray();
+            MyAvatarImage = _avatars.Get(ownUuid)
+                ?? (_myAvatar is { Length: > 0 } ? _avatars.Update(ownUuid, _myAvatar) : null);
         }
 
         var current = selfChannelId ?? previousSelectedId;
