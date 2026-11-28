@@ -477,6 +477,7 @@ async fn test_user_status_sync_and_enforcement() {
         session_id,
         is_muted,
         is_deafened,
+        ..
     } = msg
     {
         assert_eq!(session_id, sess_a);
@@ -494,6 +495,7 @@ async fn test_user_status_sync_and_enforcement() {
         session_id,
         is_muted,
         is_deafened,
+        ..
     } = msg
     {
         assert_eq!(session_id, sess_a);

@@ -265,6 +265,12 @@ message KickUserRequest {
     string reason = 2;              // Shown to the kicked user
 }
 
+// Request to server-mute/unmute a live session (needs ban_users).
+message ServerMuteRequest {
+    uint32 target_session_id = 1;
+    bool muted = 2;
+}
+
 // Generic admin operation response
 message AdminResponse {
     bool success = 1;
@@ -278,6 +284,13 @@ message ListUsersRequest {
     uint32 limit = 3;               // 0 means the server default (100); capped at 500
 }
 
+// User presence status
+enum PresenceStatus {
+    PRESENCE_ONLINE = 0;
+    PRESENCE_IDLE = 1;
+    PRESENCE_DND = 2;
+}
+
 // User info in list response
 message UserInfo {
     string user_uuid = 1;
@@ -286,6 +299,9 @@ message UserInfo {
     bool banned = 4;
     bool is_admin = 5;
     int64 created_at = 6;
+    optional PresenceStatus presence = 7;
+    optional string custom_status = 8;
+    bool is_server_muted = 9;
 }
 
 // List users response
@@ -426,11 +442,13 @@ message DeleteUserRequest {
     string user_uuid = 1;
 }
 
-// User status update (mute/deafen)
+// User status update (mute/deafen/presence)
 message UserStatusUpdate {
     uint32 session_id = 1;
     bool is_muted = 2;
     bool is_deafened = 3;
+    optional PresenceStatus presence = 4;
+    optional string custom_status = 5;
 }
 
 // User visibility updates (replaces manual MSG_USER_JOINED/MSG_USER_LEFT)

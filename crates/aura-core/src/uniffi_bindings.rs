@@ -82,6 +82,12 @@ impl AudioSenderWrapper {
         }
     }
 
+    /// Set Opus encoder bitrate in bits per second (clamped to `12_000..=128_000`).
+    pub fn set_bitrate(&self, bps: u32) -> Result<(), AudioError> {
+        let inner = self.inner.read().map_err(|_| AudioError::CryptoError)?;
+        inner.set_bitrate(bps).map_err(convert_error)
+    }
+
     /// Update encryption key and epoch (called when MLS epoch advances)
     pub fn update_key(&self, key: Vec<u8>, epoch: u64) -> Result<(), AudioError> {
         if key.len() != KEY_SIZE {
@@ -239,6 +245,20 @@ pub struct MixedAudioResult {
     pub active_speakers: Vec<u32>,
 }
 
+/// Aggregated jitter buffer statistics for the audio receiver.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct AudioReceiverStatsRecord {
+    pub packets_received: u64,
+    pub packets_played: u64,
+    pub packets_lost: u64,
+    pub plc_count: u64,
+    pub packets_dropped_late: u64,
+    pub packets_dropped_duplicate: u64,
+    pub current_buffer_size: u64,
+    pub estimated_jitter_ms: f32,
+    pub estimated_loss_rate: f32,
+}
+
 #[uniffi::export]
 impl AudioReceiverWrapper {
     /// Create a new audio receiver
@@ -367,6 +387,27 @@ impl AudioReceiverWrapper {
         if let Ok(inner) = self.inner.read() {
             inner.set_jitter_buffer_ms(latency_ms);
         }
+    }
+
+    /// Return aggregated jitter buffer statistics across all active senders.
+    pub fn get_stats(&self) -> AudioReceiverStatsRecord {
+        self.inner
+            .read()
+            .map(|inner| {
+                let s = inner.get_stats();
+                AudioReceiverStatsRecord {
+                    packets_received: s.packets_received,
+                    packets_played: s.packets_played,
+                    packets_lost: s.packets_lost,
+                    plc_count: s.plc_count,
+                    packets_dropped_late: s.packets_dropped_late,
+                    packets_dropped_duplicate: s.packets_dropped_duplicate,
+                    current_buffer_size: s.current_buffer_size as u64,
+                    estimated_jitter_ms: s.estimated_jitter_ms,
+                    estimated_loss_rate: s.estimated_loss_rate,
+                }
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -736,11 +777,41 @@ pub struct UserProfileRecord {
     pub signing_key: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum PresenceStatusRecord {
+    #[default]
+    Online,
+    Idle,
+    Dnd,
+}
+
+impl From<aura_protocol::PresenceStatus> for PresenceStatusRecord {
+    fn from(p: aura_protocol::PresenceStatus) -> Self {
+        match p {
+            aura_protocol::PresenceStatus::PresenceOnline => Self::Online,
+            aura_protocol::PresenceStatus::PresenceIdle => Self::Idle,
+            aura_protocol::PresenceStatus::PresenceDnd => Self::Dnd,
+        }
+    }
+}
+
+impl From<PresenceStatusRecord> for aura_protocol::PresenceStatus {
+    fn from(p: PresenceStatusRecord) -> Self {
+        match p {
+            PresenceStatusRecord::Online => Self::PresenceOnline,
+            PresenceStatusRecord::Idle => Self::PresenceIdle,
+            PresenceStatusRecord::Dnd => Self::PresenceDnd,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UserStatusUpdate {
     pub session_id: u32,
     pub is_muted: bool,
     pub is_deafened: bool,
+    pub presence: Option<PresenceStatusRecord>,
+    pub custom_status: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -844,6 +915,9 @@ pub struct UserInfoRecord {
     pub is_admin: bool,
     /// Unix time (seconds) the account was created.
     pub created_at: i64,
+    pub presence: Option<PresenceStatusRecord>,
+    pub custom_status: Option<String>,
+    pub is_server_muted: bool,
 }
 
 /// Server's reply to `ListUsersRequest` (MSG_LIST_USERS, 0x48).
@@ -997,6 +1071,12 @@ pub fn encode_user_status_update(update: UserStatusUpdate) -> Vec<u8> {
         session_id: update.session_id,
         is_muted: update.is_muted,
         is_deafened: update.is_deafened,
+        presence: update
+            .presence
+            .map(|p| aura_protocol::PresenceStatus::from(p) as i32),
+        custom_status: update
+            .custom_status
+            .map(|s| s.chars().take(128).collect::<String>()),
     };
     proto.encode_to_vec()
 }
@@ -1006,10 +1086,16 @@ pub fn decode_user_status_update(data: Vec<u8>) -> Result<UserStatusUpdate, Audi
     use prost::Message;
     let proto =
         ProtoUserStatusUpdate::decode(&data[..]).map_err(|_| AudioError::PacketParseError)?;
+    let presence = proto
+        .presence
+        .and_then(|p| aura_protocol::PresenceStatus::try_from(p).ok())
+        .map(PresenceStatusRecord::from);
     Ok(UserStatusUpdate {
         session_id: proto.session_id,
         is_muted: proto.is_muted,
         is_deafened: proto.is_deafened,
+        presence,
+        custom_status: proto.custom_status,
     })
 }
 
@@ -1603,6 +1689,46 @@ mod tests {
     }
 
     #[test]
+    fn test_receiver_get_stats() {
+        let key = DaveCrypto::random_key();
+        let session_id = 7;
+
+        let sender = AudioSenderWrapper::new(session_id, &key).expect("Create sender");
+        let receiver = AudioReceiverWrapper::new();
+        let initial = receiver.get_stats();
+        assert_eq!(initial.packets_received, 0);
+        assert_eq!(initial.plc_count, 0);
+        assert_eq!(initial.estimated_loss_rate, 0.0);
+
+        receiver
+            .add_sender(session_id, &key, 0)
+            .expect("Add sender");
+
+        let pcm = vec![500i16; 960];
+        let p1 = sender.process(&pcm).unwrap().unwrap();
+        let p2 = sender.process(&pcm).unwrap().unwrap();
+
+        receiver.on_packet(&p1).unwrap();
+        // Duplicate packet should increment packets_dropped_duplicate
+        receiver.on_packet(&p1).unwrap();
+        // Pop p1
+        let decoded = receiver.pop_decoded();
+        assert_eq!(decoded.len(), 1);
+        // Pop with empty buffer triggers PLC
+        let plc = receiver.pop_decoded();
+        assert_eq!(plc.len(), 1);
+        // Deliver p2
+        receiver.on_packet(&p2).unwrap();
+
+        let stats = receiver.get_stats();
+        assert_eq!(stats.packets_received, 3);
+        assert_eq!(stats.packets_played, 1);
+        assert_eq!(stats.packets_dropped_duplicate, 1);
+        assert_eq!(stats.plc_count, 1);
+        assert_eq!(stats.current_buffer_size, 1);
+    }
+
+    #[test]
     fn moderation_requests_encode_their_fields() {
         let req = aura_protocol::ListUsersRequest::decode(&encode_list_users_request(20, 10)[..])
             .unwrap();
@@ -1663,6 +1789,9 @@ mod tests {
                 banned: false,
                 is_admin: true,
                 created_at: 1_700_000_000,
+                presence: Some(aura_protocol::PresenceStatus::PresenceIdle as i32),
+                custom_status: Some("AFK".into()),
+                is_server_muted: true,
             }],
             total_count: 7,
             success: true,
@@ -1681,6 +1810,31 @@ mod tests {
         );
         assert!(alice.verified && alice.is_admin && !alice.banned);
         assert_eq!(alice.created_at, 1_700_000_000);
+        assert_eq!(alice.presence, Some(PresenceStatusRecord::Idle));
+        assert_eq!(alice.custom_status.as_deref(), Some("AFK"));
+        assert!(alice.is_server_muted);
+    }
+
+    #[test]
+    fn test_sender_set_bitrate_and_presence_status_roundtrip() {
+        let key = DaveCrypto::random_key();
+        let sender = AudioSenderWrapper::new(9, &key).unwrap();
+        sender.set_bitrate(1_000).unwrap(); // clamped to 12_000
+        sender.set_bitrate(64_000).unwrap();
+        sender.set_bitrate(500_000).unwrap(); // clamped to 128_000
+
+        let long_status = "x".repeat(200);
+        let encoded = encode_user_status_update(UserStatusUpdate {
+            session_id: 9,
+            is_muted: false,
+            is_deafened: false,
+            presence: Some(PresenceStatusRecord::Dnd),
+            custom_status: Some(long_status),
+        });
+        let decoded = decode_user_status_update(encoded).unwrap();
+        assert_eq!(decoded.session_id, 9);
+        assert_eq!(decoded.presence, Some(PresenceStatusRecord::Dnd));
+        assert_eq!(decoded.custom_status.as_deref().map(str::len), Some(128));
     }
 
     #[test]
@@ -1807,6 +1961,12 @@ pub fn decode_list_users_response(data: Vec<u8>) -> Result<ListUsersResponseReco
                 banned: u.banned,
                 is_admin: u.is_admin,
                 created_at: u.created_at,
+                presence: u
+                    .presence
+                    .and_then(|p| aura_protocol::PresenceStatus::try_from(p).ok())
+                    .map(PresenceStatusRecord::from),
+                custom_status: u.custom_status,
+                is_server_muted: u.is_server_muted,
             })
             .collect(),
         total_count: proto.total_count,
@@ -1819,6 +1979,16 @@ pub fn encode_verify_user_request(target_user_uuid: String) -> Vec<u8> {
     aura_protocol::VerifyUserRequest {
         session_token: String::new(),
         target_user_uuid,
+    }
+    .encode_to_vec()
+}
+
+/// Payload of `ServerMuteRequest` (0x4D). Needs `ban_users`.
+#[uniffi::export]
+pub fn encode_server_mute_request(target_session_id: u32, muted: bool) -> Vec<u8> {
+    aura_protocol::ServerMuteRequest {
+        target_session_id,
+        muted,
     }
     .encode_to_vec()
 }

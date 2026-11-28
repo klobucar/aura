@@ -153,7 +153,26 @@ impl Config {
     /// If the file exists but is invalid, returns an error.
     /// Load configuration from `server.toml` with environment variable overrides.
     pub fn load() -> anyhow::Result<Self> {
-        let mut config = Self::load_from("server.toml")?;
+        Self::load_with_env("server.toml")
+    }
+
+    /// Load configuration from `path` with environment variable overrides.
+    pub fn load_with_env(path: &str) -> anyhow::Result<Self> {
+        Self::load_with_env_inner(path, false)
+    }
+
+    /// Load configuration from an explicit `path` with environment variable
+    /// overrides, returning an error if the file does not exist.
+    pub fn load_with_env_strict(path: &str) -> anyhow::Result<Self> {
+        Self::load_with_env_inner(path, true)
+    }
+
+    fn load_with_env_inner(path: &str, require_file: bool) -> anyhow::Result<Self> {
+        let mut config = if require_file {
+            Self::load_from_strict(path)?
+        } else {
+            Self::load_from(path)?
+        };
 
         // Environment variable overrides
         if let Ok(addr) = std::env::var("AURA_BIND_ADDRESS") {
@@ -215,7 +234,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Load configuration from a specific path.
+    /// Load configuration from a specific path, falling back to defaults if missing.
     pub fn load_from(path: &str) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(config_str) => {
@@ -228,6 +247,15 @@ impl Config {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Load configuration from an explicit path, returning an error if missing.
+    pub fn load_from_strict(path: &str) -> anyhow::Result<Self> {
+        let config_str = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file '{path}'"))?;
+        let config: Config = toml::from_str(&config_str)
+            .with_context(|| format!("Failed to parse config file '{path}'"))?;
+        Ok(config)
     }
 
     /// Resolve `server.bind_address`, whose host may be a name rather than
@@ -345,5 +373,12 @@ mode = "optional"
 
         config.server.bind_address = "missing-port".to_string();
         assert!(config.resolve_bind_address().await.is_err());
+    }
+
+    #[test]
+    fn test_strict_config_loading() {
+        let missing = "/tmp/aura_nonexistent_config_test_12345.toml";
+        assert!(Config::load_with_env(missing).is_ok());
+        assert!(Config::load_with_env_strict(missing).is_err());
     }
 }

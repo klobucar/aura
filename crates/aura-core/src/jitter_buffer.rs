@@ -84,6 +84,8 @@ pub struct JitterBufferStats {
     pub packets_dropped_duplicate: u64,
     /// Packets lost (gap in sequence)
     pub packets_lost: u64,
+    /// PLC (Packet Loss Concealment) frames generated
+    pub plc_count: u64,
     /// Current number of packets in buffer
     pub current_buffer_size: usize,
     /// Current estimated jitter in milliseconds
@@ -113,6 +115,9 @@ pub struct JitterBuffer {
     last_arrival: Option<Instant>,
     /// Number of consecutive PLC frames generated since the last real packet
     consecutive_plc: u32,
+    /// Trailing PLC frames generated while the buffer was empty; rolled back
+    /// from `stats.plc_count` if the stream drains to `Empty` (end-of-speech).
+    tail_plc_frames: u64,
 }
 
 impl JitterBuffer {
@@ -128,6 +133,7 @@ impl JitterBuffer {
             jitter_ema: 0.0,
             last_arrival: None,
             consecutive_plc: 0,
+            tail_plc_frames: 0,
         }
     }
 
@@ -226,6 +232,7 @@ impl JitterBuffer {
             self.last_played_seq = Some(self.next_seq);
             self.next_seq += 1;
             self.consecutive_plc = 0;
+            self.tail_plc_frames = 0;
             self.stats.packets_played += 1;
             self.stats.current_buffer_size = self.packets.len();
             return PopResult::Packet(pkt.data);
@@ -247,6 +254,7 @@ impl JitterBuffer {
                     self.last_played_seq = Some(self.next_seq);
                     self.next_seq += 1;
                     self.consecutive_plc = 0;
+                    self.tail_plc_frames = 0;
                     self.stats.packets_played += 1;
                     self.stats.current_buffer_size = self.packets.len();
                     return PopResult::PacketWithGap {
@@ -265,14 +273,22 @@ impl JitterBuffer {
             self.consecutive_plc += 1;
             if self.consecutive_plc > self.config.max_plc_frames {
                 // Sender went silent; reset started so they stop ghosting as an
-                // active speaker via infinite NeedPLC frames.
+                // active speaker via infinite NeedPLC frames. Roll back the
+                // trailing end-of-speech PLC frames so plc_count only tracks
+                // packet-loss concealment.
                 self.started = false;
                 self.consecutive_plc = 0;
+                self.stats.plc_count = self.stats.plc_count.saturating_sub(self.tail_plc_frames);
+                self.tail_plc_frames = 0;
                 return PopResult::Empty;
             }
+            self.stats.plc_count += 1;
+            self.tail_plc_frames += 1;
             PopResult::NeedPLC
         } else {
             self.consecutive_plc += 1;
+            self.tail_plc_frames = 0;
+            self.stats.plc_count += 1;
             PopResult::NeedPLC
         }
     }
@@ -302,6 +318,7 @@ impl JitterBuffer {
         self.jitter_ema = 0.0;
         self.last_arrival = None;
         self.consecutive_plc = 0;
+        self.tail_plc_frames = 0;
     }
 }
 
@@ -517,9 +534,11 @@ mod tests {
             assert!(matches!(jb.pop(), PopResult::NeedPLC));
         }
 
-        // 4th pop exceeds max_plc_frames -> Empty and started is reset
+        // 4th pop exceeds max_plc_frames -> Empty and started is reset;
+        // end-of-speech PLC frames are not counted as packet-loss PLC.
         assert!(matches!(jb.pop(), PopResult::Empty));
         assert!(!jb.started);
+        assert_eq!(jb.stats().plc_count, 0);
 
         // Subsequent pops remain Empty
         assert!(matches!(jb.pop(), PopResult::Empty));
@@ -537,5 +556,29 @@ mod tests {
             PopResult::Packet(data) => assert_eq!(data[0], 43),
             other => panic!("Expected second Packet after resume, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_mid_stream_plc_is_counted() {
+        let config = JitterBufferConfig {
+            target_latency_ms: 1000,
+            max_plc_frames: 5,
+            ..Default::default()
+        };
+        let mut jb = JitterBuffer::new(config);
+
+        assert!(jb.push(0, 0, make_packet(0)));
+        assert!(matches!(jb.pop(), PopResult::Packet(_)));
+
+        // Packet 1 is missing while packet 2 is buffered -> gap PLC
+        assert!(jb.push(2, 2 * 960, make_packet(2)));
+        assert!(matches!(jb.pop(), PopResult::NeedPLC));
+        assert_eq!(jb.stats().plc_count, 1);
+
+        // Packet 1 arrives late/reordered -> played, plc_count stays 1
+        assert!(jb.push(1, 960, make_packet(1)));
+        assert!(matches!(jb.pop(), PopResult::Packet(_)));
+        assert!(matches!(jb.pop(), PopResult::Packet(_)));
+        assert_eq!(jb.stats().plc_count, 1);
     }
 }

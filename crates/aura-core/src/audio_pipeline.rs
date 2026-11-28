@@ -103,6 +103,13 @@ impl AudioSender {
             .store((epoch & 0xFFFF) as u16, Ordering::SeqCst);
     }
 
+    /// Set the Opus encoder bitrate in bits per second (clamped to `12_000..=128_000`).
+    pub fn set_bitrate(&self, bps: u32) -> Result<(), AudioPipelineError> {
+        self.codec
+            .set_bitrate(bps)
+            .map_err(AudioPipelineError::Opus)
+    }
+
     /// Enable or disable RNNoise at runtime
     pub fn set_rnnoise_enabled(&self, enabled: bool) {
         self.enable_rnnoise.store(enabled, Ordering::SeqCst);
@@ -341,6 +348,20 @@ fn extend_sequence(highest: Option<u64>, sequence: u16) -> u64 {
     }
 }
 
+/// Aggregated jitter buffer statistics across all active senders.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct AudioReceiverStats {
+    pub packets_received: u64,
+    pub packets_played: u64,
+    pub packets_lost: u64,
+    pub plc_count: u64,
+    pub packets_dropped_late: u64,
+    pub packets_dropped_duplicate: u64,
+    pub current_buffer_size: usize,
+    pub estimated_jitter_ms: f32,
+    pub estimated_loss_rate: f32,
+}
+
 /// Audio receiver for decrypting and decoding incoming audio
 pub struct AudioReceiver {
     /// Per-sender state
@@ -398,6 +419,44 @@ impl AudioReceiver {
         for state in senders.values_mut() {
             state.jitter.set_target_latency(latency_ms);
         }
+    }
+
+    /// Return aggregated jitter buffer statistics across all registered senders.
+    pub fn get_stats(&self) -> AudioReceiverStats {
+        let senders = self.senders.read().unwrap();
+        let mut agg = AudioReceiverStats::default();
+        let mut jitter_sum = 0.0f32;
+        let mut jitter_senders = 0u32;
+
+        for state in senders.values() {
+            let s = state.jitter.stats();
+            agg.packets_received = agg.packets_received.saturating_add(s.packets_received);
+            agg.packets_played = agg.packets_played.saturating_add(s.packets_played);
+            agg.packets_lost = agg.packets_lost.saturating_add(s.packets_lost);
+            agg.plc_count = agg.plc_count.saturating_add(s.plc_count);
+            agg.packets_dropped_late = agg
+                .packets_dropped_late
+                .saturating_add(s.packets_dropped_late);
+            agg.packets_dropped_duplicate = agg
+                .packets_dropped_duplicate
+                .saturating_add(s.packets_dropped_duplicate);
+            agg.current_buffer_size = agg
+                .current_buffer_size
+                .saturating_add(s.current_buffer_size);
+            if s.packets_received > 0 {
+                jitter_sum += s.estimated_jitter_ms;
+                jitter_senders += 1;
+            }
+        }
+
+        if jitter_senders > 0 {
+            agg.estimated_jitter_ms = jitter_sum / jitter_senders as f32;
+        }
+        let total_expected = agg.packets_received.saturating_add(agg.packets_lost);
+        if total_expected > 0 {
+            agg.estimated_loss_rate = agg.packets_lost as f32 / total_expected as f32;
+        }
+        agg
     }
 
     /// Register a sender with their decryption key

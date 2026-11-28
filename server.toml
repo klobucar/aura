@@ -4,11 +4,30 @@
 [server]
 bind_address = "0.0.0.0:8443"
 max_connections = 1000
-log_level = "debug"
+log_level = "info"
 
 # Optional: Require this password to connect to the server
 # Leave commented out for an open server
 # password = "your-secret-here"
+
+# Optional: Static TLS certificate and private key (PEM format)
+# cert_path = "certs/server.crt"
+# key_path = "certs/server.key"
+
+# Optional: Automated Let's Encrypt (ACME) TLS certificates
+# acme_domain = "voice.example.com"
+# acme_contact = "admin@example.com"
+# acme_cache_path = "data/acme"
+# acme_directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# acme_bind_port = 443
+# http_bind_ip = "0.0.0.0"
+
+# Optional: Prometheus metrics endpoint (GET /metrics)
+# metrics_address = "[::]:9091"
+
+# Optional: Per-IP QUIC handshake rate limiting
+# handshake_per_minute = 60
+# handshake_burst = 20
 
 [database]
 path = "aura.db"

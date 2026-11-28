@@ -206,6 +206,13 @@ impl OpusCodec {
             .set_dred_duration(frames)
             .map_err(OpusError::from_opus16)
     }
+
+    /// Set encoder bitrate in bits per second (clamped to `12_000..=128_000`).
+    pub fn set_bitrate(&self, bps: u32) -> Result<(), OpusError> {
+        let clamped = bps.clamp(12_000, 128_000) as i32;
+        let mut encoder = self.encoder.lock().map_err(|_| OpusError::LockFailed)?;
+        encoder.set_bitrate(clamped).map_err(OpusError::from_opus16)
+    }
 }
 
 /// Opus codec errors (mapped from Opus16Error)
