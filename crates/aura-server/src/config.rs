@@ -80,6 +80,15 @@ pub struct ServerConfig {
     /// Instantaneous burst capacity for the per-IP handshake limiter.
     #[serde(default = "default_handshake_burst")]
     pub handshake_burst: u32,
+
+    /// Probe for a path MTU above QUIC's 1200-byte base. On by default; turn
+    /// it off where the network reacts badly to oversized packets.
+    #[serde(default = "default_mtu_discovery")]
+    pub mtu_discovery: bool,
+}
+
+fn default_mtu_discovery() -> bool {
+    true
 }
 
 fn default_handshake_per_minute() -> u32 {
@@ -135,6 +144,7 @@ impl Default for Config {
                 metrics_address: None,
                 handshake_per_minute: default_handshake_per_minute(),
                 handshake_burst: default_handshake_burst(),
+                mtu_discovery: default_mtu_discovery(),
             },
             database: DatabaseConfig {
                 path: PathBuf::from("aura.db"),
@@ -223,6 +233,13 @@ impl Config {
         if let Ok(v) = std::env::var("AURA_HANDSHAKE_PER_MINUTE") {
             if let Ok(n) = v.parse() {
                 config.server.handshake_per_minute = n;
+            }
+        }
+        if let Ok(v) = std::env::var("AURA_MTU_DISCOVERY") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "false" | "0" | "off" | "no" => config.server.mtu_discovery = false,
+                "true" | "1" | "on" | "yes" => config.server.mtu_discovery = true,
+                other => anyhow::bail!("AURA_MTU_DISCOVERY must be true or false, got '{other}'"),
             }
         }
         if let Ok(v) = std::env::var("AURA_HANDSHAKE_BURST") {
@@ -373,6 +390,17 @@ mode = "optional"
 
         config.server.bind_address = "missing-port".to_string();
         assert!(config.resolve_bind_address().await.is_err());
+    }
+
+    #[test]
+    fn mtu_discovery_is_on_unless_configured_off() {
+        assert!(Config::default().server.mtu_discovery);
+
+        let on: Config = toml::from_str("[server]\nbind_address = \"0.0.0.0:8443\"\nmax_connections = 10\nlog_level = \"info\"\n[database]\npath = \"a.db\"\n[verification]\nmode = \"optional\"\n").unwrap();
+        assert!(on.server.mtu_discovery);
+
+        let off: Config = toml::from_str("[server]\nbind_address = \"0.0.0.0:8443\"\nmax_connections = 10\nlog_level = \"info\"\nmtu_discovery = false\n[database]\npath = \"a.db\"\n[verification]\nmode = \"optional\"\n").unwrap();
+        assert!(!off.server.mtu_discovery);
     }
 
     #[test]

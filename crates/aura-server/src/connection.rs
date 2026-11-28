@@ -137,6 +137,12 @@ impl QuicServer {
             Self::generate_or_load_self_signed_config(&state)?
         };
 
+        let mut server_config = server_config;
+        if !state.config.server.mtu_discovery {
+            info!("Path MTU discovery disabled; packets stay at 1200 bytes");
+            server_config.transport_config(Arc::new(Self::transport_config(false)?));
+        }
+
         info!("Creating QUIC endpoint on {}...", bind_addr);
         let endpoint = Endpoint::server(server_config, bind_addr)
             .map_err(|e| anyhow!("Failed to bind QUIC endpoint to {}: {}", bind_addr, e))?;
@@ -408,16 +414,25 @@ impl QuicServer {
 
     /// Apply common transport settings for low-latency voice.
     fn apply_transport_config(mut server_config: ServerConfig) -> Result<ServerConfig> {
+        server_config.transport_config(Arc::new(Self::transport_config(true)?));
+        Ok(server_config)
+    }
+
+    /// Transport settings for low-latency voice. `mtu_discovery` is the
+    /// `server.mtu_discovery` setting.
+    fn transport_config(mtu_discovery: bool) -> Result<quinn::TransportConfig> {
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into()?));
         transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
 
-        // Send each packet with its own syscall instead of batching them with
-        // UDP segmentation offload. On Fly's UDP path, batched sends arrived
-        // at clients corrupted: the reply after login failed AEAD decryption
-        // and the connection stalled. A voice server sends small, paced
-        // packets, so the batching saves almost nothing here.
-        transport.enable_segmentation_offload(false);
+        if !mtu_discovery {
+            // Keep packets at QUIC's base size instead of probing for a
+            // larger path MTU. Some paths treat an oversized probe badly: on
+            // one deployment the first probe above ~1350 bytes was followed
+            // by everything the server sent to that client being dropped for
+            // about a minute, which hung logins right after the handshake.
+            transport.mtu_discovery_config(None);
+        }
 
         // Enable QUIC datagrams for unreliable audio packets
         transport.datagram_receive_buffer_size(Some(65536));
@@ -426,9 +441,8 @@ impl QuicServer {
         // control stream is opened by the server); a few per user are
         // allowed (see file_relay), so cap them low.
         transport.max_concurrent_bidi_streams(16u32.into());
-        server_config.transport_config(Arc::new(transport));
 
-        Ok(server_config)
+        Ok(transport)
     }
 
     /// Run the server, accepting connections.

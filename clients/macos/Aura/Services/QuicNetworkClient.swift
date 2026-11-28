@@ -729,6 +729,40 @@ public class QuicNetworkClient {
         connectionStatus = "Authenticating..."
         print("[QuicClient] Authenticating as '\(identity.displayName)'...")
         
+        // The login exchange is a few round trips. If the server's side of it
+        // never arrives, close the stream so the waits below fail instead of
+        // hanging until the server gives up on us.
+        loginTimedOut = false
+        loginWatchdog?.cancel()
+        loginWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.loginTimeoutSeconds))
+            guard !Task.isCancelled, let self else { return }
+            print("[QuicClient] No login reply after \(Int(Self.loginTimeoutSeconds))s; closing the connection")
+            self.loginTimedOut = true
+            stream.cancel()
+        }
+        defer {
+            loginWatchdog?.cancel()
+            loginWatchdog = nil
+        }
+
+        do {
+            try await performLoginExchange(on: stream, identity: identity, serverPassword: serverPassword)
+        } catch {
+            if loginTimedOut {
+                throw QuicClientError.loginTimedOut
+            }
+            throw error
+        }
+    }
+
+    /// How long the whole login exchange may take before the client gives up.
+    private static let loginTimeoutSeconds: Double = 10
+    private var loginTimedOut = false
+    /// Running only while the server's replies to the login are awaited.
+    private var loginWatchdog: Task<Void, Never>?
+
+    private func performLoginExchange(on stream: NWConnection, identity: UserIdentity, serverPassword: String?) async throws {
         // Step 1: Receive ServerHello with challenge
         print("[QuicClient] Waiting for ServerHello...")
         let serverHello = try await receive(on: stream, minimumLength: 33, maximumLength: 33)
@@ -762,6 +796,9 @@ public class QuicNetworkClient {
         }
         
         let payload = try await receiveHardenedPayload(maxLen: Self.MAX_AUTH_RESPONSE_SIZE, on: stream)
+        // The server answered; what follows is local setup, not waiting.
+        loginWatchdog?.cancel()
+        loginWatchdog = nil
         let response: AuthResponseRecord
         do {
             response = try decodeAuthResponse(payload: payload)
@@ -3670,6 +3707,8 @@ public enum QuicClientError: Error, LocalizedError {
     case protocolError(String)
     case authenticationFailed(String)
     case connectionClosed
+    /// The server did not complete the login exchange in time.
+    case loginTimedOut
     case untrustedCertificate(host: String, fingerprint: String)
     /// The server refused to delete the account; its message.
     case accountDeletionFailed(String)
@@ -3687,6 +3726,7 @@ public enum QuicClientError: Error, LocalizedError {
         case .protocolError(let msg): return "Protocol error: \(msg)"
         case .authenticationFailed(let msg): return "Authentication failed: \(msg)"
         case .connectionClosed: return "Connection closed"
+        case .loginTimedOut: return "The server did not answer the login in time. Try again."
         case .untrustedCertificate(let host, let fingerprint):
             return "Untrusted certificate from \(host)\n\nSHA256: \(fingerprint)"
         case .accountDeletionFailed(let message):

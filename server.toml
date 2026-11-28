@@ -29,6 +29,10 @@ log_level = "info"
 # handshake_per_minute = 60
 # handshake_burst = 20
 
+# Optional: Probe for a path MTU above 1200 bytes (default: true). Turn off
+# if clients hang right after connecting on your network.
+# mtu_discovery = false
+
 [database]
 path = "aura.db"
 
