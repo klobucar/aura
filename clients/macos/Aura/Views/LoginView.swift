@@ -242,7 +242,12 @@ struct LoginView: View {
         .padding(.bottom, 48)
         .liquidGlass()
         .sheet(isPresented: $showingServerManagement) {
-            ServerListView()
+            ServerListView { server in
+                serverAddress = server.host
+                serverPort = String(server.port)
+                serverPassword = server.password ?? ""
+                showingServerManagement = false
+            }
         }
         .sheet(isPresented: $showingProfileManagement, onDismiss: { profileManager.reload() }) {
             ProfileListView()

@@ -13,9 +13,12 @@ struct SettingsView: View {
     var serverHost: String? = nil
     /// Delete the account on `serverHost` (after the confirmation here).
     var onLeaveServer: (() -> Void)? = nil
+    /// Whether the client is currently connected to a voice channel.
+    var isInVoiceCall: Bool = false
     @StateObject private var appSettings = AppSettings.shared
     @StateObject private var hotkeyManager = HotkeyManager.shared
     @ObservedObject private var deviceManager = AudioDeviceManager.shared
+    @StateObject private var loopback = MicLoopbackController()
     
     // Audio Quality Settings
     @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
@@ -98,6 +101,38 @@ struct SettingsView: View {
                             ),
                             devices: deviceManager.availableOutputDevices
                         )
+
+                        Divider().opacity(0.1)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle(isOn: Binding(
+                                get: { loopback.isTesting },
+                                set: { enabled in
+                                    loopback.setTesting(
+                                        enabled,
+                                        outputDeviceID: deviceManager.selectedOutputDeviceID,
+                                        volume: Float(masterVolume)
+                                    )
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Test Mic (Loopback)")
+                                        .font(.system(size: 14, weight: .medium))
+                                    Text(isInVoiceCall ? "Unavailable while connected to a voice channel" : "Hear your microphone locally before joining a channel")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .toggleStyle(.switch)
+                            .disabled(isInVoiceCall)
+                            .onChange(of: isInVoiceCall) { _, inCall in
+                                if inCall { loopback.stop() }
+                            }
+
+                            if loopback.isTesting {
+                                MicLoopbackMeter(db: loopback.inputLevelDb)
+                            }
+                        }
                     }
                     .auraGlassSection(title: "Audio Devices", icon: "hifispeaker.2.fill")
 
@@ -253,6 +288,54 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                                 .padding(.top, 4)
                         }
+
+                        Divider().opacity(0.1)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("OPUS BITRATE")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(appSettings.opusBitrateKbps) kbps")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(AuraTheme.Colors.primary)
+                            }
+
+                            Picker("", selection: $appSettings.opusBitrateKbps) {
+                                ForEach(AppSettings.supportedBitratesKbps, id: \.self) { kbps in
+                                    Text("\(kbps) kbps").tag(kbps)
+                                }
+                            }
+                            .labelsHidden()
+                            .onChange(of: appSettings.opusBitrateKbps) { _, newValue in
+                                appSettings.saveSettings()
+                                NotificationCenter.default.post(
+                                    name: .audioSettingsChanged,
+                                    object: ["opusBitrateKbps": newValue]
+                                )
+                            }
+
+                            Text("Higher bitrate improves voice fidelity at the cost of bandwidth")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Divider().opacity(0.1)
+
+                        Toggle(isOn: $appSettings.voiceSoundCuesEnabled) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Voice Sound Cues")
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Play subtle sounds when muting, unmuting, joining, or leaving")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: appSettings.voiceSoundCuesEnabled) { _, _ in
+                            appSettings.saveSettings()
+                        }
                     }
                     .auraGlassSection(title: "Audio Quality", icon: "waveform")
                     
@@ -292,6 +375,7 @@ struct SettingsView: View {
         }
         .frame(width: 550, height: 750)
         .auraGlass(material: .hudWindow)
+        .onDisappear { loopback.stop() }
         .sheet(item: $pendingRestore) { backup in
             RestoreBackupSheet(
                 profileManager: profileManager,

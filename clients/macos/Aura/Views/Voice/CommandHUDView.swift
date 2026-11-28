@@ -35,16 +35,18 @@ struct CommandHUDView: View {
                 icon: context.isMicEnabled ? "mic.fill" : "mic.slash.fill",
                 isActive: context.isMicEnabled,
                 tint: AuraTheme.Colors.accent,
-                help: context.isMicEnabled ? "Mute" : "Unmute",
+                help: context.isMicEnabled ? "Mute (⌘⇧M)" : "Unmute (⌘⇧M)",
                 action: actions.toggleMic
             )
+            .keyboardShortcut("m", modifiers: [.command, .shift])
             segment(
                 icon: context.isDeafened ? "headphones.slash" : "headphones",
                 isActive: context.isDeafened,
                 tint: AuraTheme.Colors.danger,
-                help: context.isDeafened ? "Undeafen" : "Deafen",
+                help: context.isDeafened ? "Undeafen (⌘⇧D)" : "Deafen (⌘⇧D)",
                 action: actions.toggleDeafen
             )
+            .keyboardShortcut("d", modifiers: [.command, .shift])
         }
         .padding(AuraTheme.Spacing.s3)
         .background {

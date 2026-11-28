@@ -9,6 +9,8 @@ struct UserProfileEditView: View {
     @State private var displayName: String
     @State private var identity: UserIdentity?
     @State private var requiresBiometric: Bool
+    @State private var presenceStatus: AuraPresenceStatus = AppSettings.shared.presenceStatus
+    @State private var customStatusText: String = AppSettings.shared.customStatusText
     
     init(profileManager: ProfileManager, profile: UserProfileModel? = nil) {
         self.profileManager = profileManager
@@ -77,6 +79,29 @@ struct UserProfileEditView: View {
                     .padding(.leading, 4)
                 }
                 .padding(.top, 8)
+
+                // Presence & Custom Status
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Presence")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Picker("Presence", selection: $presenceStatus) {
+                        ForEach(AuraPresenceStatus.allCases, id: \.self) { status in
+                            Text(status.shortLabel).tag(status)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+
+                    TextField("Custom status (optional)", text: $customStatusText)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: customStatusText) { _, newValue in
+                            if newValue.count > 128 {
+                                customStatusText = String(newValue.prefix(128))
+                            }
+                        }
+                }
+                .padding(.top, 4)
             }
             .padding()
             .auraGlass()
@@ -141,7 +166,12 @@ struct UserProfileEditView: View {
             )
             profileManager.profiles.append(newProfile)
         }
-        
+
+        AppSettings.shared.presenceStatus = presenceStatus
+        AppSettings.shared.customStatusText = String(customStatusText.prefix(128))
+        AppSettings.shared.saveSettings()
+        NotificationCenter.default.post(name: .presenceStatusChanged, object: nil)
+
         dismiss()
     }
 }

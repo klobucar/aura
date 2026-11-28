@@ -300,7 +300,8 @@ struct ContentView: View {
                 ttsManager: tts,
                 identity: identity,
                 serverHost: client.isAuthenticated ? client.connectedHost : nil,
-                onLeaveServer: { leaveServer(client: client) }
+                onLeaveServer: { leaveServer(client: client) },
+                isInVoiceCall: client.isConnected && client.currentChannelId != nil
             )
         }
         .leaveServerAlert(
@@ -475,7 +476,7 @@ struct ContentView: View {
         let messages = computedChatMessages(client: client)
         let channel = currentChannel(for: client)
         let showsComment = channel.map { !$0.comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
-        let showsBanner = !client.isConnected
+        let showsBanner = !client.isConnected || client.isServerMuted
 
         VStack(spacing: 0) {
             chatHeader(client: client, messages: messages)
@@ -485,13 +486,32 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if showsBanner || showsComment {
                     VStack(spacing: 10) {
-                        if showsBanner {
+                        if !client.isConnected {
                             ConnectionBanner(
                                 isRetrying: client.isRetrying,
                                 status: client.connectionStatus,
                                 isBanned: client.wasBanned,
                                 onRetry: { client.retryConnectionNow() }
                             )
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                        if client.isServerMuted {
+                            HStack(spacing: 8) {
+                                Image(systemName: "mic.slash.circle.fill")
+                                    .foregroundStyle(AuraTheme.Colors.danger)
+                                Text("You are server-muted by a moderator. Your audio is not being transmitted.")
+                                    .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12, weight: .medium))
+                                    .foregroundStyle(AuraTheme.Colors.text)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(AuraTheme.Colors.danger.opacity(0.15))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: AuraTheme.Radii.r10, style: .continuous)
+                                    .strokeBorder(AuraTheme.Colors.danger.opacity(0.35), lineWidth: 1)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: AuraTheme.Radii.r10, style: .continuous))
                             .transition(.move(edge: .top).combined(with: .opacity))
                         }
                         if showsComment, let channel {
@@ -1061,6 +1081,7 @@ struct ContentView: View {
         Task {
             do {
                 try await client.joinChannel(channelId)
+                VoiceSoundCue.join.playIfEnabled()
                 print("[ContentView] Switched to channel \(channelId)")
             } catch {
                 print("[ContentView] Failed to switch channel: \(error)")
@@ -1076,6 +1097,13 @@ struct ContentView: View {
         // Cannot unmute if deafened
         if isDeafened && !isMicEnabled {
             return
+        }
+
+        let wasMicEnabled = isMicEnabled
+        defer {
+            if isMicEnabled != wasMicEnabled {
+                (isMicEnabled ? VoiceSoundCue.unmute : VoiceSoundCue.mute).playIfEnabled()
+            }
         }
 
         switch audioSettings.transmissionMode {
@@ -1179,6 +1207,9 @@ struct ContentView: View {
     }
 
     private func disconnect() {
+        if isConnected {
+            VoiceSoundCue.leave.playIfEnabled()
+        }
         audioCapture.stop()
         client?.clearLocalSpeaking()
         client?.disconnect()

@@ -32,7 +32,10 @@ struct RosterMember: Identifiable {
     let isLocal: Bool
     let isMuted: Bool
     let isDeafened: Bool
+    let isServerMuted: Bool
     let isDisconnected: Bool
+    let presence: AuraPresenceStatus
+    let customStatus: String?
     let isSpeaking: Bool
     let isLocallyMuted: Bool
     let localVolume: Float
@@ -75,6 +78,7 @@ struct RosterSidebar: View {
                 name: identity.displayName,
                 avatarData: localAvatar,
                 shortFingerprint: shortFingerprint,
+                isServerMuted: client.isServerMuted,
                 actions: actions
             )
 
@@ -208,7 +212,10 @@ struct RosterSidebar: View {
                 isLocal: false,
                 isMuted: user.isMuted,
                 isDeafened: user.isDeafened,
+                isServerMuted: user.isServerMuted,
                 isDisconnected: user.isDisconnected,
+                presence: user.presence,
+                customStatus: user.customStatus,
                 isSpeaking: client.activeSpeakers.contains(user.id),
                 isLocallyMuted: client.isLocallyMuted(sessionId: user.id),
                 localVolume: client.localVolume(for: user.id),
@@ -220,6 +227,7 @@ struct RosterSidebar: View {
         // You appear in the channel you're in, under your own name, like
         // everyone else — the mock lists "you" in the room, not only in the card.
         if channel.id == currentChannelId, let sessionId = client.sessionId {
+            let localCustomStatus = AppSettings.shared.customStatusText
             result.append(RosterMember(
                 id: sessionId,
                 uuid: client.userUuid,
@@ -229,7 +237,10 @@ struct RosterSidebar: View {
                 isLocal: true,
                 isMuted: !isMicEnabled,
                 isDeafened: isDeafened,
+                isServerMuted: client.isServerMuted,
                 isDisconnected: false,
+                presence: AppSettings.shared.presenceStatus,
+                customStatus: localCustomStatus.isEmpty ? nil : localCustomStatus,
                 isSpeaking: client.isLocalSpeaking,
                 isLocallyMuted: false,
                 localVolume: 1,
@@ -247,27 +258,71 @@ private struct IdentityCard: View {
     let name: String
     let avatarData: Data?
     let shortFingerprint: String?
+    let isServerMuted: Bool
     let actions: RosterActions
+    @ObservedObject private var appSettings = AppSettings.shared
+
+    private var presenceColor: Color {
+        switch appSettings.presenceStatus {
+        case .online: return AuraTheme.Colors.accent
+        case .idle: return AuraTheme.Colors.caution
+        case .dnd: return AuraTheme.Colors.danger
+        }
+    }
 
     var body: some View {
         HStack(spacing: 10) {
             AuraAvatar(name: name, data: avatarData, size: 34)
 
             VStack(alignment: .leading, spacing: AuraTheme.Spacing.s2) {
-                Text(name)
-                    .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
-                    .foregroundStyle(AuraTheme.Colors.text)
-                    .lineLimit(1)
-                Text(ChatFormatting.identityLine(shortFingerprint: shortFingerprint))
-                    .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10))
-                    .foregroundStyle(AuraTheme.Colors.accent)
-                    .lineLimit(1)
-                    .help("Your identity key fingerprint")
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(presenceColor)
+                        .frame(width: 7, height: 7)
+                    Text(name)
+                        .font(AuraTheme.Typography.ui(AuraTheme.Typography.t13, weight: .semibold))
+                        .foregroundStyle(AuraTheme.Colors.text)
+                        .lineLimit(1)
+                    if isServerMuted {
+                        Image(systemName: "mic.slash.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AuraTheme.Colors.danger)
+                            .help("Server muted")
+                    }
+                }
+                if !appSettings.customStatusText.isEmpty {
+                    Text(appSettings.customStatusText)
+                        .font(AuraTheme.Typography.ui(AuraTheme.Typography.t10))
+                        .foregroundStyle(AuraTheme.Colors.textMid)
+                        .lineLimit(1)
+                } else {
+                    Text(ChatFormatting.identityLine(shortFingerprint: shortFingerprint))
+                        .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10))
+                        .foregroundStyle(AuraTheme.Colors.accent)
+                        .lineLimit(1)
+                        .help("Your identity key fingerprint")
+                }
             }
 
             Spacer(minLength: 0)
 
             Menu {
+                Menu("Status") {
+                    ForEach(AuraPresenceStatus.allCases, id: \.self) { status in
+                        Button {
+                            appSettings.presenceStatus = status
+                            appSettings.saveSettings()
+                            NotificationCenter.default.post(name: .presenceStatusChanged, object: nil)
+                        } label: {
+                            if appSettings.presenceStatus == status {
+                                Label(status.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(status.displayName)
+                            }
+                        }
+                    }
+                }
+                Divider()
                 Button("Edit Profile…", systemImage: "pencil", action: actions.editProfile)
                 Button("Verify Identities…", systemImage: "checkmark.shield") { actions.compareKeys(nil) }
                 Divider()
@@ -416,10 +471,25 @@ private struct RosterMemberRow: View {
                     }
                 }
 
-                Text(member.displayName)
-                    .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12, weight: member.isSpeaking ? .medium : .regular))
-                    .foregroundStyle(nameColor)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        if !member.isDisconnected {
+                            Circle()
+                                .fill(presenceColor)
+                                .frame(width: 6, height: 6)
+                        }
+                        Text(member.displayName)
+                            .font(AuraTheme.Typography.ui(AuraTheme.Typography.t12, weight: member.isSpeaking ? .medium : .regular))
+                            .foregroundStyle(nameColor)
+                            .lineLimit(1)
+                    }
+                    if !member.isDisconnected, let status = member.customStatus, !status.isEmpty {
+                        Text(status)
+                            .font(AuraTheme.Typography.ui(AuraTheme.Typography.t10))
+                            .foregroundStyle(AuraTheme.Colors.textDim)
+                            .lineLimit(1)
+                    }
+                }
 
                 Spacer(minLength: 4)
 
@@ -473,10 +543,21 @@ private struct RosterMemberRow: View {
                 }
                 if client.isAdmin, let uuid = member.uuid {
                     Divider()
+                    Button(member.isServerMuted ? "Server Unmute" : "Server Mute", systemImage: member.isServerMuted ? "mic.fill" : "mic.slash.fill") {
+                        Task { await client.serverMuteUser(sessionId: member.id, muted: !member.isServerMuted) }
+                    }
                     Button("Move to Lobby…", systemImage: "arrow.uturn.backward") { actions.moveToLobby(uuid) }
                     Button("Moderate…", systemImage: "shield") { actions.openModeration(uuid) }
                 }
             }
+        }
+    }
+
+    private var presenceColor: Color {
+        switch member.presence {
+        case .online: return AuraTheme.Colors.accent
+        case .idle: return AuraTheme.Colors.caution
+        case .dnd: return AuraTheme.Colors.danger
         }
     }
 
@@ -498,6 +579,10 @@ private struct RosterMemberRow: View {
                         .font(AuraTheme.Typography.mono(9))
                         .foregroundStyle(AuraTheme.Colors.textFaint)
                         .help("Local volume")
+                }
+
+                if member.isServerMuted {
+                    glyph("mic.slash.circle.fill", AuraTheme.Colors.danger, help: "Server muted")
                 }
 
                 if member.isLocallyMuted {
@@ -540,6 +625,7 @@ private struct RosterMemberRow: View {
     private var accessibilityText: String {
         var parts = [member.isLocal ? "\(member.displayName), you" : member.displayName]
         if member.isSpeaking { parts.append("speaking") }
+        if member.isServerMuted { parts.append("server muted") }
         if member.isDeafened { parts.append("deafened") } else if member.isMuted { parts.append("muted") }
         if member.trust == .keyChanged { parts.append("identity key changed") }
         return parts.joined(separator: ", ")

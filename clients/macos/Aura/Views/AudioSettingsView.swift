@@ -1,12 +1,16 @@
+import Combine
 import SwiftUI
 
 struct AudioSettingsView: View {
+    var isInVoiceCall: Bool = false
     @AppStorage("noiseSuppressionEnabled") private var noiseSuppressionEnabled = true
     @AppStorage("aecEnabled") private var aecEnabled = false
     @AppStorage("webrtcNsEnabled") private var webrtcNsEnabled = false
     @AppStorage("webrtcAgcEnabled") private var webrtcAgcEnabled = true
     @AppStorage("masterVolume") private var masterVolume = 1.0
     @AppStorage("jitterBufferMs") private var jitterBufferMs = 20
+    @StateObject private var loopback = MicLoopbackController()
+    @ObservedObject private var deviceManager = AudioDeviceManager.shared
 
     var body: some View {
         Form {
@@ -30,6 +34,28 @@ struct AudioSettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Output")
+            }
+
+            Section {
+                Toggle("Test Mic (Loopback)", isOn: Binding(
+                    get: { loopback.isTesting },
+                    set: { enabled in
+                        loopback.setTesting(
+                            enabled,
+                            outputDeviceID: deviceManager.selectedOutputDeviceID,
+                            volume: Float(masterVolume)
+                        )
+                    }
+                ))
+                .disabled(isInVoiceCall)
+                if loopback.isTesting {
+                    MicLoopbackMeter(db: loopback.inputLevelDb)
+                }
+                Text(isInVoiceCall ? "Unavailable while connected to a voice channel" : "Hear your microphone locally before joining a channel")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Mic Test")
             }
 
             Section("Audio Quality") {
@@ -113,6 +139,112 @@ struct AudioSettingsView: View {
             }
         }
         .navigationTitle("Audio Settings")
+        .onChange(of: isInVoiceCall) { _, inCall in
+            if inCall { loopback.stop() }
+        }
+        .onDisappear { loopback.stop() }
+    }
+}
+
+private actor MicLoopbackOutput {
+    private let playback = AudioPlayback(postsRestartNotification: false)
+    private var isRunning = false
+
+    func start(deviceID: UInt32?, volume: Float) {
+        guard !isRunning else { return }
+        playback.setOutputDevice(deviceID)
+        playback.setVolume(volume)
+        playback.start()
+        isRunning = true
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        playback.stop()
+        isRunning = false
+    }
+
+    func enqueue(_ samples: [Float]) {
+        guard isRunning, !samples.isEmpty else { return }
+        let pcm = samples.map { sample -> Int16 in
+            let clamped = max(-1.0, min(1.0, sample))
+            return Int16(clamped * Float(Int16.max))
+        }
+        playback.enqueue(pcm: pcm)
+    }
+}
+
+@MainActor
+final class MicLoopbackController: ObservableObject {
+    @Published var isTesting = false
+    @Published var inputLevelDb: Float = -60
+
+    private let capture = AudioCapture()
+    private let output = MicLoopbackOutput()
+
+    func setTesting(_ enabled: Bool, outputDeviceID: UInt32?, volume: Float) {
+        if enabled {
+            start(outputDeviceID: outputDeviceID, volume: volume)
+        } else {
+            stop()
+        }
+    }
+
+    func start(outputDeviceID: UInt32?, volume: Float) {
+        guard !isTesting else { return }
+        isTesting = true
+        let out = output
+        Task {
+            await out.start(deviceID: outputDeviceID, volume: volume)
+        }
+        capture.start { [weak self] samples in
+            var sum: Float = 0
+            for s in samples { sum += s * s }
+            let rms = sqrt(sum / Float(max(1, samples.count)))
+            let db = rms > 0 ? max(-60, 20 * log10(rms)) : -60
+            Task { @MainActor [weak self] in
+                if self?.isTesting == true {
+                    self?.inputLevelDb = db
+                }
+            }
+            Task {
+                await out.enqueue(samples)
+            }
+        }
+    }
+
+    func stop() {
+        guard isTesting else { return }
+        isTesting = false
+        inputLevelDb = -60
+        capture.stop()
+        let out = output
+        Task {
+            await out.stop()
+        }
+    }
+}
+
+struct MicLoopbackMeter: View {
+    let db: Float
+
+    private var level: Double {
+        let clamped = max(-60, min(0, Double(db)))
+        return (clamped + 60) / 60
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.10))
+                Capsule()
+                    .fill(AuraTheme.Gradients.primary)
+                    .frame(width: max(4, geo.size.width * level))
+            }
+        }
+        .frame(height: 6)
+        .animation(.easeOut(duration: 0.08), value: level)
     }
 }
 
