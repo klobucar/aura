@@ -7,6 +7,7 @@
         x:Class="Aura.Desktop.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="{Binding WindowTitle}"
+        Icon="/Assets/aura.ico"
         Width="1200" Height="760"
         MinWidth="960" MinHeight="600"
         WindowStartupLocation="CenterScreen"
