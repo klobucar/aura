@@ -4,9 +4,10 @@ target/
 
 # macOS / Xcode
 .DS_Store
-*.xcodeproj/xcuserdata/
-*.xcodeproj/project.xcworkspace/xcuserdata/
-*.xcworkspace/xcuserdata/
+# Per-user Xcode state, wherever the project lives. (A pattern with a slash
+# in the middle only matches from the repo root, so name the directory.)
+xcuserdata/
+*.xcuserstate
 DerivedData/
 build/
 *.swiftmodule
@@ -74,3 +75,7 @@ crates/opus16-sys/vendor/opus/dnn/plc_data.c
 crates/opus16-sys/vendor/opus/dnn/plc_data.h
 crates/opus16-sys/vendor/opus/dnn/models/
 crates/opus16-sys/vendor/opus/opus_data-*.tar.gz
+
+# Local tool state and package caches
+.nuget/
+.codex/
