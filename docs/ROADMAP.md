@@ -33,7 +33,7 @@
 
 ### Clients
 - ✅ macOS SwiftUI client (voice, text, channels, settings, profiles, TOFU pinning, Secure Enclave, Swift 6)
-- ✅ Avalonia (.NET 10) desktop client with shared UniFFI core (voice + text parity for Windows/Linux/macOS)
+- ✅ Avalonia (.NET 11) desktop client with shared UniFFI core (voice + text parity for Windows/Linux/macOS)
 - ✅ Both clients: `aura://` invite links, mentions and notifications, identity backup/restore, account deletion, key-change trust sheet with safety words, layout modes and themes
 - ❌ Neither client has a moderation UI yet (see Phase 4.2)
 

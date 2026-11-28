@@ -1,0 +1,222 @@
+name: Build Artifacts
+
+# Builds the things people run: the server for Linux on x86_64 and arm64, and
+# the desktop client for Linux, Windows and macOS.
+#
+# - Run by hand, it uploads them as workflow artifacts, which expire.
+# - On a `v*` tag, it also attaches them to a draft GitHub Release, where
+#   they stay. The draft is published by hand once it has been checked.
+#
+# Nothing is signed or notarized.
+#
+# The native macOS (Swift) client is not built here: it needs a signing
+# certificate.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep this in sync with .github/workflows/ci.yml and vendor/opus/autogen.sh.
+  OPUS_MODEL_CHECKSUM: a5177ec6fb7d15058e99e57029746100121f68e4890b1467d4094aa336b6013e
+  # Must match the `uniffi` version in crates/aura-core/Cargo.toml (the
+  # "+v0.32.x" suffix), or generated aura_core.cs fails UniFFI's checksum
+  # validation at runtime.
+  UNIFFI_BINDGEN_CS_TAG: v0.12.0+v0.32.0
+
+permissions: {}
+
+# No build caches in this workflow, on purpose: it produces the artifacts
+# people download, and a cache written by another run is not something to
+# build those from. It costs a full compile each time.
+
+jobs:
+  server:
+    name: server linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    env:
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: build server
+        run: cargo build --release --locked -p aura-server --bin aura-server
+      - name: package
+        # Built against the runner's glibc (Ubuntu 24.04), so it needs that
+        # or newer. The Dockerfile remains the way to get a self-contained
+        # image.
+        run: |
+          name="aura-server-linux-$ARCH"
+          mkdir -p "dist/$name"
+          cp target/release/aura-server "dist/$name/"
+          cp server.toml LICENSE "dist/$name/"
+          "dist/$name/aura-server" --version
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aura-server-linux-${{ matrix.arch }}
+          path: |
+            dist/aura-server-linux-${{ matrix.arch }}.tar.gz
+            dist/aura-server-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  desktop:
+    name: desktop ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-24.04
+            core_lib: libaura_core.so
+            exe: Aura.Desktop
+          - rid: win-x64
+            runner: windows-2025
+            core_lib: aura_core.dll
+            exe: Aura.Desktop.exe
+          - rid: osx-arm64
+            runner: macos-latest
+            core_lib: libaura_core.dylib
+            exe: Aura.Desktop
+    env:
+      RID: ${{ matrix.rid }}
+      CORE_LIB: ${{ matrix.core_lib }}
+      EXE: ${{ matrix.exe }}
+      PROTOC_VERSION: '36.2'
+      PROTOC_SHA256: f0c128dc0d8492eceece83bb459a4c0e316764b929ffbf1aa416357fd644edd3
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '11.0.x'
+      - name: download opus DNN model data
+        working-directory: crates/opus16-sys/vendor/opus
+        run: sh dnn/download_model.sh "$OPUS_MODEL_CHECKSUM"
+      - name: install build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libasound2-dev pkg-config
+      - name: install build deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: install protoc (Windows, pinned and checksum-verified)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\protoc.zip"
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $env:PROTOC_SHA256) { throw 'protoc checksum mismatch' }
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\protoc"
+          "PROTOC=$env:RUNNER_TEMP\protoc\bin\protoc.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: build Rust core
+        run: cargo build --release --locked -p aura-core
+      - name: install uniffi-bindgen-cs
+        run: |
+          if ! uniffi-bindgen-cs --version 2>/dev/null | grep -qF "${UNIFFI_BINDGEN_CS_TAG#v}"; then
+            cargo install --force \
+              --git https://github.com/NordSecurity/uniffi-bindgen-cs \
+              --tag "$UNIFFI_BINDGEN_CS_TAG" \
+              uniffi-bindgen-cs
+          fi
+      - name: generate C# bindings
+        run: |
+          mkdir -p clients/desktop/Generated
+          uniffi-bindgen-cs \
+            --library "target/release/$CORE_LIB" \
+            --out-dir clients/desktop/Generated
+          cp "target/release/$CORE_LIB" clients/desktop/Generated/
+      - name: dotnet publish
+        run: |
+          out="dist/aura-desktop-$RID"
+          dotnet publish clients/desktop/Aura.Desktop.csproj -c Release -r "$RID" \
+            --self-contained true -o "$out"
+          test -f "$out/$EXE"
+          test -f "$out/$CORE_LIB"
+      - name: package
+        # One archive per platform with a SHA-256 file beside it. A tarball
+        # keeps the executable bit, which a zip would lose; Windows gets a
+        # zip. (The artifact download wraps these in a zip of its own.)
+        run: |
+          name="aura-desktop-$RID"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="$name.zip"
+            (cd dist && 7z a -tzip -bso0 "$archive" "$name")
+          else
+            archive="$name.tar.gz"
+            tar -C dist -czf "dist/$archive" "$name"
+          fi
+          rm -rf "dist/$name"
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+          cat "dist/$archive.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aura-desktop-${{ matrix.rid }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    # Workflow artifacts expire; release assets do not. A tag build collects
+    # every package into a draft release for a person to check and publish.
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [server, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release and upload its files
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: create draft release
+        working-directory: dist
+        run: |
+          ls -l
+          # One checksum list for the release, checked against the files
+          # that actually arrived.
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+          sha256sum -c SHA256SUMS
+          gh release create "$TAG" --draft --verify-tag --generate-notes \
+            --title "$TAG" ./*.tar.gz ./*.zip SHA256SUMS
