@@ -336,6 +336,21 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// The client's status line as shown in the roster footer. A join arrives
+    /// as a channel id (`C_7d63…`), which means nothing to a person: show the
+    /// channel's name, as macOS does ("In #Lounge").
+    /// </summary>
+    private string DisplayStatus(string status)
+    {
+        if (!status.StartsWith(AuraNetworkClient.JoinedChannelStatusPrefix, StringComparison.Ordinal))
+            return status;
+
+        var channelId = status[AuraNetworkClient.JoinedChannelStatusPrefix.Length..];
+        var name = Channels.FirstOrDefault(c => c.Id == channelId)?.Name;
+        return string.IsNullOrWhiteSpace(name) ? "In channel" : $"In #{name}";
+    }
+
+    /// <summary>
     /// Subscribe to one client's events. Each connect builds a fresh client, so
     /// these never accumulate; audio engine/manager events are wired once in
     /// <see cref="EnsureAudio"/>.
@@ -348,7 +363,7 @@ public partial class MainWindowViewModel
             if (ReferenceEquals(_client, client)) action();
         });
 
-        client.OnStatusChanged += status => Ui(() => ConnectionStatus = status);
+        client.OnStatusChanged += status => Ui(() => ConnectionStatus = DisplayStatus(status));
         client.OnError += error => Ui(() => ConnectionStatus = $"Error: {error}");
         client.OnUserJoined += (cid, sid, name) => Ui(() => HandleUserJoined(cid, sid, name));
         client.OnUserLeft += (cid, sid) => Ui(() => HandleUserLeft(cid, sid));

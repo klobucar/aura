@@ -39,6 +39,17 @@
         <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
     </Style>
 
+    <!-- Modal sheet over the scrim (trust, moderation, settings, profile card,
+         channel editor, confirms). Opaque on purpose: the panel fill is a
+         5-13% tint, and a sheet filled with it lets the chat behind show
+         through its own text and inputs. -->
+    <Style Selector="Border.sheet">
+        <Setter Property="Background" Value="{DynamicResource AuraBackgroundBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPanelBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
+    </Style>
+
     <!-- Inset well for segmented controls and meters -->
     <Style Selector="Border.well">
         <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
@@ -89,6 +100,24 @@
     </Style>
     <Style Selector="Button.icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+
+    <!-- Brand-gradient action (send, save). Fluent swaps a button's background
+         for its own grey on hover and press, which drops the gradient from
+         under the white label; keep it. -->
+    <Style Selector="Button.brand">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.brand:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.brand:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
     </Style>
 
     <!-- ===================== Command HUD segments ==================== -->
@@ -156,6 +185,26 @@
     </Style>
     <Style Selector="TextBox.aura:focus /template/ Border#PART_BorderElement">
         <Setter Property="BorderBrush" Value="{DynamicResource AuraAccentBrush}"/>
+    </Style>
+
+    <!-- ComboBox to match TextBox.aura: the same well, radius and type size,
+         no rim. Without this it is the stock Fluent box, with a bright border
+         and 14px text beside a 13px borderless input. -->
+    <Style Selector="ComboBox.aura">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+        <Setter Property="FontSize" Value="{StaticResource AuraFont13}"/>
+    </Style>
+    <Style Selector="ComboBox.aura:pointerover /template/ Border#Background">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+    </Style>
+    <Style Selector="ComboBox.aura:pressed /template/ Border#Background">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>
 
     <!-- ========================= Animations ========================= -->
