@@ -712,7 +712,7 @@ public partial class User : ObservableObject
     /// <summary>The local user's own row ("you").</summary>
     public bool IsSelf { get; init; }
 
-    /// <summary>Admin items ("Moderate…", "Move to lobby…") are offered in the context menu.</summary>
+    /// <summary>Admin items (server mute, "Moderate…") are offered in the context menu.</summary>
     [ObservableProperty] private bool _canModerate;
 
     /// <summary>Opens the moderation console on this member.</summary>

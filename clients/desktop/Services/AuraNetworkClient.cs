@@ -200,6 +200,12 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         }
     }
 
+    /// <summary>
+    /// What the join status starts with; the channel id follows. The client
+    /// knows ids, not names, so the view model swaps in the name for display.
+    /// </summary>
+    public const string JoinedChannelStatusPrefix = "Joined channel ";
+
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
     /// <summary>sessionId, isMuted, isDeafened, presence, customStatus, isServerMuted (null when the server didn't say).</summary>
@@ -656,7 +662,7 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
             ForgetChannelGroups(_currentChannelId);
 
         _currentChannelId = channelId;
-        OnStatusChanged?.Invoke($"Joined channel {channelId}");
+        OnStatusChanged?.Invoke(JoinedChannelStatusPrefix + channelId);
         
         // Reset readiness trackers for this channel
         _textGroupReady.TryRemove(channelId, out _);

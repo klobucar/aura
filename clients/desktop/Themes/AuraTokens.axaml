@@ -89,7 +89,7 @@
 
     <!-- ==================================================================
          Type scale. The handoff's sub-pixel sizes are a scaled-canvas
-         artifact; Avalonia rounds to 11 / 12 / 13 / 14 / 18.
+         artifact; Avalonia rounds to 11 / 12 / 13 / 14 / 16 / 18.
          Mono is load-bearing — it is how the UI signals "machine truth" —
          and carries the numerics, fingerprints, keycaps, section labels.
          ================================================================== -->
@@ -99,6 +99,8 @@
     <sys:Double x:Key="AuraFont12">12</sys:Double>
     <sys:Double x:Key="AuraFont13">13</sys:Double>
     <sys:Double x:Key="AuraFont14">14</sys:Double>
+    <!-- Glyph size for icon buttons (attach, mic / deafen) -->
+    <sys:Double x:Key="AuraFont16">16</sys:Double>
     <sys:Double x:Key="AuraFont18">18</sys:Double>
 
     <sys:Double x:Key="AuraMono9">9</sys:Double>
