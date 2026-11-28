@@ -98,25 +98,13 @@ public class ChatBubbleTextColorConverter : IValueConverter
         => throw new NotImplementedException();
 }
 
-/// <summary>Border thickness: 1 for system messages, 0 for bubbles.</summary>
-public class BoolToThicknessConverter : IValueConverter
-{
-    public static readonly BoolToThicknessConverter Instance = new();
-
-    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value is bool isSystem && isSystem ? new Thickness(1) : new Thickness(0);
-
-    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => throw new NotImplementedException();
-}
-
 /// <summary>Corner radius: smaller for system messages.</summary>
 public class SystemMessageCornerRadiusConverter : IValueConverter
 {
     public static readonly SystemMessageCornerRadiusConverter Instance = new();
 
     public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value is bool isSystem && isSystem ? new CornerRadius(10) : new CornerRadius(18);
+        => value is bool isSystem && isSystem ? new CornerRadius(999) : new CornerRadius(20);
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotImplementedException();
@@ -316,15 +304,48 @@ public class VerifiedPillTextConverter : IValueConverter
         => throw new NotImplementedException();
 }
 
-/// <summary>Bubble rim: caution @38% on a mention, the panel rim otherwise.</summary>
+/// <summary>
+/// Bubble rim, as macOS's auraMessageBubble: white @ 18% on your own messages,
+/// caution @ 38% on a mention, the panel rim otherwise.
+/// </summary>
 public class ChatBubbleBorderConverter : IValueConverter
 {
     public static readonly ChatBubbleBorderConverter Instance = new();
 
+    private static readonly IBrush OutgoingRim = new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF));
+
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => TokenBrush.Get(value is ChatMessage { IsMention: true, IsFromCurrentUser: false }
-            ? "AuraMentionBorderBrush"
-            : "AuraPanelBorderBrush");
+        => value switch
+        {
+            ChatMessage { System: false, IsFromCurrentUser: true } => OutgoingRim,
+            ChatMessage { IsMention: true, IsFromCurrentUser: false } => TokenBrush.Get("AuraMentionBorderBrush"),
+            _ => TokenBrush.Get("AuraPanelBorderBrush"),
+        };
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>
+/// Bubble shadow, as macOS's auraMessageBubble: a primary @ 25% glow under
+/// your own messages, black @ 18% under others, none on system notices.
+/// </summary>
+public class ChatBubbleShadowConverter : IValueConverter
+{
+    public static readonly ChatBubbleShadowConverter Instance = new();
+
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is not ChatMessage { System: false } msg) return default(BoxShadows);
+        if (!msg.IsFromCurrentUser)
+            return new BoxShadows(new BoxShadow { OffsetY = 4, Blur = 8, Color = Color.FromArgb(0x2E, 0, 0, 0) });
+        var primary = Application.Current is { } app &&
+                      app.Resources.TryGetResource("AuraPrimaryColor", app.ActualThemeVariant, out var c) &&
+                      c is Color color
+            ? color
+            : Color.FromRgb(0x33, 0xA1, 0xFF);
+        return new BoxShadows(new BoxShadow { OffsetY = 4, Blur = 10, Color = Color.FromArgb(0x40, primary.R, primary.G, primary.B) });
+    }
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotImplementedException();

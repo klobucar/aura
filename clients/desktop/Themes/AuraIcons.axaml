@@ -32,4 +32,5 @@
     <StreamGeometry x:Key="AuraIconAudioLines">M2 10v3 M6 6v11 M10 3v18 M14 8v7 M18 5v13 M22 10v3</StreamGeometry>
     <StreamGeometry x:Key="AuraIconMessageSquare">M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z</StreamGeometry>
     <StreamGeometry x:Key="AuraIconVolumeX">M11 4.702a.7.7 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.7.7 0 0 0 11 19.298z M0 0 m16.5 14.5 5-5 M0 0 m16.5 9.5 5 5</StreamGeometry>
+    <StreamGeometry x:Key="AuraIconPaperclip">M0 0 m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551</StreamGeometry>
 </ResourceDictionary>

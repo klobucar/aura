@@ -31,7 +31,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        ApplyAcrylicTint();
+        ApplyBackground();
 
         _chatScroll = this.FindControl<ScrollViewer>("ChatScroll");
         _composer = this.FindControl<TextBox>("Composer");
@@ -55,7 +55,7 @@ public partial class MainWindow : Window
             if (_vm != null) _vm.WindowWidth = Bounds.Width;
         };
 
-        ActualThemeVariantChanged += (_, _) => ApplyAcrylicTint();
+        ActualThemeVariantChanged += (_, _) => ApplyBackground();
 
         // Key-up never arrives for a key released while another app has focus,
         // so an in-window hold has to end when the window loses focus.
@@ -88,7 +88,7 @@ public partial class MainWindow : Window
         if (_vm != null)
         {
             _vm.PropertyChanged -= OnViewModelPropertyChanged;
-            _vm.AppearanceChanged -= ApplyAcrylicTint;
+            _vm.AppearanceChanged -= ApplyBackground;
             _vm.NotificationRequested -= DeliverNotification;
         }
 
@@ -96,7 +96,7 @@ public partial class MainWindow : Window
         if (_vm == null) return;
 
         _vm.PropertyChanged += OnViewModelPropertyChanged;
-        _vm.AppearanceChanged += ApplyAcrylicTint;
+        _vm.AppearanceChanged += ApplyBackground;
         _vm.NotificationRequested += DeliverNotification;
         _vm.IsWindowActive = IsActive;
         _vm.ClipboardSetter = async text =>
@@ -259,32 +259,33 @@ public partial class MainWindow : Window
         Dispatcher.UIThread.Post(() => _chatScroll?.ScrollToEnd(), DispatcherPriority.Background);
 
     /// <summary>
-    /// Tint the window material from the palette. Set in code because the acrylic
-    /// material is not part of the visual tree and can't resolve DynamicResource.
+    /// The window background: the palette colour at the top fading to the
+    /// deep colour at the bottom, as the macOS client's backgroundGradient.
+    /// Opaque on every platform, so the window looks the same whatever is
+    /// behind it. Built in code on palette and appearance changes because a
+    /// gradient stop does not follow DynamicResource reliably.
     /// </summary>
-    private void ApplyAcrylicTint()
+    private void ApplyBackground()
     {
-        var border = this.FindControl<ExperimentalAcrylicBorder>("AcrylicRoot");
-        if (border == null) return;
+        var root = this.FindControl<Border>("BackgroundRoot");
+        if (root == null) return;
 
-        var app = Application.Current;
-        var tint = Color.Parse("#0A0A0D");
-        if (app != null &&
-            app.Resources.TryGetResource("AuraBackgroundColor", ActualThemeVariant, out var value) &&
-            value is Color themed)
+        var top = ThemedColor("AuraBackgroundColor", Color.Parse("#0A0A0D"));
+        var bottom = ThemedColor("AuraBackgroundDeepColor", Color.Parse("#050505"));
+        root.Background = new LinearGradientBrush
         {
-            tint = themed;
-        }
-
-        border.Material = new ExperimentalAcrylicMaterial
-        {
-            BackgroundSource = AcrylicBackgroundSource.Digger,
-            TintColor = tint,
-            TintOpacity = 1,
-            MaterialOpacity = 0.72,
-            FallbackColor = tint,
+            StartPoint = new RelativePoint(0.5, 0, RelativeUnit.Relative),
+            EndPoint = new RelativePoint(0.5, 1, RelativeUnit.Relative),
+            GradientStops = { new GradientStop(top, 0), new GradientStop(bottom, 1) },
         };
     }
+
+    private Color ThemedColor(string key, Color fallback) =>
+        Application.Current is { } app &&
+        app.Resources.TryGetResource(key, ActualThemeVariant, out var value) &&
+        value is Color color
+            ? color
+            : fallback;
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
