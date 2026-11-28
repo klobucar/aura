@@ -22,6 +22,14 @@ public enum LayoutMode
     VoiceFocus,
 }
 
+/// <summary>User availability presence state.</summary>
+public enum UserPresence
+{
+    Online,
+    Idle,
+    Dnd,
+}
+
 /// <summary>
 /// User-tunable settings, persisted to a JSON file so they survive restarts.
 /// Mirrors <see cref="UserIdentity"/>'s load/save pattern and lives alongside
@@ -40,6 +48,24 @@ public class AppSettings
     public int DredDuration { get; set; } = 10;     // 10ms units (100ms)
     public int JitterBufferMs { get; set; } = 40;
     public int MasterVolume { get; set; } = 100;     // 0–100 %
+
+    /// <summary>Opus encoder bitrate in kbps (16, 32, 64, 96).</summary>
+    [JsonPropertyName("AuraOpusBitrateKbps")]
+    public int OpusBitrateKbps { get; set; } = 64;
+
+    /// <summary>Presence status: online / idle / dnd.</summary>
+    [JsonPropertyName("AuraPresenceStatus")]
+    public string PresenceStatus { get; set; } = "online";
+
+    /// <summary>Optional custom status text (capped at 128 chars).</summary>
+    [JsonPropertyName("AuraCustomStatus")]
+    public string CustomStatus { get; set; } = "";
+
+    /// <summary>Subtle audio cues on mute/unmute/join/leave.</summary>
+    [JsonPropertyName("AuraVoiceSoundCues")]
+    public bool VoiceSoundCues { get; set; } = true;
+
+    public static readonly int[] SupportedBitratesKbps = { 16, 32, 64, 96 };
 
     /// <summary>Preferred audio input device name (empty = system default).</summary>
     [JsonPropertyName("AuraAudioInputDevice")]
@@ -201,4 +227,88 @@ public class AppSettings
         var dir = Path.GetDirectoryName(UserIdentity.GetIdentityFilePath())!;
         return Path.Combine(dir, "settings.json");
     }
+
+    /// <summary>servers.json next to settings.json for saved server bookmarks.</summary>
+    public static string GetServersFilePath()
+    {
+        var dir = Path.GetDirectoryName(UserIdentity.GetIdentityFilePath())!;
+        return Path.Combine(dir, "servers.json");
+    }
+
+    /// <summary>Load saved server bookmarks from servers.json (or a custom path for tests).</summary>
+    public static List<ServerBookmark> LoadSavedServers(string? path = null)
+    {
+        try
+        {
+            var filePath = path ?? GetServersFilePath();
+            if (File.Exists(filePath))
+            {
+                var json = File.ReadAllText(filePath);
+                return JsonSerializer.Deserialize<List<ServerBookmark>>(json) ?? new List<ServerBookmark>();
+            }
+        }
+        catch
+        {
+            // Corrupt or unreadable bookmarks must never block startup.
+        }
+        return new List<ServerBookmark>();
+    }
+
+    /// <summary>Persist saved server bookmarks to servers.json (best-effort).</summary>
+    public static void SaveSavedServers(IEnumerable<ServerBookmark> servers, string? path = null)
+    {
+        try
+        {
+            var filePath = path ?? GetServersFilePath();
+            var dir = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var json = JsonSerializer.Serialize(servers, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(filePath, json);
+        }
+        catch
+        {
+            // Bookmark persistence is non-critical; never surface as an error.
+        }
+    }
+
+    /// <summary>Add or update a bookmark matching the same host and port.</summary>
+    public static void UpsertSavedServer(IList<ServerBookmark> servers, ServerBookmark bookmark)
+    {
+        var host = bookmark.Host.Trim();
+        if (string.IsNullOrEmpty(host)) return;
+
+        var normalized = new ServerBookmark
+        {
+            Name = string.IsNullOrWhiteSpace(bookmark.Name) ? host : bookmark.Name.Trim(),
+            Host = host,
+            Port = bookmark.Port is > 0 and < 65536 ? bookmark.Port : 8443,
+        };
+
+        for (int i = 0; i < servers.Count; i++)
+        {
+            if (string.Equals(servers[i].Host, normalized.Host, StringComparison.OrdinalIgnoreCase) &&
+                servers[i].Port == normalized.Port)
+            {
+                servers[i] = normalized;
+                return;
+            }
+        }
+        servers.Add(normalized);
+    }
+}
+
+/// <summary>A saved server bookmark persisted in servers.json.</summary>
+public sealed class ServerBookmark
+{
+    public string Name { get; set; } = "";
+    public string Host { get; set; } = "";
+    public int Port { get; set; } = 8443;
+
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(Name) ? Host : Name;
+
+    [JsonIgnore]
+    public string AddressLabel => $"{Host}:{Port}";
 }

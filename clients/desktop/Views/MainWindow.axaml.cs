@@ -307,6 +307,31 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Daily-driver shortcuts: Ctrl+, / Cmd+, for Settings;
+        // Ctrl+M / Cmd+Shift+M for self-mute; Ctrl+D / Cmd+Shift+D for self-deafen.
+        var primary = OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control;
+        var voiceMod = OperatingSystem.IsMacOS() ? (KeyModifiers.Meta | KeyModifiers.Shift) : KeyModifiers.Control;
+        if (e.KeyModifiers == primary && e.Key == Key.OemComma)
+        {
+            _vm.ToggleSettingsCommand.Execute(null);
+            e.Handled = true;
+            return;
+        }
+        if (e.KeyModifiers == voiceMod)
+        {
+            switch (e.Key)
+            {
+                case Key.M:
+                    _vm.ToggleMicrophoneCommand.Execute(null);
+                    e.Handled = true;
+                    return;
+                case Key.D:
+                    _vm.ToggleDeafenCommand.Execute(null);
+                    e.Handled = true;
+                    return;
+            }
+        }
+
         // In-window push to talk where there is no global hook. A binding with
         // no modifiers is a key people also type, so it doesn't fire in a text box.
         if (_vm.HandlesPushToTalkInWindow && _vm.PttBinding.Matches(e.Key, e.KeyModifiers) &&

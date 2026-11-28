@@ -40,7 +40,8 @@ final class ModerationTests: XCTestCase {
     func testMemberFromRecord() {
         let record = UserInfoRecord(
             userUuid: "U_xyz", displayName: "Zed", verified: true, banned: false,
-            isAdmin: false, createdAt: 86_400)
+            isAdmin: false, createdAt: 86_400, presence: nil, customStatus: "",
+            isServerMuted: false)
         let m = ModerationMember(record)
         XCTAssertEqual(m.id, "U_xyz")
         XCTAssertEqual(m.name, "Zed")

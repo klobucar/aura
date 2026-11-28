@@ -11,6 +11,7 @@ nonisolated enum AuraMarkdown {
         case paragraph(String)
         case bullet(String)
         case quote(String)
+        case codeBlock(code: String, language: String?)
     }
 
     /// Link schemes a click may open. Anything else (`file:`, custom app
@@ -18,11 +19,15 @@ nonisolated enum AuraMarkdown {
     static let allowedLinkSchemes: Set<String> = ["http", "https", "mailto", "aura"]
 
     /// Split source into the block subset. Lines are classified on their own;
-    /// consecutive quote lines merge into one quote. Anything else, including
+    /// consecutive quote lines merge into one quote. Fenced code blocks (` ``` `)
+    /// preserve indentation and blank lines verbatim. Anything else, including
     /// `#` headings, stays a literal paragraph line.
     static func blocks(from source: String) -> [Block] {
         var blocks: [Block] = []
         var paragraph: [String] = []
+        var inCodeFence = false
+        var codeLanguage: String?
+        var codeLines: [String] = []
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
@@ -30,10 +35,32 @@ nonisolated enum AuraMarkdown {
             paragraph = []
         }
 
+        func flushCodeBlock() {
+            blocks.append(.codeBlock(code: codeLines.joined(separator: "\n"), language: codeLanguage))
+            inCodeFence = false
+            codeLanguage = nil
+            codeLines = []
+        }
+
         for rawLine in source.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
 
-            if let item = bulletBody(line) {
+            if inCodeFence {
+                if line.hasPrefix("```") && line.dropFirst(3).trimmingCharacters(in: .whitespaces).isEmpty {
+                    flushCodeBlock()
+                } else {
+                    codeLines.append(rawLine)
+                }
+                continue
+            }
+
+            if line.hasPrefix("```") {
+                flushParagraph()
+                let lang = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                codeLanguage = lang.isEmpty ? nil : lang
+                inCodeFence = true
+                codeLines = []
+            } else if let item = bulletBody(line) {
                 flushParagraph()
                 blocks.append(.bullet(item))
             } else if line.hasPrefix(">") {
@@ -49,6 +76,9 @@ nonisolated enum AuraMarkdown {
             } else {
                 paragraph.append(rawLine)
             }
+        }
+        if inCodeFence {
+            flushCodeBlock()
         }
         flushParagraph()
         return blocks
@@ -131,6 +161,31 @@ struct AuraMarkdownText: View {
                             .opacity(0.85)
                     }
                     .fixedSize(horizontal: false, vertical: true)
+                case .codeBlock(let code, let language):
+                    VStack(alignment: .leading, spacing: AuraTheme.Spacing.s5) {
+                        if let language, !language.isEmpty {
+                            Text(language)
+                                .font(AuraTheme.Typography.mono(AuraTheme.Typography.t10, weight: .semibold))
+                                .foregroundStyle(foreground.opacity(0.6))
+                        }
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(code)
+                                .font(AuraTheme.Typography.mono(max(11, size - 1)))
+                                .foregroundStyle(foreground)
+                                .fixedSize(horizontal: true, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, AuraTheme.Spacing.s9)
+                    .padding(.vertical, AuraTheme.Spacing.s8)
+                    .background(
+                        RoundedRectangle(cornerRadius: AuraTheme.Radii.r8, style: .continuous)
+                            .fill(Color.black.opacity(0.22))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AuraTheme.Radii.r8, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                    )
                 }
             }
         }

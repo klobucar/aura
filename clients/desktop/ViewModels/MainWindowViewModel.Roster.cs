@@ -36,6 +36,7 @@ public partial class MainWindowViewModel
         user.IsLocallyMuted = _client?.IsLocallyMuted(sessionId) ?? false;
         user.CanModerate = IsAdmin;
         user.ModerateCommand = new RelayCommand(() => _ = OpenModerationFor(user));
+        user.ServerMuteCommand = new RelayCommand(() => _ = ToggleServerMuteAsync(user));
         user.OpenProfileCommand = new RelayCommand(() => OpenProfile(user));
         user.ToggleLocalMuteCommand = new RelayCommand(() => ToggleLocalMute(user));
         user.SetVolumeCommand = new RelayCommand<string>(pct =>
@@ -114,6 +115,9 @@ public partial class MainWindowViewModel
         SelfUser.Avatar = MyAvatarImage;
         SelfUser.IsDeafened = IsDeafened;
         SelfUser.IsMuted = !IsMicEnabled && !IsPushToTalkMode;
+        SelfUser.IsServerMuted = IsServerMuted;
+        SelfUser.Presence = CurrentPresenceStatus;
+        SelfUser.CustomStatus = CustomStatus;
     }
 
     partial void OnMyBioChanged(string value)
@@ -127,6 +131,28 @@ public partial class MainWindowViewModel
         if (_client == null || user.IsSelf) return;
         user.IsLocallyMuted = _client.ToggleLocalMute(user.Id);
         if (ProfileCard.IsOpen && ProfileCard.SessionId == user.Id) ProfileCard.IsLocallyMuted = user.IsLocallyMuted;
+    }
+
+    private async Task ToggleServerMuteAsync(User user)
+    {
+        if (_client == null || !IsAdmin || user.IsSelf) return;
+        var nextMuted = !user.IsServerMuted;
+        try
+        {
+            var resp = await _client.ServerMuteUserAsync(user.Id, nextMuted);
+            if (resp.Success)
+            {
+                user.IsServerMuted = nextMuted;
+            }
+            else
+            {
+                ShowBanner($"Couldn't {(nextMuted ? "server-mute" : "server-unmute")} {user.Name}: {resp.ErrorMessage}", isError: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowBanner($"Couldn't update server mute for {user.Name}: {ex.Message}", isError: true);
+        }
     }
 
     // ==========================================================================

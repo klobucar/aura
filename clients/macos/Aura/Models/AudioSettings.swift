@@ -1,6 +1,27 @@
+import AppKit
 import Foundation
 import Combine
 import CoreGraphics
+
+enum VoiceSoundCue {
+    case mute
+    case unmute
+    case join
+    case leave
+
+    @MainActor
+    func playIfEnabled() {
+        guard AppSettings.shared.voiceSoundCuesEnabled else { return }
+        let soundName: NSSound.Name
+        switch self {
+        case .mute: soundName = "Tink"
+        case .unmute: soundName = "Pop"
+        case .join: soundName = "Blow"
+        case .leave: soundName = "Bottle"
+        }
+        NSSound(named: soundName)?.play()
+    }
+}
 
 class AudioSettings: ObservableObject {
     // MARK: - Transmission Mode

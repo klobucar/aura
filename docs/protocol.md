@@ -1206,3 +1206,20 @@ index 6f702974473c702804cd1e2594d965da463312fe..ea9751aa557aa5d7b6a9e1179c870fc9
 ---
 
 Aura extension: end-to-end encrypted file transfer is specified in [protocol/file_transfer.md](protocol/file_transfer.md).
+
+## Aura Control & Presence Extensions
+
+### Server Mute (`MSG_SERVER_MUTE = 0x4D`)
+
+Administrators with `ban_users` permission can server-mute or unmute an active session using `MSG_SERVER_MUTE (0x4D)` carrying a `ServerMuteRequest` protobuf:
+
+- `target_session_id` (`uint32`): The target client's current session ID.
+- `muted` (`bool`): `true` to server-mute, `false` to unmute.
+
+The server responds with `AdminResponse` (`success`, `error_message`). Internally, server mute state is tracked by the target's stable `user_uuid` so it persists across reconnects until explicitly cleared. While server-muted, the server drops all audio packets from that user's sessions and broadcasts `UserStatusUpdate` (with `is_muted = true`) to connected clients so channel members and the muted user reflect the muted state.
+
+### Presence, Custom Status, and `is_server_muted`
+
+- `PresenceStatus` enum: `PRESENCE_ONLINE = 0`, `PRESENCE_IDLE = 1`, `PRESENCE_DND = 2`.
+- `UserStatusUpdate` (`MSG_UPDATE_STATUS`): includes optional `presence` (`PresenceStatus`) and optional `custom_status` (`string`, truncated server-side to 128 characters). It also carries optional `is_server_muted` (`bool`), which only the server sets; a value sent by a client is ignored. Clients use it on their own session's update to tell the user a moderator has muted them. Newly connected clients receive `UserStatusUpdate` messages after `ServerState` for existing sessions with non-default `presence`, non-empty `custom_status` or a server mute, including their own session when it is server-muted.
+- `UserInfo` (returned in `ListUsersResponse`): includes optional `presence`, optional `custom_status`, and `is_server_muted` (`bool`).

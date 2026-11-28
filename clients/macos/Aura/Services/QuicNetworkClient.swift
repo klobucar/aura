@@ -51,6 +51,11 @@ public class QuicNetworkClient {
     
     public var isMuted = false
     public var isDeafened = false
+    public var isServerMuted = false
+
+    private var userPresenceByUuid: [String: AuraPresenceStatus] = [:]
+    private var userCustomStatusByUuid: [String: String] = [:]
+    private var userServerMutedByUuid: [String: Bool] = [:]
     
     /// Users by channel ID (tracks all channels, not just current)
     public var usersByChannel: [String: [ChannelUser]] = [:]
@@ -259,6 +264,7 @@ public class QuicNetworkClient {
     private static let MSG_BAN_USER: UInt8 = 0x4A
     private static let MSG_GRANT_ADMIN: UInt8 = 0x4B
     private static let MSG_KICK_USER: UInt8 = 0x4C
+    private static let MSG_SERVER_MUTE: UInt8 = 0x4D
     
     // MLS Protocol message types
     private static let MSG_MLS_JOIN: UInt8 = 0x50           // Client sends key package
@@ -366,10 +372,22 @@ public class QuicNetworkClient {
             voice.post(.restartOutput)
         }
 
+        let presenceToken = NotificationCenter.default.addObserver(
+            forName: .presenceStatusChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.updateStatus(isMuted: self.isMuted, isDeafened: self.isDeafened)
+            }
+        }
+
         let boxes = [
             ObserverBox(token: settingsToken),
             ObserverBox(token: outputDeviceToken),
-            ObserverBox(token: restartOutputToken)
+            ObserverBox(token: restartOutputToken),
+            ObserverBox(token: presenceToken)
         ]
         notificationObservers.withLock {
             $0.tokens = boxes
@@ -842,6 +860,10 @@ public class QuicNetworkClient {
                 sender.setWebrtcNsEnabled(enabled: webrtcNsEnabled)
                 sender.setWebrtcAgcEnabled(enabled: webrtcAgcEnabled)
 
+                let savedBitrateKbps = UserDefaults.standard.integer(forKey: "AuraOpusBitrateKbps")
+                let opusBitrateKbps = AppSettings.supportedBitratesKbps.contains(savedBitrateKbps) ? savedBitrateKbps : 64
+                try? sender.setBitrate(bps: UInt32(opusBitrateKbps * 1000))
+
                 // VAD: enabled when transmission mode is voice activation; threshold derived
                 // from the saved sensitivity slider (0.0–1.0 maps to -50..-20 dB).
                 let savedMode = UserDefaults.standard.string(forKey: "AuraTransmissionMode")
@@ -879,6 +901,11 @@ public class QuicNetworkClient {
             
             // Start listening for server messages (presence updates)
             startListening()
+
+            // Publish local presence and custom status on connect
+            Task {
+                await self.updateStatus(isMuted: self.isMuted, isDeafened: self.isDeafened)
+            }
         }
     }
     
@@ -1248,6 +1275,14 @@ public class QuicNetworkClient {
         await sendModeration(.kick, payload: encodeKickUserRequest(targetUserUuid: uuid, reason: reason))
     }
 
+    /// Server-mute or unmute a live session (requires `ban_users` permission).
+    func serverMuteUser(sessionId: UInt32, muted: Bool) async {
+        await sendModeration(
+            .serverMute(muted: muted),
+            payload: encodeServerMuteRequest(targetSessionId: sessionId, muted: muted)
+        )
+    }
+
     /// Where an account is right now, from the roster we already hold.
     func moderationPresence(of uuid: String) -> ModerationPresence {
         var occupants: [String: [String]] = [:]
@@ -1282,6 +1317,34 @@ public class QuicNetworkClient {
             }
 
             moderationListBuffer.append(contentsOf: response.users.map(ModerationMember.init))
+            for user in response.users {
+                let mappedPresence = user.presence.map(Self.mapPresence)
+                if let mappedPresence {
+                    userPresenceByUuid[user.userUuid] = mappedPresence
+                }
+                if let cs = user.customStatus {
+                    if cs.isEmpty {
+                        userCustomStatusByUuid.removeValue(forKey: user.userUuid)
+                    } else {
+                        userCustomStatusByUuid[user.userUuid] = cs
+                    }
+                }
+                userServerMutedByUuid[user.userUuid] = user.isServerMuted
+                if user.userUuid == self.userUuid {
+                    self.isServerMuted = user.isServerMuted
+                }
+                for channelId in usersByChannel.keys {
+                    if let idx = usersByChannel[channelId]?.firstIndex(where: { self.uuidForSession($0.id) == user.userUuid }) {
+                        if let mappedPresence {
+                            usersByChannel[channelId]?[idx].presence = mappedPresence
+                        }
+                        if let cs = user.customStatus {
+                            usersByChannel[channelId]?[idx].customStatus = cs.isEmpty ? nil : cs
+                        }
+                        usersByChannel[channelId]?[idx].isServerMuted = user.isServerMuted
+                    }
+                }
+            }
             // An empty page ends the walk even if the count disagrees, so a
             // shrinking list can't loop forever.
             if moderationListBuffer.count < Int(response.totalCount), !response.users.isEmpty {
@@ -1614,8 +1677,8 @@ public class QuicNetworkClient {
         case Self.MSG_LIST_USERS: // 0x48 - Reply to our ListUsersRequest
             await handleListUsersResponse(stream: stream)
 
-        case Self.MSG_VERIFY_USER, Self.MSG_BAN_USER, Self.MSG_GRANT_ADMIN, Self.MSG_KICK_USER:
-            // 0x49-0x4C - AdminResponse, framed with the request's type
+        case Self.MSG_VERIFY_USER, Self.MSG_BAN_USER, Self.MSG_GRANT_ADMIN, Self.MSG_KICK_USER, Self.MSG_SERVER_MUTE:
+            // 0x49-0x4D - AdminResponse, framed with the request's type
             await handleModerationActionResponse(type: type, stream: stream)
 
         default:
@@ -2009,7 +2072,12 @@ public class QuicNetworkClient {
                             sessionId: sid,
                             displayName: userStatus.displayName,
                             bio: profile?.bio ?? "",
-                            avatarData: profile.flatMap { $0.avatarData.isEmpty ? nil : $0.avatarData }
+                            avatarData: profile.flatMap { $0.avatarData.isEmpty ? nil : $0.avatarData },
+                            isMuted: userStatus.isMuted,
+                            isDeafened: userStatus.isDeafened,
+                            presence: self.userPresenceByUuid[userStatus.userUuid] ?? .online,
+                            customStatus: self.userCustomStatusByUuid[userStatus.userUuid],
+                            isServerMuted: self.userServerMutedByUuid[userStatus.userUuid] ?? false
                         ))
                     }
                     newUserMapping[c.channelId] = usersList
@@ -2656,14 +2724,37 @@ public class QuicNetworkClient {
     
     // MARK: - User Status
     
-    /// Update own mute/deafen status
+    private static func mapPresence(_ record: PresenceStatusRecord) -> AuraPresenceStatus {
+        switch record {
+        case .online: return .online
+        case .idle: return .idle
+        case .dnd: return .dnd
+        }
+    }
+
+    private static func mapPresenceRecord(_ status: AuraPresenceStatus) -> PresenceStatusRecord {
+        switch status {
+        case .online: return .online
+        case .idle: return .idle
+        case .dnd: return .dnd
+        }
+    }
+
+    /// Update own mute/deafen/presence/custom-status
     public func updateStatus(isMuted: Bool, isDeafened: Bool) async {
         guard let sessionId = self.sessionId, let stream = controlStream else { return }
-        
+
+        let appSettings = AppSettings.shared
+        let presence = Self.mapPresenceRecord(appSettings.presenceStatus)
+        let customStatus = String(appSettings.customStatusText.prefix(128))
+
         let update = UserStatusUpdate(
             sessionId: sessionId,
             isMuted: isMuted,
-            isDeafened: isDeafened
+            isDeafened: isDeafened,
+            presence: presence,
+            customStatus: customStatus,
+            isServerMuted: nil  // set by the server only
         )
         
         do {
@@ -2711,7 +2802,10 @@ public class QuicNetworkClient {
                             avatarData: profile.avatarData.isEmpty ? nil : profile.avatarData,
                             isMuted: existing.isMuted,
                             isDeafened: existing.isDeafened,
-                            isDisconnected: existing.isDisconnected
+                            isDisconnected: existing.isDisconnected,
+                            presence: existing.presence,
+                            customStatus: existing.customStatus,
+                            isServerMuted: existing.isServerMuted
                         )
                     }
                 }
@@ -2738,11 +2832,45 @@ public class QuicNetworkClient {
             
             // Update profile state
             await MainActor.run {
+                let mappedPresence = update.presence.map(Self.mapPresence)
+                let normalizedCustomStatus = update.customStatus.map { $0.isEmpty ? nil : $0 }
+
+                // Our own update: this is how a non-admin learns a moderator
+                // muted them.
+                if update.sessionId == self.sessionId, let serverMuted = update.isServerMuted {
+                    self.isServerMuted = serverMuted
+                }
+
+                if let uuid = self.uuidForSession(update.sessionId) {
+                    if let serverMuted = update.isServerMuted {
+                        self.userServerMutedByUuid[uuid] = serverMuted
+                    }
+                    if let mappedPresence {
+                        self.userPresenceByUuid[uuid] = mappedPresence
+                    }
+                    if let normalizedCustomStatus {
+                        if let text = normalizedCustomStatus {
+                            self.userCustomStatusByUuid[uuid] = text
+                        } else {
+                            self.userCustomStatusByUuid.removeValue(forKey: uuid)
+                        }
+                    }
+                }
+
                 // Update usersByChannel mapping
                 for channelId in usersByChannel.keys {
                     if let index = usersByChannel[channelId]?.firstIndex(where: { $0.id == update.sessionId }) {
                         usersByChannel[channelId]?[index].isMuted = update.isMuted
                         usersByChannel[channelId]?[index].isDeafened = update.isDeafened
+                        if let mappedPresence {
+                            usersByChannel[channelId]?[index].presence = mappedPresence
+                        }
+                        if let normalizedCustomStatus {
+                            usersByChannel[channelId]?[index].customStatus = normalizedCustomStatus
+                        }
+                        if let serverMuted = update.isServerMuted {
+                            usersByChannel[channelId]?[index].isServerMuted = serverMuted
+                        }
                         print("[QuicClient] Updated status for user \(update.sessionId) in channel \(channelId): muted=\(update.isMuted), deafened=\(update.isDeafened)")
                     }
                 }
@@ -3333,8 +3461,12 @@ public class QuicNetworkClient {
         quicGroup = nil
         isConnected = false
         isAuthenticated = false
+        isServerMuted = false
         currentChannelId = nil
         usersByChannel = [:]
+        userPresenceByUuid = [:]
+        userCustomStatusByUuid = [:]
+        userServerMutedByUuid = [:]
         resetModeration()
         
         // Cancel any pending retry
@@ -3600,8 +3732,22 @@ public struct ChannelUser: Identifiable, Hashable {
     public var isMuted: Bool
     public var isDeafened: Bool
     public var isDisconnected: Bool = false
+    public var presence: AuraPresenceStatus = .online
+    public var customStatus: String? = nil
+    public var isServerMuted: Bool = false
     
-    public init(sessionId: UInt32, displayName: String, bio: String = "", avatarData: Data? = nil, isMuted: Bool = false, isDeafened: Bool = false, isDisconnected: Bool = false) {
+    public init(
+        sessionId: UInt32,
+        displayName: String,
+        bio: String = "",
+        avatarData: Data? = nil,
+        isMuted: Bool = false,
+        isDeafened: Bool = false,
+        isDisconnected: Bool = false,
+        presence: AuraPresenceStatus = .online,
+        customStatus: String? = nil,
+        isServerMuted: Bool = false
+    ) {
         self.id = sessionId
         self.displayName = displayName
         self.bio = bio
@@ -3609,6 +3755,9 @@ public struct ChannelUser: Identifiable, Hashable {
         self.isMuted = isMuted
         self.isDeafened = isDeafened
         self.isDisconnected = isDisconnected
+        self.presence = presence
+        self.customStatus = customStatus
+        self.isServerMuted = isServerMuted
     }
 }
 
@@ -3771,6 +3920,7 @@ nonisolated struct AudioSettingsChange: Sendable {
     let masterVolume: Float?
     let vadEnabled: Bool?
     let vadThresholdDb: Float?
+    let opusBitrateKbps: Int?
 
     /// Nil when `payload` isn't a settings dictionary.
     init?(_ payload: Any?) {
@@ -3783,6 +3933,7 @@ nonisolated struct AudioSettingsChange: Sendable {
         masterVolume = settings["masterVolume"] as? Float
         vadEnabled = settings["vadEnabled"] as? Bool
         vadThresholdDb = settings["vadThresholdDb"] as? Float
+        opusBitrateKbps = settings["opusBitrateKbps"] as? Int
     }
 }
 

@@ -35,9 +35,11 @@ nonisolated final class AudioPlayback: VoiceOutput {
     private var playerNode: AVAudioPlayerNode?
     private var outputDeviceID: AudioDeviceID?
     private var configChangeObserver: NSObjectProtocol?
+    private let postsRestartNotification: Bool
     private let format: AVAudioFormat
 
-    init() {
+    init(postsRestartNotification: Bool = true) {
+        self.postsRestartNotification = postsRestartNotification
         // Create audio format (48kHz, mono, float)
         format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -89,15 +91,17 @@ nonisolated final class AudioPlayback: VoiceOutput {
 
             // Install after start() so binding kAudioOutputUnitProperty_CurrentDevice
             // during setup cannot self-trigger a configuration-change restart loop.
-            if let configChangeObserver {
-                NotificationCenter.default.removeObserver(configChangeObserver)
-            }
-            configChangeObserver = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange,
-                object: engine,
-                queue: nil
-            ) { _ in
-                NotificationCenter.default.post(name: .audioOutputNeedsRestart, object: nil)
+            if postsRestartNotification {
+                if let configChangeObserver {
+                    NotificationCenter.default.removeObserver(configChangeObserver)
+                }
+                configChangeObserver = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange,
+                    object: engine,
+                    queue: nil
+                ) { _ in
+                    NotificationCenter.default.post(name: .audioOutputNeedsRestart, object: nil)
+                }
             }
 
             isPlaying = true

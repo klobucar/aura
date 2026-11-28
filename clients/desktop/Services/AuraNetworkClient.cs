@@ -90,6 +90,7 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     private const byte MSG_BAN_USER = 0x4A;
     private const byte MSG_GRANT_ADMIN = 0x4B;
     private const byte MSG_KICK_USER = 0x4C;
+    private const byte MSG_SERVER_MUTE = 0x4D;
     private const byte MSG_MLS_RATCHET_REQUEST = 0x56;
     private const byte MSG_MLS_RATCHET_COMMIT = 0x57; // a commit with no Welcome: ratchet or removals
     private const byte MSG_MLS_SYNC_MEMBERS = 0x58;   // server tells us (founder) who should remain
@@ -201,7 +202,8 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
 
     public event Action<string>? OnStatusChanged;
     public event Action<string>? OnError;
-    public event Action<uint, bool, bool>? OnUserStatusUpdated; // sessionId, isMuted, isDeafened
+    /// <summary>sessionId, isMuted, isDeafened, presence, customStatus, isServerMuted (null when the server didn't say).</summary>
+    public event Action<uint, bool, bool, UserPresence?, string?, bool?>? OnUserStatusUpdated;
 
     /// <summary>
     /// The control stream ended or failed while we still meant to be connected.
@@ -697,23 +699,38 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     }
     
     /// <summary>
-    /// Update own mute/deafen status.
+    /// <summary>
+    /// Update own mute/deafen/presence/custom-status.
     /// </summary>
-    public async Task UpdateStatusAsync(bool isMuted, bool isDeafened, CancellationToken ct = default)
+    public async Task UpdateStatusAsync(
+        bool isMuted,
+        bool isDeafened,
+        UserPresence? presence = null,
+        string? customStatus = null,
+        CancellationToken ct = default)
     {
         if (_controlStream == null) return;
-        
-        var update = new Aura.V1Alpha1.UserStatusUpdate
+
+        PresenceStatusRecord? presenceRecord = presence switch
         {
-            SessionId = _userId,
-            IsMuted = isMuted,
-            IsDeafened = isDeafened
+            UserPresence.Idle => PresenceStatusRecord.Idle,
+            UserPresence.Dnd => PresenceStatusRecord.Dnd,
+            UserPresence.Online => PresenceStatusRecord.Online,
+            _ => null,
         };
-        
+        var trimmedStatus = customStatus == null ? null : (customStatus.Length > 128 ? customStatus[..128] : customStatus);
+        var payload = AuraCoreMethods.EncodeUserStatusUpdate(new uniffi.aura_core.UserStatusUpdate(
+            _userId,
+            isMuted,
+            isDeafened,
+            presenceRecord,
+            trimmedStatus,
+            null)); // is_server_muted is set by the server only
+
         try
         {
-            await SendProtoRequestAsync(MSG_UPDATE_STATUS, update, ct);
-            Console.WriteLine($"[AuraClient] Sent status update: muted={isMuted}, deafened={isDeafened}");
+            await WriteControlAsync(ControlFrames.Frame(MSG_UPDATE_STATUS, payload), ct);
+            Console.WriteLine($"[AuraClient] Sent status update: muted={isMuted}, deafened={isDeafened}, presence={presence}");
         }
         catch (Exception ex)
         {
@@ -768,12 +785,15 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
 
     private readonly ConcurrentDictionary<byte, ConcurrentQueue<TaskCompletionSource<byte[]>>> _pendingModeration = new();
 
-    private async Task<byte[]> ModerationRequestAsync<T>(byte msgType, T request, CancellationToken ct) where T : IMessage<T>
+    private Task<byte[]> ModerationRequestAsync<T>(byte msgType, T request, CancellationToken ct) where T : IMessage<T> =>
+        ModerationRequestAsync(msgType, request.ToByteArray(), ct);
+
+    private async Task<byte[]> ModerationRequestAsync(byte msgType, byte[] payload, CancellationToken ct)
     {
         var stream = _controlStream ?? throw new InvalidOperationException("Not connected");
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var queue = _pendingModeration.GetOrAdd(msgType, _ => new ConcurrentQueue<TaskCompletionSource<byte[]>>());
-        var frame = ControlFrames.Frame(msgType, request.ToByteArray());
+        var frame = ControlFrames.Frame(msgType, payload);
 
         // Enqueue under the write lock, immediately before the write, so the
         // queue holds requests in the order they went out on the wire. A
@@ -852,6 +872,10 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
     public async Task<AdminResponse> KickUserAsync(string userUuid, string reason, CancellationToken ct = default) =>
         AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_KICK_USER,
             new KickUserRequest { TargetUserUuid = userUuid, Reason = reason }, ct));
+
+    public async Task<AdminResponse> ServerMuteUserAsync(uint targetSessionId, bool muted, CancellationToken ct = default) =>
+        AdminResponse.Parser.ParseFrom(await ModerationRequestAsync(MSG_SERVER_MUTE,
+            AuraCoreMethods.EncodeServerMuteRequest(targetSessionId, muted), ct));
 
     /// <summary>
     /// Update our own profile comment. The server only accepts a profile whose
@@ -1200,6 +1224,7 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
                     case MSG_BAN_USER:     // 0x4A - AdminResponse
                     case MSG_GRANT_ADMIN:  // 0x4B - AdminResponse
                     case MSG_KICK_USER:    // 0x4C - AdminResponse
+                    case MSG_SERVER_MUTE:  // 0x4D - AdminResponse
                         CompleteModeration(msgType, await ReadHardenedPayloadAsync(MaxControlPacketSize, ct));
                         break;
 
@@ -1464,10 +1489,17 @@ public class AuraNetworkClient : IAsyncDisposable, IModerationApi
         try
         {
             // 3. Parse Protobuf UserStatusUpdate
-            var update = Aura.V1Alpha1.UserStatusUpdate.Parser.ParseFrom(packet);
-            Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}");
+            var update = AuraCoreMethods.DecodeUserStatusUpdate(packet);
+            UserPresence? presence = update.Presence switch
+            {
+                PresenceStatusRecord.Idle => UserPresence.Idle,
+                PresenceStatusRecord.Dnd => UserPresence.Dnd,
+                PresenceStatusRecord.Online => UserPresence.Online,
+                _ => null,
+            };
+            Console.WriteLine($"[AuraClient] UserStatusUpdate: User {update.SessionId}, Muted={update.IsMuted}, Deafened={update.IsDeafened}, Presence={presence}");
 
-            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened);
+            OnUserStatusUpdated?.Invoke(update.SessionId, update.IsMuted, update.IsDeafened, presence, update.CustomStatus, update.IsServerMuted);
         }
         catch (Exception ex)
         {

@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Data.Converters;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Aura.Desktop.Services;
 using Aura.Desktop.ViewModels;
 
 namespace Aura.Desktop.Converters;
@@ -347,6 +348,23 @@ public class ChatBubbleBorderConverter : IValueConverter
         => TokenBrush.Get(value is ChatMessage { IsMention: true, IsFromCurrentUser: false }
             ? "AuraMentionBorderBrush"
             : "AuraPanelBorderBrush");
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
+/// <summary>Presence dot colour: green for online, amber for idle, red for DND.</summary>
+public class PresenceBrushConverter : IValueConverter
+{
+    public static readonly PresenceBrushConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
+        TokenBrush.Get(value switch
+        {
+            UserPresence.Idle => "AuraCautionBrush",
+            UserPresence.Dnd => "AuraDangerBrush",
+            _ => "AuraGoodBrush",
+        });
 
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotImplementedException();

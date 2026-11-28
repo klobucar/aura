@@ -65,6 +65,8 @@ const MSG_BAN_USER: u8 = 0x4A;
 const MSG_GRANT_ADMIN: u8 = 0x4B;
 /// KickUserRequest → AdminResponse (ban_users).
 const MSG_KICK_USER: u8 = 0x4C;
+/// ServerMuteRequest → AdminResponse (ban_users).
+const MSG_SERVER_MUTE: u8 = 0x4D;
 
 /// QUIC application error code the server closes a connection with when the
 /// account has just been banned.
@@ -483,6 +485,7 @@ fn message_type_name(msg_type: u8) -> &'static str {
         MSG_BAN_USER => "ban_user",
         MSG_GRANT_ADMIN => "grant_admin",
         MSG_KICK_USER => "kick_user",
+        MSG_SERVER_MUTE => "server_mute",
         MSG_MLS_JOIN => "mls_join",
         MSG_MLS_COMMIT_WELCOME => "mls_commit_welcome",
         MSG_MLS_RATCHET_COMMIT => "mls_ratchet_commit",
@@ -1232,8 +1235,17 @@ impl ConnectionContext {
                     return Ok(true);
                 }
 
+                let presence = req
+                    .presence
+                    .and_then(|p| aura_protocol::PresenceStatus::try_from(p).ok());
                 self.state
-                    .broadcast_user_status(req.session_id, req.is_muted, req.is_deafened)
+                    .broadcast_user_status_with_presence(
+                        req.session_id,
+                        req.is_muted,
+                        req.is_deafened,
+                        presence,
+                        req.custom_status,
+                    )
                     .await;
             }
             // Moderation. The requests' `session_token` fields are ignored:
@@ -1323,6 +1335,20 @@ impl ConnectionContext {
                 self.send_admin_response(
                     MSG_KICK_USER,
                     "Kick user",
+                    result,
+                    ModerationError::client_message,
+                )
+                .await?;
+            }
+            MSG_SERVER_MUTE => {
+                let buf = self.read_frame_payload().await?;
+                let req = aura_protocol::ServerMuteRequest::decode(&buf[..])?;
+                let result =
+                    self.state
+                        .set_server_muted(&self.user_uuid, req.target_session_id, req.muted);
+                self.send_admin_response(
+                    MSG_SERVER_MUTE,
+                    "Server mute",
                     result,
                     ModerationError::client_message,
                 )
@@ -1733,11 +1759,17 @@ impl ConnectionContext {
                 session_id,
                 is_muted,
                 is_deafened,
+                presence,
+                custom_status,
+                is_server_muted,
             } => {
                 let update = aura_protocol::UserStatusUpdate {
                     session_id,
                     is_muted,
                     is_deafened,
+                    presence: presence.map(|p| p as i32),
+                    custom_status,
+                    is_server_muted: Some(is_server_muted),
                 };
                 self.send_proto_response(MSG_UPDATE_STATUS, update).await?;
             }

@@ -119,4 +119,28 @@ final class AuraMarkdownTests: XCTestCase {
         XCTAssertFalse(AuraMarkdown.isAllowed(URL(string: "javascript:alert(1)")!))
         XCTAssertFalse(AuraMarkdown.isAllowed(URL(string: "relative/path")!))
     }
+
+    func testFencedCodeBlocksPreserveIndentationAndLanguage() {
+        let source = """
+        before
+        ```swift
+        func greet() {
+            print("hi")
+        }
+        ```
+        after
+        """
+        XCTAssertEqual(AuraMarkdown.blocks(from: source), [
+            .paragraph("before"),
+            .codeBlock(code: "func greet() {\n    print(\"hi\")\n}", language: "swift"),
+            .paragraph("after"),
+        ])
+    }
+
+    func testFencedCodeBlockWithoutLanguage() {
+        let source = "```\nlet x = 1\n```"
+        XCTAssertEqual(AuraMarkdown.blocks(from: source), [
+            .codeBlock(code: "let x = 1", language: nil),
+        ])
+    }
 }

@@ -132,6 +132,20 @@ public class AudioCapture: ObservableObject {
             let bufferSize = AVAudioFrameCount(Self.samplesPerFrame)
             let frameHandler = self.frameHandler
             let sentFrames = self.sentFrames
+            let needsConversion = inputFormat.sampleRate != Self.sampleRate || inputFormat.channelCount != Self.channelCount
+            let tapConverter: TapConverter?
+            if needsConversion {
+                let initialCapacity = max(
+                    bufferSize * 2,
+                    AVAudioFrameCount(ceil(Double(bufferSize) * Self.sampleRate / max(1, inputFormat.sampleRate))) + 64
+                )
+                tapConverter = TapConverter(from: inputFormat, to: targetFormat, initialCapacity: initialCapacity)
+                if tapConverter == nil {
+                    print("[AudioCapture] Failed to create AVAudioConverter for \(inputFormat)")
+                }
+            } else {
+                tapConverter = nil
+            }
             
             // Install tap with input format, we'll convert if needed. The tap
             // runs on an audio thread: @Sendable keeps it off the main actor
@@ -140,17 +154,9 @@ public class AudioCapture: ObservableObject {
                 guard frameHandler.withLock({ $0 }) != nil else { return }
 
                 let convertedBuffer: AVAudioPCMBuffer
-                if inputFormat.sampleRate != Self.sampleRate || inputFormat.channelCount != Self.channelCount {
-                    guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { return }
-                    let capacity = AVAudioFrameCount(Double(buffer.frameLength) * Self.sampleRate / inputFormat.sampleRate)
-                    guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-                    
-                    var error: NSError?
-                    converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-                        outStatus.pointee = .haveData
-                        return buffer
-                    }
-                    convertedBuffer = outputBuffer
+                if needsConversion {
+                    guard let output = tapConverter?.convert(buffer) else { return }
+                    convertedBuffer = output
                 } else {
                     convertedBuffer = buffer
                 }
@@ -264,5 +270,48 @@ public class AudioCapture: ObservableObject {
         print("[AudioCapture] Hardware configuration changed; restarting capture...")
         stopEngine()
         start(handler: handler)
+    }
+}
+
+/// Caches `AVAudioConverter` and a reusable output `AVAudioPCMBuffer` for the
+/// lifetime of a single capture tap so 20ms callbacks do not allocate.
+nonisolated private final class TapConverter: @unchecked Sendable {
+    private let converter: AVAudioConverter
+    private let targetFormat: AVAudioFormat
+    private var outputBuffer: AVAudioPCMBuffer
+
+    init?(from inputFormat: AVAudioFormat, to targetFormat: AVAudioFormat, initialCapacity: AVAudioFrameCount) {
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat),
+              let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: initialCapacity) else {
+            return nil
+        }
+        self.converter = converter
+        self.targetFormat = targetFormat
+        self.outputBuffer = buffer
+    }
+
+    func convert(_ inputBuffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let ratio = targetFormat.sampleRate / max(1, inputBuffer.format.sampleRate)
+        let neededCapacity = AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * ratio)) + 16
+        if outputBuffer.frameCapacity < neededCapacity {
+            guard let grown = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: neededCapacity) else {
+                return nil
+            }
+            outputBuffer = grown
+        }
+        outputBuffer.frameLength = 0
+        var error: NSError?
+        var consumed = false
+        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+        if error != nil { return nil }
+        return outputBuffer
     }
 }

@@ -369,3 +369,141 @@ public class P0BlockerTests
         Assert.Equal("attachment", AuraNetworkClient.SanitizeFileName(""));
     }
 }
+
+public class P2DesktopFeaturesTests
+{
+    [Fact]
+    public void CallQualityStatsCalculatesLossPercentAndFormatsSummary()
+    {
+        var stats = new CallQualityStats(PacketsReceived: 98, PacketsLost: 2, PlcCount: 3, JitterMs: 12.5);
+        Assert.Equal(2.0, stats.LossPercent, precision: 2);
+        var summary = stats.FormatSummary();
+        Assert.Contains("Loss: 2.0%", summary);
+        Assert.Contains("PLC: 3", summary);
+        Assert.Contains("Jitter: 12.5 ms", summary);
+
+        var empty = new CallQualityStats(0, 0, 0, 0);
+        Assert.Equal(0.0, empty.LossPercent);
+    }
+
+    [Fact]
+    public void OpusBitrateDefaultsTo64KbpsAndRoundTripsInAppSettings()
+    {
+        Assert.Equal(64, new AppSettings().OpusBitrateKbps);
+        var settings = new AppSettings
+        {
+            OpusBitrateKbps = 96,
+            PresenceStatus = "dnd",
+            CustomStatus = "In a meeting",
+            VoiceSoundCues = false,
+        };
+        var json = System.Text.Json.JsonSerializer.Serialize(settings);
+        Assert.Contains("AuraOpusBitrateKbps", json);
+        Assert.Contains("AuraPresenceStatus", json);
+        Assert.Contains("AuraCustomStatus", json);
+        Assert.Contains("AuraVoiceSoundCues", json);
+
+        var loaded = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(json);
+        Assert.NotNull(loaded);
+        Assert.Equal(96, loaded!.OpusBitrateKbps);
+        Assert.Equal("dnd", loaded.PresenceStatus);
+        Assert.Equal("In a meeting", loaded.CustomStatus);
+        Assert.False(loaded.VoiceSoundCues);
+    }
+
+    [Fact]
+    public void VoiceSoundCuesSynthesizesNonEmptyPcmForAllKinds()
+    {
+        foreach (VoiceSoundCues.CueKind kind in Enum.GetValues(typeof(VoiceSoundCues.CueKind)))
+        {
+            var pcm = VoiceSoundCues.Synthesize(kind);
+            Assert.NotEmpty(pcm);
+            Assert.Contains(pcm, s => s != 0);
+        }
+    }
+}
+
+public class P1BetaUsabilityTests
+{
+    [Fact]
+    public void SavedServerBookmarksRoundTripAndUpsert()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"aura-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var path = Path.Combine(tempDir, "servers.json");
+        try
+        {
+            var list = new System.Collections.Generic.List<ServerBookmark>();
+            AppSettings.UpsertSavedServer(list, new ServerBookmark
+            {
+                Name = "Home",
+                Host = "aura.example.com",
+                Port = 8443,
+            });
+            AppSettings.UpsertSavedServer(list, new ServerBookmark
+            {
+                Name = "Home Updated",
+                Host = "AURA.EXAMPLE.COM",
+                Port = 8443,
+            });
+
+            Assert.Single(list);
+            Assert.Equal("Home Updated", list[0].Name);
+
+            AppSettings.SaveSavedServers(list, path);
+            var loaded = AppSettings.LoadSavedServers(path);
+            Assert.Single(loaded);
+            Assert.Equal("Home Updated", loaded[0].Name);
+            Assert.Equal("AURA.EXAMPLE.COM", loaded[0].Host);
+            Assert.Equal(8443, loaded[0].Port);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir)) Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void InlineMarkdownOnlyTreatsIdentifierFirstLineAsLanguageTagAndRendersUnterminatedFenceToEof()
+    {
+        var nonTag = InlineMarkdown.ParseInline("```let x = 1;\nlet y = 2;\n```");
+        Assert.Single(nonTag);
+        Assert.Equal("let x = 1;\nlet y = 2;", nonTag[0].Text);
+        Assert.Equal(MdStyle.Code, nonTag[0].Style);
+
+        var unterminated = InlineMarkdown.ParseInline("Hello\n```python\nprint(1)");
+        Assert.Equal(2, unterminated.Count);
+        Assert.Equal("Hello\n", unterminated[0].Text);
+        Assert.Equal("print(1)", unterminated[1].Text);
+        Assert.Equal(MdStyle.Code, unterminated[1].Style);
+    }
+
+    [Fact]
+    public void InlineMarkdownParsesFencedCodeBlocksWithLanguageAndLiteralBody()
+    {
+        var md = "Before\n```rust\nlet **x** = 1;\nlet y = `2`;\n```\nAfter";
+        var spans = InlineMarkdown.ParseInline(md);
+
+        Assert.Equal(3, spans.Count);
+        Assert.Equal("Before\n", spans[0].Text);
+        Assert.Equal(MdStyle.None, spans[0].Style);
+
+        Assert.Equal("let **x** = 1;\nlet y = `2`;", spans[1].Text);
+        Assert.Equal(MdStyle.Code, spans[1].Style);
+
+        Assert.Equal("\nAfter", spans[2].Text);
+        Assert.Equal(MdStyle.None, spans[2].Style);
+    }
+
+    [Fact]
+    public void ParseBlocksHandlesMultiLineFencedCodeBlocks()
+    {
+        var md = "Intro\n```csharp\nvar x = 1;\nvar y = 2;\n```\n- item";
+        var blocks = InlineMarkdown.ParseBlocks(md);
+
+        Assert.Equal(new[] { MdBlockKind.Paragraph, MdBlockKind.CodeBlock, MdBlockKind.Bullet },
+            blocks.Select(b => b.Kind).ToArray());
+        Assert.Equal("var x = 1;\nvar y = 2;", blocks[1].Spans.Single().Text);
+        Assert.Equal(MdStyle.Code, blocks[1].Spans.Single().Style);
+    }
+}

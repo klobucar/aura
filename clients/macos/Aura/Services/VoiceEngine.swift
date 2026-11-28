@@ -663,6 +663,14 @@ actor VoiceEngine {
             sender?.setVadThresholdDb(thresholdDb: thresholdDb)
             print("[QuicClient] VAD threshold: \(thresholdDb) dB")
         }
+        if let kbps = change.opusBitrateKbps {
+            do {
+                try sender?.setBitrate(bps: UInt32(kbps * 1000))
+                print("[QuicClient] Opus bitrate set to \(kbps) kbps")
+            } catch {
+                print("[QuicClient] Failed to set Opus bitrate to \(kbps) kbps: \(error)")
+            }
+        }
     }
 
     // MARK: Meter publishing

@@ -285,10 +285,46 @@ public class MarkdownView : StackPanel
 
         // Re-joining each block's own source keeps the inline parse identical
         // to the chat renderer's.
-        foreach (var raw in Markdown.Replace("\r\n", "\n").Split('\n'))
+        var lines = Markdown.Replace("\r\n", "\n").Split('\n');
+        for (int i = 0; i < lines.Length; i++)
         {
-            var trimmed = raw.Trim();
+            var trimmed = lines[i].Trim();
             if (trimmed.Length == 0) continue;
+
+            if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            {
+                var codeLines = new List<string>();
+                int j = i + 1;
+                bool closed = false;
+                for (; j < lines.Length; j++)
+                {
+                    if (lines[j].TrimStart().StartsWith("```", StringComparison.Ordinal))
+                    {
+                        closed = true;
+                        break;
+                    }
+                    codeLines.Add(lines[j]);
+                }
+                if (closed)
+                {
+                    Children.Add(new Border
+                    {
+                        Background = CodeBackground,
+                        CornerRadius = new CornerRadius(6),
+                        Padding = new Thickness(10, 8),
+                        Child = new TextBlock
+                        {
+                            Text = string.Join("\n", codeLines),
+                            FontFamily = CodeFontFamily ?? FontFamily.Default,
+                            Foreground = TextBrush,
+                            FontSize = TextSize,
+                            TextWrapping = TextWrapping.Wrap,
+                        },
+                    });
+                    i = j;
+                    continue;
+                }
+            }
 
             if (trimmed.StartsWith("- ") || trimmed.StartsWith("* "))
             {

@@ -23,6 +23,101 @@ public partial class MainWindowViewModel
     [ObservableProperty] private int _dredDuration = 10;  // 10ms units
     [ObservableProperty] private int _jitterBufferMs = 40;
     [ObservableProperty] private int _masterVolume = 100;  // 0–100 %
+    [ObservableProperty] private bool _isMicLoopbackActive;
+    [ObservableProperty] private double _loopbackLevel;
+
+    public IReadOnlyList<string> BitrateOptions { get; } = new[] { "16 kbps", "32 kbps", "64 kbps", "96 kbps" };
+    [ObservableProperty] private int _bitrateIndex = 2; // 64 kbps default
+
+    public int SelectedBitrateKbps =>
+        AppSettings.SupportedBitratesKbps[Math.Clamp(BitrateIndex, 0, AppSettings.SupportedBitratesKbps.Length - 1)];
+
+    partial void OnBitrateIndexChanged(int value)
+    {
+        _audioManager?.SetOpusBitrate(SelectedBitrateKbps);
+        SaveSettings();
+    }
+
+    [ObservableProperty] private bool _voiceSoundCuesEnabled = true;
+
+    partial void OnVoiceSoundCuesEnabledChanged(bool value) => SaveSettings();
+
+    public IReadOnlyList<string> PresenceOptions { get; } = new[] { "Online", "Idle", "Do Not Disturb" };
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PresenceLabel))]
+    private int _presenceIndex;
+
+    [ObservableProperty] private string _customStatus = "";
+
+    public string PresenceLabel => PresenceIndex switch
+    {
+        1 => "Idle",
+        2 => "DND",
+        _ => "Online",
+    };
+
+    public UserPresence CurrentPresenceStatus => PresenceIndex switch
+    {
+        1 => UserPresence.Idle,
+        2 => UserPresence.Dnd,
+        _ => UserPresence.Online,
+    };
+
+    private System.Threading.CancellationTokenSource? _customStatusCts;
+
+    partial void OnPresenceIndexChanged(int value)
+    {
+        SaveSettings();
+        UpdateSelfRow();
+        if (!_suppressSettingsSave && _client != null && IsAuthenticated)
+        {
+            _ = _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened, CurrentPresenceStatus, CustomStatus);
+        }
+    }
+
+    partial void OnCustomStatusChanged(string value)
+    {
+        if (value.Length > 128)
+        {
+            CustomStatus = value[..128];
+            return;
+        }
+        SaveSettings();
+        UpdateSelfRow();
+        if (!_suppressSettingsSave && _client != null && IsAuthenticated)
+        {
+            _customStatusCts?.Cancel();
+            var cts = new System.Threading.CancellationTokenSource();
+            _customStatusCts = cts;
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(350, cts.Token);
+                    if (_client != null && IsAuthenticated)
+                    {
+                        await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened, CurrentPresenceStatus, CustomStatus, cts.Token);
+                    }
+                }
+                catch (OperationCanceledException) { }
+            });
+        }
+    }
+
+    partial void OnIsMicLoopbackActiveChanged(bool value)
+    {
+        if (value)
+        {
+            EnsureAudio();
+            _audioEngine?.StartCapture();
+        }
+        else
+        {
+            LoopbackLevel = 0;
+            if (!IsMicEnabled) _audioEngine?.StopCapture();
+        }
+    }
 
     public IReadOnlyList<string> ThemeOptions { get; } = new[] { "Zenith", "Frost", "Bloom" };
     public IReadOnlyList<string> AppearanceOptions { get; } = new[] { "Dark", "Light", "System" };
@@ -86,7 +181,11 @@ public partial class MainWindowViewModel
     private void ToggleSettings()
     {
         ShowSettings = !ShowSettings;
-        if (!ShowSettings) IsRecordingPttKey = false;
+        if (!ShowSettings)
+        {
+            IsRecordingPttKey = false;
+            IsMicLoopbackActive = false;
+        }
     }
 
     [RelayCommand]
@@ -291,6 +390,11 @@ public partial class MainWindowViewModel
         DredDuration = s.DredDuration;
         JitterBufferMs = s.JitterBufferMs;
         MasterVolume = s.MasterVolume;
+        var bitrateIdx = Array.IndexOf(AppSettings.SupportedBitratesKbps, s.OpusBitrateKbps);
+        BitrateIndex = bitrateIdx >= 0 ? bitrateIdx : 2;
+        VoiceSoundCuesEnabled = s.VoiceSoundCues;
+        PresenceIndex = s.PresenceStatus switch { "idle" => 1, "dnd" => 2, _ => 0 };
+        CustomStatus = s.CustomStatus ?? "";
         RefreshAudioDevices();
         if (!string.IsNullOrWhiteSpace(s.AudioInputDevice) && !InputDeviceOptions.Contains(s.AudioInputDevice))
             InputDeviceOptions.Add(s.AudioInputDevice);
@@ -314,6 +418,7 @@ public partial class MainWindowViewModel
         NotifyBadge = s.NotifyBadge;
         NotifyJoinLeave = s.NotifyJoinLeave;
         _suppressSettingsSave = false;
+        LoadSavedServers();
         NotifyLayoutDerived();
     }
 
@@ -329,6 +434,10 @@ public partial class MainWindowViewModel
         s.DredDuration = DredDuration;
         s.JitterBufferMs = JitterBufferMs;
         s.MasterVolume = MasterVolume;
+        s.OpusBitrateKbps = SelectedBitrateKbps;
+        s.VoiceSoundCues = VoiceSoundCuesEnabled;
+        s.PresenceStatus = PresenceIndex switch { 1 => "idle", 2 => "dnd", _ => "online" };
+        s.CustomStatus = CustomStatus;
         s.AudioInputDevice = InputDeviceIndex > 0 && InputDeviceIndex < InputDeviceOptions.Count
             ? InputDeviceOptions[InputDeviceIndex] : "";
         s.AudioOutputDevice = OutputDeviceIndex > 0 && OutputDeviceIndex < OutputDeviceOptions.Count
@@ -358,6 +467,7 @@ public partial class MainWindowViewModel
             _audioManager.SetWebrtcAgcEnabled(AgcEnabled);
             _audioManager.SetDredDuration(DredDuration);
             _audioManager.SetJitterBufferMs((uint)JitterBufferMs);
+            _audioManager.SetOpusBitrate(SelectedBitrateKbps);
         }
         if (_audioEngine != null)
         {

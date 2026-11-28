@@ -279,6 +279,12 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     [ObservableProperty] private IBrush? _latencyBrush;
 
+    /// <summary>Call quality tooltip/readout from AudioReceiverWrapper.GetStats().</summary>
+    [ObservableProperty] private string _callQualitySummary = "Loss: 0.0% · PLC: 0 · Jitter: 0.0 ms";
+
+    /// <summary>True when an administrator has server-muted our live session.</summary>
+    [ObservableProperty] private bool _isServerMuted;
+
     /// <summary>PTT hold readout: `held 0:04`.</summary>
     [ObservableProperty] private string _pttHeldLabel = "";
 
@@ -393,8 +399,18 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _talkStore.Trim();
         VoiceRail.Rebuild(BuildParticipants(), _talkStore);
         RefreshEpoch();
+        RefreshCallQualityStats();
         RefreshPushToTalkLabel();
         RefreshTrust(force: false);
+    }
+
+    private void RefreshCallQualityStats()
+    {
+        if (!IsAuthenticated || SelectedChannel == null) return;
+        if (_audioManager?.GetReceiverStats() is { } stats)
+        {
+            CallQualitySummary = stats.FormatSummary();
+        }
     }
 
     /// <summary>
@@ -413,6 +429,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
 
         VoiceRail.PushLevel(IsMicEnabled ? level : 0);
+        LoopbackLevel = IsMicLoopbackActive ? Math.Clamp(Math.Sqrt(level) * 100.0, 0, 100) : 0;
 
         if (_client != null && IsAuthenticated)
         {
@@ -495,6 +512,10 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     /// <summary>Capture thread: one 20ms frame. Encryption happens in the client.</summary>
     private void OnCapturedAudio(byte[] frame)
     {
+        if (IsMicLoopbackActive)
+        {
+            _audioEngine?.PlayAudio(frame);
+        }
         var client = _client;
         var cts = _audioCts;
         if (client == null || cts == null || cts.IsCancellationRequested) return;
@@ -520,11 +541,15 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         IsMicEnabled = open;
         if (open) StartMic(); else StopMic();
+        if (VoiceSoundCuesEnabled && IsAuthenticated)
+        {
+            VoiceSoundCues.Play(_audioManager, _audioEngine, open ? VoiceSoundCues.CueKind.Unmute : VoiceSoundCues.CueKind.Mute);
+        }
         UpdateSelfRow();
 
         if (_client != null)
         {
-            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
+            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened, CurrentPresenceStatus, CustomStatus);
         }
     }
 
@@ -542,7 +567,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         else if (_client != null)
         {
-            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened);
+            await _client.UpdateStatusAsync(!IsMicEnabled, IsDeafened, CurrentPresenceStatus, CustomStatus);
         }
         UpdateSelfRow();
     }
@@ -560,7 +585,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         _audioCts?.Cancel();
         _audioCts = null;
-        _audioEngine?.StopCapture();
+        if (!IsMicLoopbackActive) _audioEngine?.StopCapture();
     }
 
     /// <summary>
@@ -609,6 +634,7 @@ public partial class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        IsMicLoopbackActive = false;
         _laneTimer.Stop();
         _meterTimer.Stop();
         _reconnectTimer.Stop();
@@ -676,8 +702,11 @@ public partial class User : ObservableObject
     [ObservableProperty] private string _comment = "";
     [ObservableProperty] private bool _isMuted;
     [ObservableProperty] private bool _isDeafened;
+    [ObservableProperty] private bool _isServerMuted;
     [ObservableProperty] private bool _isSpeaking;
     [ObservableProperty] private bool _isLocallyMuted;
+    [ObservableProperty] private UserPresence _presence = UserPresence.Online;
+    [ObservableProperty] private string _customStatus = "";
     [ObservableProperty] private Position3D _position = new(0, 0, 0);
 
     /// <summary>The local user's own row ("you").</summary>
@@ -688,6 +717,18 @@ public partial class User : ObservableObject
 
     /// <summary>Opens the moderation console on this member.</summary>
     public IRelayCommand? ModerateCommand { get; set; }
+
+    /// <summary>Admin server-mute/unmute toggle for this member.</summary>
+    public IRelayCommand? ServerMuteCommand { get; set; }
+
+    public string ServerMuteLabel => IsServerMuted ? "Server unmute" : "Server mute";
+    public bool HasCustomStatus => !string.IsNullOrWhiteSpace(CustomStatus);
+    public string PresenceTooltip => Presence switch
+    {
+        UserPresence.Idle => "Idle",
+        UserPresence.Dnd => "Do Not Disturb",
+        _ => "Online",
+    };
 
     /// <summary>
     /// Trust in this user's identity key, from the MLS group of the channel
@@ -720,6 +761,9 @@ public partial class User : ObservableObject
     partial void OnIsDeafenedChanged(bool value) => OnPropertyChanged(nameof(ShowMuted));
     partial void OnNameChanged(string value) => OnPropertyChanged(nameof(Initial));
     partial void OnIsLocallyMutedChanged(bool value) => OnPropertyChanged(nameof(LocalMuteLabel));
+    partial void OnIsServerMutedChanged(bool value) => OnPropertyChanged(nameof(ServerMuteLabel));
+    partial void OnCustomStatusChanged(string value) => OnPropertyChanged(nameof(HasCustomStatus));
+    partial void OnPresenceChanged(UserPresence value) => OnPropertyChanged(nameof(PresenceTooltip));
 }
 
 public record Position3D(float X, float Y, float Z);

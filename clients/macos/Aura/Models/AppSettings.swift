@@ -44,15 +44,47 @@ enum AuraLayoutMode: String, CaseIterable, Codable {
     }
 }
 
+public enum AuraPresenceStatus: String, CaseIterable, Codable, Sendable {
+    case online = "online"
+    case idle = "idle"
+    case dnd = "dnd"
+
+    var displayName: String {
+        switch self {
+        case .online: return "Online"
+        case .idle: return "Idle"
+        case .dnd: return "Do Not Disturb"
+        }
+    }
+
+    var shortLabel: String {
+        switch self {
+        case .online: return "Online"
+        case .idle: return "Idle"
+        case .dnd: return "DND"
+        }
+    }
+}
+
 class AppSettings: ObservableObject {
+    static let supportedBitratesKbps: [Int] = [16, 32, 64, 96]
+
     @Published var theme: AuraThemeType = .zenith
     @Published var layoutMode: AuraLayoutMode = .chatFirst
     @Published var trustedFingerprints: [String: String] = [:]
+    @Published var opusBitrateKbps: Int = 64
+    @Published var voiceSoundCuesEnabled: Bool = true
+    @Published var presenceStatus: AuraPresenceStatus = .online
+    @Published var customStatusText: String = ""
 
     private let defaults = UserDefaults.standard
     private let themeKey = "AuraThemeSelection"
     private let layoutModeKey = "AuraLayoutMode"
     private let fingerprintsKey = "AuraTrustedFingerprints"
+    private let opusBitrateKey = "AuraOpusBitrateKbps"
+    private let voiceSoundCuesKey = "AuraVoiceSoundCues"
+    private let presenceStatusKey = "AuraPresenceStatus"
+    private let customStatusTextKey = "AuraCustomStatusText"
 
     static let shared = AppSettings()
     
@@ -74,12 +106,30 @@ class AppSettings: ObservableObject {
         if let savedFingerprints = defaults.dictionary(forKey: fingerprintsKey) as? [String: String] {
             trustedFingerprints = savedFingerprints
         }
+
+        let savedBitrate = defaults.integer(forKey: opusBitrateKey)
+        if Self.supportedBitratesKbps.contains(savedBitrate) {
+            opusBitrateKbps = savedBitrate
+        }
+
+        voiceSoundCuesEnabled = defaults.object(forKey: voiceSoundCuesKey) as? Bool ?? true
+
+        if let statusRaw = defaults.string(forKey: presenceStatusKey),
+           let savedStatus = AuraPresenceStatus(rawValue: statusRaw) {
+            presenceStatus = savedStatus
+        }
+
+        customStatusText = defaults.string(forKey: customStatusTextKey) ?? ""
     }
 
     func saveSettings() {
         defaults.set(theme.rawValue, forKey: themeKey)
         defaults.set(layoutMode.rawValue, forKey: layoutModeKey)
         defaults.set(trustedFingerprints, forKey: fingerprintsKey)
+        defaults.set(opusBitrateKbps, forKey: opusBitrateKey)
+        defaults.set(voiceSoundCuesEnabled, forKey: voiceSoundCuesKey)
+        defaults.set(presenceStatus.rawValue, forKey: presenceStatusKey)
+        defaults.set(String(customStatusText.prefix(128)), forKey: customStatusTextKey)
     }
 
     /// Flips the channel window between Chat-first and Voice-focus and

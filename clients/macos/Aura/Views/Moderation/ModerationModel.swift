@@ -12,24 +12,50 @@ struct ModerationMember: Identifiable, Equatable, Hashable {
     let banned: Bool
     let isAdmin: Bool
     let createdAt: Date
+    let presence: AuraPresenceStatus?
+    let customStatus: String?
+    let isServerMuted: Bool
 
-    init(id: String, name: String, verified: Bool, banned: Bool, isAdmin: Bool, createdAt: Date) {
+    init(
+        id: String,
+        name: String,
+        verified: Bool,
+        banned: Bool,
+        isAdmin: Bool,
+        createdAt: Date,
+        presence: AuraPresenceStatus? = nil,
+        customStatus: String? = nil,
+        isServerMuted: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.verified = verified
         self.banned = banned
         self.isAdmin = isAdmin
         self.createdAt = createdAt
+        self.presence = presence
+        self.customStatus = customStatus
+        self.isServerMuted = isServerMuted
     }
 
     init(_ record: UserInfoRecord) {
+        let mappedPresence: AuraPresenceStatus? = record.presence.map {
+            switch $0 {
+            case .online: return .online
+            case .idle: return .idle
+            case .dnd: return .dnd
+            }
+        }
         self.init(
             id: record.userUuid,
             name: record.displayName,
             verified: record.verified,
             banned: record.banned,
             isAdmin: record.isAdmin,
-            createdAt: Date(timeIntervalSince1970: TimeInterval(record.createdAt))
+            createdAt: Date(timeIntervalSince1970: TimeInterval(record.createdAt)),
+            presence: mappedPresence,
+            customStatus: record.customStatus,
+            isServerMuted: record.isServerMuted
         )
     }
 
@@ -239,6 +265,7 @@ enum ModerationAction: Equatable {
     case ban(banned: Bool)
     case grant
     case kick
+    case serverMute(muted: Bool)
 
     /// The control message type this action's request and reply use.
     var messageType: UInt8 {
@@ -248,6 +275,7 @@ enum ModerationAction: Equatable {
         case .ban: return 0x4A
         case .grant: return 0x4B
         case .kick: return 0x4C
+        case .serverMute: return 0x4D
         }
     }
 
@@ -258,6 +286,7 @@ enum ModerationAction: Equatable {
         case .ban(let banned): return banned ? "Account banned." : "Ban lifted."
         case .grant: return "Admin permissions updated."
         case .kick: return "Moved to the lobby."
+        case .serverMute(let muted): return muted ? "Server-muted." : "Server-unmuted."
         }
     }
 }

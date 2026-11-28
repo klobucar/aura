@@ -24,4 +24,6 @@ nonisolated extension Notification.Name {
     static let audioOutputDeviceChanged = Notification.Name("audioOutputDeviceChanged")
     /// Posted when AVAudioEngine's output hardware configuration changes.
     static let audioOutputNeedsRestart = Notification.Name("audioOutputNeedsRestart")
+    /// Posted when the local user's presence status or custom status text changes.
+    static let presenceStatusChanged = Notification.Name("presenceStatusChanged")
 }

@@ -45,5 +45,9 @@ EXPOSE 443/tcp
 
 # Run the server
 # Static binary execution without a shell
+#
+# No default arguments: the bind address comes from AURA_BIND_ADDRESS (or
+# server.toml), defaulting to 0.0.0.0:8443. `--bind` is a real override now,
+# so a default here would win over the environment and break hosts that must
+# bind a specific name (Fly needs fly-global-services for UDP).
 ENTRYPOINT ["/app/aura-server"]
-CMD ["--bind", "0.0.0.0:8443"]
