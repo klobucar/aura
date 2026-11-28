@@ -167,6 +167,9 @@ public sealed class ChatHistory
             : null;
     }
 
+    /// <summary>Every message held, across all channels.</summary>
+    public IEnumerable<ChatMessage> All => _byChannel.Values.SelectMany(list => list);
+
     /// <summary>Forget a deleted channel's history.</summary>
     public void Remove(string channelId) => _byChannel.Remove(channelId);
 

@@ -361,6 +361,10 @@ public partial class MainWindow : Window
     private bool CloseTopOverlay()
     {
         if (_vm == null) return false;
+        // The two confirms sit above everything else. Esc is their Cancel
+        // button, never the destructive one.
+        if (_vm.ShowRestoreConfirm) { _vm.CancelRestoreCommand.Execute(null); return true; }
+        if (_vm.ShowLeaveConfirm) { _vm.CancelLeaveServerCommand.Execute(null); return true; }
         if (_vm.ChannelEditor.IsOpen) { _vm.ChannelEditor.Close(); return true; }
         if (_vm.ProfileCard.IsOpen) { _vm.ProfileCard.Close(); return true; }
         if (_vm.ShowSettings) { _vm.ToggleSettingsCommand.Execute(null); return true; }

@@ -248,6 +248,7 @@ public partial class MainWindowViewModel
         if (_client != null && senderId == _client.UserId) return;
 
         var sender = Channels.SelectMany(c => c.Users).FirstOrDefault(u => !u.IsSelf && u.Id == senderId);
+        var senderUuid = _client?.UuidForSession(senderId);
         var quoted = _history.Find(channelId, replyToId);
 
         var message = Wire(new ChatMessage
@@ -256,6 +257,8 @@ public partial class MainWindowViewModel
             ChannelId = channelId,
             UserId = senderId,
             UserName = sender?.Name ?? $"User {senderId}",
+            SenderUuid = senderUuid,
+            Avatar = sender?.Avatar ?? _avatars.Get(senderUuid),
             Content = content,
             ReplyToId = replyToId,
             ReplySender = quoted == null ? "" : quoted.IsFromCurrentUser ? "you" : quoted.UserName,
@@ -280,6 +283,7 @@ public partial class MainWindowViewModel
         if (_client != null && senderId == _client.UserId) return;
 
         var sender = Channels.SelectMany(c => c.Users).FirstOrDefault(u => !u.IsSelf && u.Id == senderId);
+        var senderUuid = _client?.UuidForSession(senderId);
         var quoted = _history.Find(channelId, replyToId);
 
         var message = Wire(new ChatMessage
@@ -288,6 +292,8 @@ public partial class MainWindowViewModel
             ChannelId = channelId,
             UserId = senderId,
             UserName = sender?.Name ?? $"User {senderId}",
+            SenderUuid = senderUuid,
+            Avatar = sender?.Avatar ?? _avatars.Get(senderUuid),
             Content = caption,
             ReplyToId = replyToId,
             ReplySender = quoted == null ? "" : quoted.IsFromCurrentUser ? "you" : quoted.UserName,

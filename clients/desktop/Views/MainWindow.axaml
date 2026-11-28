@@ -55,12 +55,8 @@
                 <Grid RowDefinitions="Auto,Auto,Auto,*,Auto,Auto" Margin="10,0,10,12">
 
                     <!-- ── Title row ── -->
-                    <Grid Grid.Row="0" Height="52" ColumnDefinitions="Auto,*">
-                        <TextBlock Grid.Column="0" Text="☰"
-                                   FontSize="{StaticResource AuraFont14}"
-                                   Foreground="{DynamicResource AuraTextDimBrush}"
-                                   VerticalAlignment="Center"/>
-                        <TextBlock Grid.Column="1" Text="Aura"
+                    <Grid Grid.Row="0" Height="52">
+                        <TextBlock Text="Aura"
                                    Classes="title"
                                    HorizontalAlignment="Right"
                                    VerticalAlignment="Center"/>
@@ -169,7 +165,7 @@
                                                      Foreground="{DynamicResource AuraTextMidBrush}"
                                                      TextWrapping="Wrap"/>
                             </Border>
-                            <Button Command="{Binding TrustAndConnectCommand}"
+                            <Button Classes="caution" Command="{Binding TrustAndConnectCommand}"
                                     Background="{DynamicResource AuraCautionBrush}"
                                     Foreground="#12141A"
                                     FontWeight="SemiBold"
@@ -546,20 +542,19 @@
                         BorderBrush="{DynamicResource AuraDividerBrush}"
                         BorderThickness="0,0,0,1"
                         Padding="16,0">
-                    <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto">
                         <TextBlock Grid.Column="0" Text="{Binding SelectedChannel.Icon, FallbackValue='🔊'}"
                                    FontSize="{StaticResource AuraFont14}"
                                    VerticalAlignment="Center"
                                    Margin="0,0,8,0"/>
 
-                        <TextBlock Grid.Column="1"
-                                   Classes="title"
-                                   Text="{Binding SelectedChannel.Name, FallbackValue='No channel'}"
-                                   VerticalAlignment="Center"/>
-
+                        <!-- Name + badge share the flexible column. The badge is
+                             docked first so it keeps its width and the name, which
+                             fills what is left, is the one that trims. -->
+                        <DockPanel Grid.Column="1" HorizontalAlignment="Left">
                         <!-- `E2EE · epoch 14`. The badge that claims the channel
                              is encrypted is also the way to check the claim. -->
-                        <Button Grid.Column="2" Classes="icon"
+                        <Button DockPanel.Dock="Right" Classes="icon"
                                 Padding="0"
                                 Margin="10,0,0,0"
                                 VerticalAlignment="Center"
@@ -577,8 +572,15 @@
                             </Border>
                         </Button>
 
+                        <TextBlock Classes="title"
+                                   Text="{Binding SelectedChannel.Name, FallbackValue='No channel'}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="{Binding SelectedChannel.Name}"
+                                   VerticalAlignment="Center"/>
+                        </DockPanel>
+
                         <!-- `12 messages today` -->
-                        <StackPanel Grid.Column="4" Orientation="Horizontal"
+                        <StackPanel Grid.Column="2" Orientation="Horizontal"
                                     Spacing="{StaticResource AuraSpace8}"
                                     VerticalAlignment="Center"
                                     Margin="0,0,8,0">
@@ -640,7 +642,7 @@
                         </StackPanel>
 
                         <!-- Mode toggle -->
-                        <Button Grid.Column="5" Classes="icon"
+                        <Button Grid.Column="3" Classes="icon"
                                 Command="{Binding ToggleLayoutModeCommand}"
                                 ToolTip.Tip="{Binding LayoutToggleTip}"
                                 VerticalAlignment="Center">
@@ -767,14 +769,21 @@
                                             Margin="0,0,11,0"
                                             VerticalAlignment="Top"
                                             CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                            ClipToBounds="True"
                                             Background="{DynamicResource AuraBrandGradientBrush}"
                                             IsVisible="{Binding IsIncoming}">
-                                        <TextBlock Text="{Binding Initial}"
-                                                   FontSize="{StaticResource AuraFont13}"
-                                                   FontWeight="Bold"
-                                                   Foreground="White"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"/>
+                                        <Panel>
+                                            <TextBlock Text="{Binding Initial}"
+                                                       IsVisible="{Binding ShowInitial}"
+                                                       FontSize="{StaticResource AuraFont13}"
+                                                       FontWeight="Bold"
+                                                       Foreground="White"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                            <Image Source="{Binding Avatar}"
+                                                   IsVisible="{Binding HasAvatar}"
+                                                   Stretch="UniformToFill"/>
+                                        </Panel>
                                     </Border>
 
                                     <Border Grid.Column="2" Height="34"
@@ -782,39 +791,52 @@
                                             Margin="11,0,0,0"
                                             VerticalAlignment="Top"
                                             CornerRadius="{StaticResource AuraRadiusAvatar}"
+                                            ClipToBounds="True"
                                             Background="{DynamicResource AuraBrandGradientBrush}"
                                             IsVisible="{Binding IsFromCurrentUser}">
-                                        <TextBlock Text="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OwnInitial}"
-                                                   FontSize="{StaticResource AuraFont13}"
-                                                   FontWeight="Bold"
-                                                   Foreground="White"
-                                                   HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center"/>
+                                        <!-- Our own avatar is the view model's, so every
+                                             message of ours follows a change at once. -->
+                                        <Panel>
+                                            <TextBlock Text="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).OwnInitial}"
+                                                       IsVisible="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).ShowMyInitial}"
+                                                       FontSize="{StaticResource AuraFont13}"
+                                                       FontWeight="Bold"
+                                                       Foreground="White"
+                                                       HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center"/>
+                                            <Image Source="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).MyAvatarImage}"
+                                                   IsVisible="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).HasMyAvatar}"
+                                                   Stretch="UniformToFill"/>
+                                        </Panel>
                                     </Border>
 
                                     <StackPanel Grid.Column="1" HorizontalAlignment="{Binding Alignment}">
-                                        <!-- name + timestamp on one baseline row -->
-                                        <StackPanel Orientation="Horizontal"
-                                                    Spacing="{StaticResource AuraSpace8}"
-                                                    Margin="2,0,2,3"
-                                                    HorizontalAlignment="{Binding Alignment}"
-                                                    IsVisible="{Binding !System}">
-                                            <TextBlock Text="{Binding UserName}"
-                                                       FontSize="{StaticResource AuraFont13}"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource AuraTextMidBrush}"/>
-                                            <TextBlock Classes="mono"
-                                                       Text="{Binding TimeLabel}"
-                                                       FontSize="{StaticResource AuraMono9}"
-                                                       Foreground="{DynamicResource AuraTextFaintBrush}"
-                                                       VerticalAlignment="Center"/>
-                                            <TextBlock Classes="mono"
+                                        <!-- name + timestamp on one baseline row. Reads name ·
+                                             time · mention; the trailing two are docked right
+                                             (so declared in reverse) and keep their width, and
+                                             the name fills the rest and trims. -->
+                                        <DockPanel Margin="2,0,2,3"
+                                                   HorizontalAlignment="{Binding Alignment}"
+                                                   IsVisible="{Binding !System}">
+                                            <TextBlock DockPanel.Dock="Right" Classes="mono"
                                                        Text="mentions you"
                                                        FontSize="{StaticResource AuraMono9}"
                                                        Foreground="{DynamicResource AuraCautionTextBrush}"
                                                        VerticalAlignment="Center"
+                                                       Margin="8,0,0,0"
                                                        IsVisible="{Binding IsMention}"/>
-                                        </StackPanel>
+                                            <TextBlock DockPanel.Dock="Right" Classes="mono"
+                                                       Text="{Binding TimeLabel}"
+                                                       FontSize="{StaticResource AuraMono9}"
+                                                       Foreground="{DynamicResource AuraTextFaintBrush}"
+                                                       VerticalAlignment="Center"
+                                                       Margin="8,0,0,0"/>
+                                            <TextBlock Text="{Binding UserName}"
+                                                       FontSize="{StaticResource AuraFont13}"
+                                                       FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource AuraTextMidBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </DockPanel>
 
                                         <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
                                                 BorderBrush="{Binding ., Converter={x:Static converters:ChatBubbleBorderConverter.Instance}}"
@@ -1103,22 +1125,25 @@
 
                                         <StackPanel Grid.Column="1" VerticalAlignment="Center"
                                                     Spacing="{StaticResource AuraSpace3}">
-                                            <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
-                                                <TextBlock Text="{Binding VoiceRail.CurrentSpeaker.Name}"
-                                                           FontSize="{Binding HeroNameFontSize}"
-                                                           FontWeight="Bold"
-                                                           Foreground="{DynamicResource AuraTextBrush}"/>
-                                                <Border Classes="badge"
+                                            <!-- Badge docked first so the name is what trims -->
+                                            <DockPanel HorizontalAlignment="Left">
+                                                <Border DockPanel.Dock="Right" Classes="badge"
                                                         Background="{DynamicResource AuraAccentPillFillBrush}"
                                                         BorderBrush="{DynamicResource AuraAccentPillBorderBrush}"
                                                         BorderThickness="1"
                                                         VerticalAlignment="Center"
+                                                        Margin="8,0,0,0"
                                                         IsVisible="{Binding VoiceRail.CurrentSpeaker.IsVerified}">
                                                     <TextBlock Classes="mono" Text="verified"
                                                                FontSize="{StaticResource AuraMono9}"
                                                                Foreground="{DynamicResource AuraAccentBrush}"/>
                                                 </Border>
-                                            </StackPanel>
+                                                <TextBlock Text="{Binding VoiceRail.CurrentSpeaker.Name}"
+                                                           FontSize="{Binding HeroNameFontSize}"
+                                                           FontWeight="Bold"
+                                                           Foreground="{DynamicResource AuraTextBrush}"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                            </DockPanel>
 
                                             <!-- `speaking 0:12 · 41%` -->
                                             <TextBlock Classes="mono"
@@ -1150,7 +1175,7 @@
                                                 Value="{Binding VoiceRail.CurrentSpeaker.LocalVolume}"
                                                 VerticalAlignment="Center"/>
                                         <TextBlock Grid.Column="2" Classes="mono"
-                                                   Text="{Binding VoiceRail.CurrentSpeaker.LocalVolume}"
+                                                   Text="{Binding VoiceRail.CurrentSpeaker.LocalVolume, StringFormat='{}{0}%'}"
                                                    FontSize="{StaticResource AuraMono10}"
                                                    Foreground="{DynamicResource AuraTextDimBrush}"
                                                    VerticalAlignment="Center"
@@ -1539,7 +1564,7 @@
                                 HorizontalAlignment="Stretch"
                                 HorizontalContentAlignment="Center"
                                 Content="They match — mark verified"/>
-                        <Button Grid.Column="1"
+                        <Button Classes="danger" Grid.Column="1"
                                 Command="{Binding TrustSheet.BlockCommand}"
                                 Background="{DynamicResource AuraDangerFillBrush}"
                                 BorderBrush="{DynamicResource AuraDangerBorderBrush}"
@@ -1670,9 +1695,12 @@
              member's actions on the right.
              ================================================================ -->
         <Border IsVisible="{Binding Moderation.IsOpen}" Background="#99000000">
-            <Border Width="900" Height="600"
-                    MaxHeight="720"
-                    VerticalAlignment="Center" HorizontalAlignment="Center"
+            <!-- 600 high when there is room, less when the window is shorter:
+                 stretched within a margin and capped, which also centres it. -->
+            <Border Width="900"
+                    MaxHeight="600"
+                    Margin="0,16"
+                    VerticalAlignment="Stretch" HorizontalAlignment="Center"
                     Classes="sheet"
                     Padding="18">
                 <DockPanel LastChildFill="True">
@@ -1902,7 +1930,7 @@
                                                  MaxLength="200"/>
 
                                         <!-- Ban asks twice; unban doesn't. -->
-                                        <Button Content="{Binding Moderation.BanButtonLabel}"
+                                        <Button Classes="danger" Content="{Binding Moderation.BanButtonLabel}"
                                                 Command="{Binding Moderation.BanCommand}"
                                                 IsVisible="{Binding !Moderation.ConfirmingBan}"
                                                 IsEnabled="{Binding Moderation.CanBan}"
@@ -1923,7 +1951,7 @@
                                                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
                                                         CornerRadius="{StaticResource AuraRadiusControl}" Padding="12,6"
                                                         FontSize="{StaticResource AuraFont12}"/>
-                                                <Button Grid.Column="2" Content="Confirm ban"
+                                                <Button Classes="dangerSolid" Grid.Column="2" Content="Confirm ban"
                                                         Command="{Binding Moderation.BanCommand}"
                                                         IsEnabled="{Binding Moderation.CanBan}"
                                                         Background="{DynamicResource AuraDangerBrush}" Foreground="White"
@@ -2236,7 +2264,7 @@
                                        IsVisible="{Binding IdentityError, Converter={StaticResource StringToBoolConverter}}"
                                        FontSize="{StaticResource AuraFont11}"
                                        Foreground="{DynamicResource AuraDangerBrush}" TextWrapping="Wrap"/>
-                            <Button Content="Leave server…"
+                            <Button Classes="danger" Content="Leave server…"
                                     Command="{Binding AskLeaveServerCommand}"
                                     IsVisible="{Binding IsAuthenticated}"
                                     HorizontalAlignment="Left"
@@ -2409,7 +2437,7 @@
                                FontSize="{StaticResource AuraFont11}"
                                Foreground="{DynamicResource AuraDangerBrush}" TextWrapping="Wrap"/>
                     <Grid ColumnDefinitions="Auto,*,Auto,Auto" Margin="0,4,0,0">
-                        <Button Grid.Column="0"
+                        <Button Classes="danger" Grid.Column="0"
                                 Content="{Binding ChannelEditor.DeleteLabel}"
                                 Command="{Binding ChannelEditor.DeleteChannelCommand}"
                                 IsVisible="{Binding !ChannelEditor.IsNew}"
@@ -2453,7 +2481,7 @@
                         <Button Content="Cancel" Command="{Binding CancelLeaveServerCommand}"
                                 CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
                                 FontSize="{StaticResource AuraFont12}"/>
-                        <Button Content="Delete my account"
+                        <Button Classes="dangerSolid" Content="Delete my account"
                                 Command="{Binding ConfirmLeaveServerCommand}"
                                 IsEnabled="{Binding !IsLeaving}"
                                 Background="{DynamicResource AuraDangerBrush}" Foreground="White"
@@ -2488,7 +2516,7 @@
                         <Button Content="Cancel" Command="{Binding CancelRestoreCommand}"
                                 CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
                                 FontSize="{StaticResource AuraFont12}"/>
-                        <Button Content="Replace identity"
+                        <Button Classes="caution" Content="Replace identity"
                                 Command="{Binding ConfirmRestoreCommand}"
                                 Background="{DynamicResource AuraCautionBrush}" Foreground="#12141A"
                                 CornerRadius="{StaticResource AuraRadiusControl}" Padding="14,6"
