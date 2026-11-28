@@ -301,7 +301,13 @@
         <Setter Property="BorderThickness" Value="0,0,0,2"/>
         <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>
+    <!-- Fluent swaps the fill on hover and focus (TextControlBackgroundFocused is
+         black in dark mode); the well stays put and the underline shows focus. -->
+    <Style Selector="TextBox.aura:pointerover /template/ Border#PART_BorderElement">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+    </Style>
     <Style Selector="TextBox.aura:focus /template/ Border#PART_BorderElement">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
         <Setter Property="BorderBrush" Value="{DynamicResource AuraAccentBrush}"/>
     </Style>
 
