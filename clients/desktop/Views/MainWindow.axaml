@@ -11,7 +11,6 @@
         Width="1200" Height="760"
         MinWidth="960" MinHeight="600"
         WindowStartupLocation="CenterScreen"
-        TransparencyLevelHint="AcrylicBlur"
         Background="{DynamicResource AuraBackgroundBrush}">
 
     <Window.Resources>
@@ -31,10 +30,37 @@
     </Design.DataContext>
 
     <Panel>
-        <!-- Window material. Acrylic carries the depth so the panes can be flat:
-             one translucent layer per depth level, never glass on glass. The tint
-             is set from the palette in code-behind. -->
-        <ExperimentalAcrylicBorder x:Name="AcrylicRoot" IsHitTestVisible="False"/>
+        <!-- Window background, the macOS client's: a vertical gradient from the
+             palette background to a deep tone (set in code-behind), then three
+             soft glows in primary, secondary and accent. The glows are discs
+             faded by a radial mask, standing in for macOS's blurred circles;
+             sizes are the circle plus its blur, offsets are from the centre. -->
+        <Border x:Name="BackgroundRoot" IsHitTestVisible="False"/>
+        <Grid IsHitTestVisible="False" ClipToBounds="True">
+            <Grid.Resources>
+                <RadialGradientBrush x:Key="AuraGlowMask">
+                    <GradientStop Color="#FF000000" Offset="0"/>
+                    <GradientStop Color="#E6000000" Offset="0.45"/>
+                    <GradientStop Color="#59000000" Offset="0.75"/>
+                    <GradientStop Color="#00000000" Offset="1"/>
+                </RadialGradientBrush>
+            </Grid.Resources>
+            <Ellipse Width="1000" Height="1000" Opacity="0.10"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     RenderTransform="translate(-300px,-200px)"
+                     Fill="{DynamicResource AuraPrimaryBrush}"
+                     OpacityMask="{StaticResource AuraGlowMask}"/>
+            <Ellipse Width="760" Height="760" Opacity="0.08"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     RenderTransform="translate(300px,100px)"
+                     Fill="{DynamicResource AuraSecondaryBrush}"
+                     OpacityMask="{StaticResource AuraGlowMask}"/>
+            <Ellipse Width="520" Height="520" Opacity="0.05"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     RenderTransform="translate(0px,300px)"
+                     Fill="{DynamicResource AuraAccentBrush}"
+                     OpacityMask="{StaticResource AuraGlowMask}"/>
+        </Grid>
 
         <!-- ============================================================
              Three columns: roster 268 · chat flex · voice rail 336.
@@ -324,10 +350,10 @@
                                     <DataTemplate x:DataType="vm:Channel">
                                         <StackPanel Margin="0,0,0,2">
 
-                                            <!-- Channel row. Current channel gets a 3px
-                                                 accent bar + subtle fill, the Fluent
-                                                 NavigationView idiom, not a tinted capsule. -->
+                                            <!-- Channel row. The current channel is a tinted,
+                                                 rimmed row (Button.row.current), as on macOS. -->
                                             <Button Classes="row"
+                                                    Classes.current="{Binding IsCurrent}"
                                                     Padding="0"
                                                     Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).JoinChannelCommand}"
                                                     CommandParameter="{Binding}">
@@ -337,17 +363,11 @@
                                                         <MenuItem Header="Delete channel…" Command="{Binding DeleteCommand}"/>
                                                     </ContextMenu>
                                                 </Button.ContextMenu>
-                                                <Grid ColumnDefinitions="3,Auto,*,Auto">
-                                                    <Border Grid.Column="0" Width="3"
-                                                            CornerRadius="{StaticResource AuraRadiusBadge}"
-                                                            Background="{DynamicResource AuraAccentBrush}"
-                                                            Margin="0,2"
-                                                            IsVisible="{Binding IsCurrent}"/>
-
+                                                <Grid ColumnDefinitions="0,Auto,*,Auto">
                                                     <TextBlock Grid.Column="1" Text="{Binding Icon}"
                                                                FontSize="{StaticResource AuraFont13}"
                                                                VerticalAlignment="Center"
-                                                               Margin="8,0,8,0"/>
+                                                               Margin="10,0,8,0"/>
 
                                                     <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="0,7">
                                                         <TextBlock Text="{Binding Name}"
@@ -515,17 +535,14 @@
                                        ToolTip.Tip="{Binding ConnectionStatus}"/>
                         </StackPanel>
 
-                        <Button Classes="row"
+                        <Button Classes="glass"
                                 Command="{Binding ToggleSettingsCommand}"
-                                HorizontalContentAlignment="Center"
                                 ToolTip.Tip="Settings (Ctrl+, / Cmd+,)">
                             <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace8}">
                                 <controls:AuraIcon Data="{StaticResource AuraIconSettings}" Width="14" Height="14"
-                                                  VerticalAlignment="Center"
-                                                  Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                                  VerticalAlignment="Center"/>
                                 <TextBlock Text="Settings" FontSize="{StaticResource AuraFont12}"
-                                           FontWeight="SemiBold"
-                                           Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                           FontWeight="SemiBold"/>
                             </StackPanel>
                         </Button>
                     </StackPanel>
@@ -713,9 +730,11 @@
                         Padding="0"
                         MaxHeight="150"
                         IsVisible="{Binding HasChannelMotd}">
-                    <Grid ColumnDefinitions="3,*">
-                        <Border Grid.Column="0"
-                                CornerRadius="8,0,0,8"
+                    <!-- Inset accent capsule, as macOS's comment card. -->
+                    <Grid ColumnDefinitions="Auto,*">
+                        <Border Grid.Column="0" Width="3"
+                                Margin="12,12,0,12"
+                                CornerRadius="{StaticResource AuraRadiusPill}"
                                 Background="{DynamicResource AuraAccentBrush}"/>
                         <ScrollViewer Grid.Column="1" HorizontalScrollBarVisibility="Disabled">
                             <StackPanel Margin="14,10" Spacing="{StaticResource AuraSpace5}">
@@ -847,8 +866,9 @@
 
                                         <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
                                                 BorderBrush="{Binding ., Converter={x:Static converters:ChatBubbleBorderConverter.Instance}}"
-                                                BorderThickness="{Binding System, Converter={x:Static converters:BoolToThicknessConverter.Instance}}"
-                                                CornerRadius="{StaticResource AuraRadiusTile}"
+                                                BorderThickness="1"
+                                                CornerRadius="{Binding System, Converter={x:Static converters:SystemMessageCornerRadiusConverter.Instance}}"
+                                                BoxShadow="{Binding ., Converter={x:Static converters:ChatBubbleShadowConverter.Instance}}"
                                                 Padding="{Binding System, Converter={x:Static converters:SystemMessagePaddingConverter.Instance}}"
                                                 MaxWidth="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).ChatBubbleMaxWidth}"
                                                 HorizontalAlignment="{Binding Alignment}"
@@ -996,26 +1016,25 @@
                     </Grid>
                 </Border>
 
-                <!-- ── Composer ── -->
-                <Border Grid.Row="5"
-                        BorderBrush="{DynamicResource AuraDividerBrush}"
-                        BorderThickness="0,1,0,0"
-                        Padding="16,10">
-                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                <!-- ── Composer: one glass capsule holding attach, field, hint and
+                     send, as the macOS client's ── -->
+                <Border Grid.Row="5" Padding="20,8,20,14">
+                  <Border Classes="capsule" Padding="10,6,6,6">
+                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
                         <Button Grid.Column="0" Classes="icon"
                                 Command="{Binding AttachFileCommand}"
-                                Width="36" Height="36"
-                                CornerRadius="{StaticResource AuraRadiusControl}"
+                                Width="32" Height="32"
+                                CornerRadius="{StaticResource AuraRadiusPill}"
                                 Padding="0"
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 ToolTip.Tip="Send encrypted file (max 25 MiB)">
-                            <controls:AuraIcon Data="{StaticResource AuraIconPlus}" Width="18" Height="18"
+                            <controls:AuraIcon Data="{StaticResource AuraIconPaperclip}"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Button>
 
                         <TextBox x:Name="Composer"
-                                 Grid.Column="1" Classes="aura"
+                                 Grid.Column="1" Classes="bare"
                                  Text="{Binding MessageInput}"
                                  PlaceholderText="{Binding ComposerPlaceholder}"
                                  MaxLength="4000"
@@ -1037,19 +1056,19 @@
                                    VerticalAlignment="Center"
                                    IsVisible="{Binding IsChatFirst}"/>
 
-                        <Button Grid.Column="3" Classes="brand"
+                        <Button Grid.Column="3" Classes="send"
+                                Classes.ready="{Binding MessageInput, Converter={StaticResource StringToBoolConverter}}"
                                 Command="{Binding SendMessageCommand}"
                                 Width="36" Height="36"
-                                CornerRadius="{StaticResource AuraRadiusControl}"
                                 Padding="0"
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 ToolTip.Tip="Send (Enter)">
                             <controls:AuraIcon Data="{StaticResource AuraIconSendHorizontal}" Width="16" Height="16"
-                                               Foreground="White"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Button>
                     </Grid>
+                  </Border>
                 </Border>
             </Grid>
 
@@ -1371,20 +1390,19 @@
                     </ScrollViewer>
 
                     <!-- ============ d. Command HUD ============
-                         Docked CommandBar at the pane bottom — the desktop
-                         translation of the floating macOS capsule. -->
-                    <CommandBar Grid.Row="2"
-                                Background="{DynamicResource AuraChromeOverlayBrush}"
-                                BorderBrush="{DynamicResource AuraDividerBrush}"
-                                BorderThickness="0,1,0,0"
-                                IsEnabled="{Binding IsAuthenticated}">
-                        <CommandBar.Content>
-                            <Grid ColumnDefinitions="Auto,Auto,Auto,*"
-                                  Margin="14,10"
-                                  VerticalAlignment="Center">
+                         A glass card floating above the pane's foot, as the
+                         macOS client's: mic / deafen and the input meter on
+                         one row, the transmission chip under them. -->
+                    <Border Grid.Row="2" Classes="capsule"
+                            Margin="16,8,16,16" Padding="14,12"
+                            IsEnabled="{Binding IsAuthenticated}">
+                        <StackPanel Spacing="{StaticResource AuraSpace12}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
 
-                                <!-- Mic / deafen segmented pair in a well -->
-                                <Border Grid.Column="0" Classes="well" Padding="3">
+                                <!-- Mic / deafen segmented pair in a capsule well -->
+                                <Border Grid.Column="0" Classes="well" Padding="3"
+                                        CornerRadius="{StaticResource AuraRadiusPill}"
+                                        VerticalAlignment="Center">
                                     <StackPanel Orientation="Horizontal" Spacing="2">
                                         <!-- Plain buttons whose look follows the view model one
                                              way. A ToggleButton flips itself AND runs the command,
@@ -1410,9 +1428,9 @@
                                     </StackPanel>
                                 </Border>
 
-                                <!-- Input meter -->
-                                <StackPanel Grid.Column="1" Spacing="{StaticResource AuraSpace3}"
-                                            Margin="12,0,0,0" VerticalAlignment="Center">
+                                <!-- Input meter, stretched across the rest of the row -->
+                                <StackPanel Grid.Column="1" Spacing="{StaticResource AuraSpace5}"
+                                            Margin="14,0,0,0" VerticalAlignment="Center">
                                     <Grid ColumnDefinitions="Auto,*,Auto">
                                         <TextBlock Grid.Column="0" Classes="monoLabel" Text="INPUT"/>
                                         <TextBlock Grid.Column="2" Classes="mono"
@@ -1423,50 +1441,52 @@
                                     </Grid>
                                     <controls:BarMeter Mode="Level"
                                                        Level="{Binding VoiceRail.InputLevel}"
-                                                       BarCount="9" BarGap="2" BarRadius="1"
-                                                       Width="72" Height="14"
+                                                       BarCount="9" BarGap="4" BarRadius="2"
+                                                       Height="6"
+                                                       HorizontalAlignment="Stretch"
                                                        BarBrush="{DynamicResource AuraAccentBrush}"
-                                                       DimBarBrush="{DynamicResource AuraTrackBrush}"/>
+                                                       DimBarBrush="{DynamicResource AuraWellBrush}"/>
                                 </StackPanel>
 
-                                <!-- PTT chip: `PTT · Ctrl+Space`, `held 0:04` while down -->
-                                <Border Grid.Column="2" Classes="well"
-                                        Padding="10,6" Margin="12,0,0,0"
-                                        VerticalAlignment="Center"
-                                        ToolTip.Tip="{Binding HudModeTip}">
-                                    <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace5}">
-                                        <TextBlock Classes="mono" Text="{Binding HudModeLabel}"
-                                                   FontSize="{StaticResource AuraMono10}"
-                                                   Foreground="{DynamicResource AuraTextDimBrush}"/>
-                                        <TextBlock Classes="mono" Text="{Binding HudModeKey}"
-                                                   FontSize="{StaticResource AuraMono10}"
-                                                   Foreground="{DynamicResource AuraAccentBrush}"/>
-                                        <TextBlock Classes="mono"
-                                                   Text="{Binding PttHeldLabel}"
-                                                   FontSize="{StaticResource AuraMono9}"
-                                                   Foreground="{DynamicResource AuraTextFaintBrush}"
-                                                   IsVisible="{Binding IsPushToTalkHeld}"/>
-                                    </StackPanel>
-                                </Border>
-
-                                <!-- RNNoise: ToggleSwitch, the Fluent idiom. Stage only —
-                                     the 336px rail has no room for it. -->
-                                <StackPanel Grid.Column="3" Orientation="Horizontal"
+                                <!-- RNNoise: ToggleSwitch. Stage only — the 336px rail
+                                     has no room for it. -->
+                                <StackPanel Grid.Column="2" Orientation="Horizontal"
                                             Spacing="{StaticResource AuraSpace8}"
-                                            HorizontalAlignment="Right"
+                                            Margin="14,0,0,0"
                                             VerticalAlignment="Center"
                                             IsVisible="{Binding IsVoiceFocus}">
                                     <TextBlock Text="RNNoise"
                                                FontSize="{StaticResource AuraFont12}"
                                                Foreground="{DynamicResource AuraTextDimBrush}"
                                                VerticalAlignment="Center"/>
-                                    <ToggleSwitch IsChecked="{Binding RnnoiseEnabled}"
-                                                  OnContent="" OffContent=""
+                                    <ToggleSwitch Classes="settingSwitch"
+                                                  IsChecked="{Binding RnnoiseEnabled}"
+                                                  AutomationProperties.Name="RNNoise"
                                                   VerticalAlignment="Center"/>
                                 </StackPanel>
                             </Grid>
-                        </CommandBar.Content>
-                    </CommandBar>
+
+                            <!-- Transmission chip: `PTT · Ctrl+Space`, `held 0:04` while down -->
+                            <Border Classes="well"
+                                    CornerRadius="{StaticResource AuraRadiusPill}"
+                                    Padding="14,7"
+                                    ToolTip.Tip="{Binding HudModeTip}">
+                                <StackPanel Orientation="Horizontal" Spacing="{StaticResource AuraSpace5}">
+                                    <TextBlock Classes="mono" Text="{Binding HudModeLabel}"
+                                               FontSize="{StaticResource AuraMono10}"
+                                               Foreground="{DynamicResource AuraTextDimBrush}"/>
+                                    <TextBlock Classes="mono" Text="{Binding HudModeKey}"
+                                               FontSize="{StaticResource AuraMono10}"
+                                               Foreground="{DynamicResource AuraAccentBrush}"/>
+                                    <TextBlock Classes="mono"
+                                               Text="{Binding PttHeldLabel}"
+                                               FontSize="{StaticResource AuraMono9}"
+                                               Foreground="{DynamicResource AuraTextFaintBrush}"
+                                               IsVisible="{Binding IsPushToTalkHeld}"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
         </Grid>

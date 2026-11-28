@@ -1,6 +1,9 @@
-<!-- Shared control styles built on the design tokens. Fluent idioms only:
-     flat panels with a single 1px rim, `white @ 6%` hover with no scale,
-     8/6/4 radii, accent-underlined TextBox. -->
+<!-- Shared control styles built on the design tokens, in the macOS client's
+     shape language on every platform: rounded panels and rows, glass capsules
+     (Border.capsule, Button.glass) with a light-to-dark rim and soft shadow,
+     circular avatars, `white @ 6%` hover with no scale, accent-underlined
+     TextBox. Glass has no backdrop blur: Avalonia can only blur behind the
+     whole window. -->
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="using:Aura.Desktop.Controls">
@@ -101,6 +104,18 @@
         </Style.Animations>
     </Style>
 
+    <!-- Glass capsule (macOS auraGlass): panel fill, a rim that is light on
+         top and dark underneath, and a soft drop shadow. The composer, the
+         voice card and the Settings button. No backdrop blur: Avalonia can
+         only blur behind the whole window. -->
+    <Style Selector="Border.capsule">
+        <Setter Property="Background" Value="{DynamicResource AuraPanelFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraGlassRimBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusCapsule}"/>
+        <Setter Property="BoxShadow" Value="0 8 15 0 #26000000"/>
+    </Style>
+
     <!-- Inset well for segmented controls and meters -->
     <Style Selector="Border.well">
         <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
@@ -130,7 +145,9 @@
 
     <Style Selector="Button.row">
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="BorderThickness" Value="0"/>
+        <!-- A transparent 1px rim, so the current row's rim doesn't shift content. -->
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusTile}"/>
         <Setter Property="HorizontalAlignment" Value="Stretch"/>
         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
@@ -149,6 +166,51 @@
     </Style>
     <Style Selector="Button.row:pressed /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource AuraHoverOverlayBrush}"/>
+    </Style>
+
+    <!-- A row that can't be clicked stays flat; Fluent's disabled fill would
+         paint it as a grey slab. -->
+    <Style Selector="Button.row:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+    </Style>
+
+    <!-- The channel you're in: primary @ 20% with a primary @ 32% rim, the
+         macOS client's selected row, held through hover and press. -->
+    <Style Selector="Button.row.current">
+        <Setter Property="Background" Value="{DynamicResource AuraPrimaryTintBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPrimaryBorderBrush}"/>
+    </Style>
+    <Style Selector="Button.row.current:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraPrimaryTintBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPrimaryBorderBrush}"/>
+    </Style>
+    <Style Selector="Button.row.current:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraPrimaryTintBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraPrimaryBorderBrush}"/>
+    </Style>
+
+    <!-- Full-width glass button (the sidebar's Settings), macOS auraGlass at r18.
+         Icon and label take the button's foreground. -->
+    <Style Selector="Button.glass">
+        <Setter Property="Background" Value="{DynamicResource AuraPanelFillBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraGlassRimBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusCard}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextMidBrush}"/>
+        <Setter Property="HorizontalAlignment" Value="Stretch"/>
+        <Setter Property="HorizontalContentAlignment" Value="Center"/>
+        <Setter Property="Padding" Value="12,10"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.glass:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraGlassRimBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+    </Style>
+    <Style Selector="Button.glass:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource AuraGlassRimBrush}"/>
     </Style>
 
     <!-- Flat icon button (header toggles, HUD segments, attach) -->
@@ -274,7 +336,7 @@
         <Setter Property="Padding" Value="0"/>
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusControl}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusPill}"/>
         <Setter Property="HorizontalContentAlignment" Value="Center"/>
         <Setter Property="VerticalContentAlignment" Value="Center"/>
         <Setter Property="Cursor" Value="Hand"/>
@@ -309,6 +371,58 @@
     <Style Selector="TextBox.aura:focus /template/ Border#PART_BorderElement">
         <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
         <Setter Property="BorderBrush" Value="{DynamicResource AuraAccentBrush}"/>
+    </Style>
+
+    <!-- A field inside a capsule: no fill, rim or underline of its own, in any
+         state; the capsule around it is the control. -->
+    <Style Selector="TextBox.bare">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="FontSize" Value="{StaticResource AuraFont13}"/>
+        <Setter Property="Padding" Value="4,8"/>
+    </Style>
+    <Style Selector="TextBox.bare /template/ Border#PART_BorderElement">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style Selector="TextBox.bare:pointerover /template/ Border#PART_BorderElement">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+    </Style>
+    <Style Selector="TextBox.bare:focus /template/ Border#PART_BorderElement">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+    </Style>
+
+    <!-- Round send button: a quiet well until there is something to send, then
+         the brand gradient with a shadow, as macOS's paperplane button. -->
+    <Style Selector="Button.send">
+        <Setter Property="CornerRadius" Value="{StaticResource AuraRadiusPill}"/>
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextDimBrush}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+    <Style Selector="Button.send:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraWellBrush}"/>
+        <Setter Property="Foreground" Value="{DynamicResource AuraTextBrush}"/>
+    </Style>
+    <Style Selector="Button.send.ready">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.send.ready /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="BoxShadow" Value="0 3 8 0 #40000000"/>
+    </Style>
+    <Style Selector="Button.send.ready:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style Selector="Button.send.ready:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AuraBrandGradientBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
     </Style>
 
     <!-- ComboBox to match TextBox.aura: the same well, radius and type size,
