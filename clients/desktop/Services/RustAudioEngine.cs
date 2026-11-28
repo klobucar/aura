@@ -68,7 +68,11 @@ public class RustAudioEngine : IDisposable
         var hw = (inputDevice != null || outputDevice != null)
             ? AudioHardware.NewWithDevices(inputDevice, outputDevice)
             : new AudioHardware();
-        return hw ?? throw new Exception("Failed to initialize Rust Audio Engine");
+        if (hw == null) throw new Exception("Failed to initialize Rust Audio Engine");
+        // The output stream plays silence until it is started; capture is
+        // started separately, when the mic opens.
+        hw.StartPlayback();
+        return hw;
     }
 
     /// <summary>
