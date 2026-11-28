@@ -354,11 +354,13 @@
                                                  rimmed row (Button.row.current), as on macOS. -->
                                             <Button Classes="row"
                                                     Classes.current="{Binding IsCurrent}"
+                                                    Tag="{Binding CanManage}"
+                                                    ContextRequested="OnGuardedContextRequested"
                                                     Padding="0"
                                                     Command="{Binding $parent[ItemsControl].((vm:MainWindowViewModel)DataContext).JoinChannelCommand}"
                                                     CommandParameter="{Binding}">
                                                 <Button.ContextMenu>
-                                                    <ContextMenu IsVisible="{Binding CanManage}">
+                                                    <ContextMenu>
                                                         <MenuItem Header="Edit channel…" Command="{Binding EditCommand}"/>
                                                         <MenuItem Header="Delete channel…" Command="{Binding DeleteCommand}"/>
                                                     </ContextMenu>
@@ -404,12 +406,14 @@
                                                     <DataTemplate x:DataType="vm:User">
                                                         <Button Classes="row"
                                                                 Margin="12,1,0,1"
+                                                                Tag="{Binding CanAdjust}"
+                                                                ContextRequested="OnGuardedContextRequested"
                                                                 Padding="0"
                                                                 CornerRadius="{StaticResource AuraRadiusControl}"
                                                                 Command="{Binding OpenProfileCommand}"
                                                                 ToolTip.Tip="{Binding Name}">
                                                         <Button.ContextMenu>
-                                                            <ContextMenu IsVisible="{Binding CanAdjust}">
+                                                            <ContextMenu>
                                                                 <MenuItem Header="{Binding LocalMuteLabel}" Command="{Binding ToggleLocalMuteCommand}"/>
                                                                 <MenuItem Header="Volume">
                                                                     <MenuItem Header="0%" Command="{Binding SetVolumeCommand}" CommandParameter="0"/>
@@ -865,6 +869,8 @@
                                         </DockPanel>
 
                                         <Border Background="{Binding ., Converter={x:Static converters:ChatBubbleColorConverter.Instance}}"
+                                                Tag="{Binding !System}"
+                                                ContextRequested="OnGuardedContextRequested"
                                                 BorderBrush="{Binding ., Converter={x:Static converters:ChatBubbleBorderConverter.Instance}}"
                                                 BorderThickness="1"
                                                 CornerRadius="{Binding System, Converter={x:Static converters:SystemMessageCornerRadiusConverter.Instance}}"
@@ -874,7 +880,7 @@
                                                 HorizontalAlignment="{Binding Alignment}"
                                                 Opacity="{Binding BubbleOpacity}">
                                             <Border.ContextMenu>
-                                                <ContextMenu IsVisible="{Binding !System}">
+                                                <ContextMenu>
                                                     <MenuItem Header="Reply" Command="{Binding ReplyCommand}"/>
                                                     <MenuItem Header="Copy" Command="{Binding CopyCommand}"/>
                                                 </ContextMenu>

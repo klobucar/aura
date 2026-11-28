@@ -280,6 +280,21 @@ public partial class MainWindow : Window
         };
     }
 
+    /// <summary>
+    /// Right-click on a row or bubble whose menu doesn't apply: its Tag is
+    /// bound to the permission (CanManage, CanAdjust, !System), and false
+    /// marks the request handled so the ContextMenu never opens. The menus
+    /// used to hide themselves with IsVisible, which doesn't work: a menu
+    /// only takes its owner's DataContext as it opens, so the binding hasn't
+    /// resolved yet. It opened as an invisible popup that took every click
+    /// and key, and the window looked frozen (your own name, a channel you
+    /// can't manage, a system notice).
+    /// </summary>
+    private void OnGuardedContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (sender is Control { Tag: false }) e.Handled = true;
+    }
+
     private Color ThemedColor(string key, Color fallback) =>
         Application.Current is { } app &&
         app.Resources.TryGetResource(key, ActualThemeVariant, out var value) &&
